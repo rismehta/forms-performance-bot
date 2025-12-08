@@ -17,10 +17,10 @@ import { loadConfig } from './utils/config-loader.js';
  */
 async function run() {
   try {
-    core.info('🚀 Starting Performance Bot analysis...');
+    core.info(' Starting Performance Bot analysis...');
 
     // Load configuration
-    core.info('📋 Loading configuration...');
+    core.info(' Loading configuration...');
     const config = await loadConfig();
 
     // Get GitHub context
@@ -63,21 +63,43 @@ async function run() {
     const customFunctionAnalyzer = new CustomFunctionAnalyzer(config);
 
     // Analyze both URLs
-    core.info('📥 Fetching and analyzing before URL...');
+    core.info(' Fetching and analyzing before URL...');
     const beforeData = await urlAnalyzer.analyze(urls.before);
+    
+    // Validate that form JSON was extracted from before URL
+    if (!beforeData.formJson) {
+      const errorMsg = beforeData.jsonErrors && beforeData.jsonErrors.length > 0
+        ? `Failed to extract form JSON from before URL: ${beforeData.jsonErrors[0].message}`
+        : 'Failed to extract form JSON from before URL. No form JSON found in the page.';
+      core.error(errorMsg);
+      core.setFailed(errorMsg);
+      return;
+    }
+    core.info(` Form JSON extracted from before URL (${JSON.stringify(beforeData.formJson).length} bytes)`);
 
-    core.info('📥 Fetching and analyzing after URL...');
+    core.info(' Fetching and analyzing after URL...');
     const afterData = await urlAnalyzer.analyze(urls.after);
+    
+    // Validate that form JSON was extracted from after URL
+    if (!afterData.formJson) {
+      const errorMsg = afterData.jsonErrors && afterData.jsonErrors.length > 0
+        ? `Failed to extract form JSON from after URL: ${afterData.jsonErrors[0].message}`
+        : 'Failed to extract form JSON from after URL. No form JSON found in the page.';
+      core.error(errorMsg);
+      core.setFailed(errorMsg);
+      return;
+    }
+    core.info(` Form JSON extracted from after URL (${JSON.stringify(afterData.formJson).length} bytes)`);
 
     // Get JavaScript and CSS files from PR branch
-    core.info('📥 Fetching JavaScript files from PR branch...');
+    core.info(' Fetching JavaScript files from PR branch...');
     const jsFiles = await fetchJSFilesFromPR(context, octokit);
     
-    core.info('📥 Fetching CSS files from PR branch...');
+    core.info(' Fetching CSS files from PR branch...');
     const cssFiles = await fetchCSSFilesFromPR(context, octokit);
 
     // Perform form-specific analyses IN PARALLEL for speed
-    core.info('🔍 Running all analyses in parallel...');
+    core.info(' Running all analyses in parallel...');
     
     const [
       formStructureAnalysis,
@@ -125,7 +147,7 @@ async function run() {
     const formCSSAnalysis = { after: cssAnalysis, newIssues: cssAnalysis.issues, resolvedIssues: [] };
     const customFunctionAnalysis = customFunctionAnalyzer.compare(beforeCustomFunctions, afterCustomFunctions);
     
-    core.info('✅ All analyses completed');
+    core.info(' All analyses completed');
 
     const results = {
       formStructure: formStructureAnalysis,
@@ -141,7 +163,7 @@ async function run() {
     const reporter = new FormPRReporter(octokit, owner, repo, prNumber);
     await reporter.generateReport(results, urls);
 
-    core.info('✅ Performance analysis complete!');
+    core.info(' Performance analysis complete!');
 
   } catch (error) {
     core.setFailed(`Performance Bot failed: ${error.message}`);
