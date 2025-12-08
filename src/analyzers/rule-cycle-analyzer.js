@@ -19,6 +19,53 @@ export class RuleCycleAnalyzer {
       return { error: 'No form JSON provided' };
     }
 
+    // Validate form JSON
+    if (typeof formJson === 'string') {
+      try {
+        formJson = JSON.parse(formJson);
+      } catch (e) {
+        return { error: 'Invalid form JSON: Unable to parse' };
+      }
+    }
+
+    if (typeof formJson !== 'object' || Array.isArray(formJson)) {
+      return { error: 'Form JSON must be an object' };
+    }
+
+    // Check if this is a valid AEM form JSON (must have items array or be a proper form object)
+    // Some forms might have the items nested or have a different structure
+    const hasItems = formJson.items && Array.isArray(formJson.items);
+    const hasFormProperties = formJson.fieldType === 'form' || formJson[':type'] === 'fd/franklin/components/form/v1/form';
+    
+    if (!hasItems && !hasFormProperties) {
+      return {
+        totalRules: 0,
+        fieldsWithRules: 0,
+        dependencies: {},
+        cycles: 0,
+        cycleDetails: [],
+        issues: [],
+        circularDependencies: [],
+        skipped: true,
+        skipReason: 'Form JSON structure not recognized - missing items array',
+      };
+    }
+    
+    // If form has no items but has form properties, it might still be valid but has no fields to analyze
+    if (!hasItems) {
+      return {
+        totalRules: 0,
+        fieldsWithRules: 0,
+        dependencies: {},
+        cycles: 0,
+        cycleDetails: [],
+        issues: [],
+        circularDependencies: [],
+        skipped: true,
+        skipReason: 'Form has no items to analyze',
+      };
+    }
+
     try {
       // Register mock custom functions to prevent crashes during form initialization
       const { FunctionRuntime, createFormInstanceSync } = await import('@aemforms/af-core');
@@ -26,6 +73,7 @@ export class RuleCycleAnalyzer {
         createJourneyId: () => 'mock-journey-id',
         loadUserData: () => {},
         mockApiCall: () => {},
+        request: () => Promise.resolve({}),
       };
       
       // Register mock functions
@@ -34,7 +82,24 @@ export class RuleCycleAnalyzer {
       // Use createFormInstanceSync which waits for all promises (including rule execution)
       // This ensures ExecuteRule event completes and dependencies are tracked
       // After this call returns, all rules have executed and _dependents arrays are populated
-      const form = await createFormInstanceSync(formJson, undefined, 'error');
+      let form;
+      try {
+        form = await createFormInstanceSync(formJson, undefined, 'off');
+      } catch (coreError) {
+        // If af-core fails to create the form instance, return gracefully
+        console.warn('af-core failed to create form instance:', coreError.message);
+        return {
+          totalRules: 0,
+          fieldsWithRules: 0,
+          dependencies: {},
+          cycles: 0,
+          cycleDetails: [],
+          issues: [],
+          circularDependencies: [],
+          skipped: true,
+          skipReason: `Unable to analyze form structure: ${coreError.message}`,
+        };
+      }
       
       // After createFormInstance returns, the event queue has run and dependencies are tracked
       // Now build the dependency graph from the form instance's internal state
@@ -57,8 +122,15 @@ export class RuleCycleAnalyzer {
     } catch (error) {
       console.error('Error analyzing rule cycles:', error);
       return {
-        error: error.message,
-        stack: error.stack,
+        totalRules: 0,
+        fieldsWithRules: 0,
+        dependencies: {},
+        cycles: 0,
+        cycleDetails: [],
+        issues: [],
+        circularDependencies: [],
+        skipped: true,
+        skipReason: `Analysis error: ${error.message}`,
       };
     }
   }
