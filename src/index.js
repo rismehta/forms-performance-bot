@@ -103,7 +103,7 @@ async function run() {
     
     // Warn if both JSONs appear identical
     if (beforeJsonStr === afterJsonStr) {
-      core.warning('⚠️ WARNING: Before and After form JSONs are identical! This may indicate:');
+      core.warning('WARNING: Before and After form JSONs are identical! This may indicate:');
       core.warning('  1. The URLs are pointing to the same content (caching issue?)');
       core.warning('  2. The PR branch has not been deployed yet');
       core.warning('  3. The form has not changed between branches');
