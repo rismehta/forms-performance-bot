@@ -13,9 +13,10 @@ export class RuleCycleAnalyzer {
   /**
    * Analyze form JSON for rule cycles
    * @param {Object} formJson - Form JSON object
+   * @param {Array} jsFiles - Optional array of JS files from branch for loading real functions
    * @returns {Promise<Object>} Analysis results
    */
-  async analyze(formJson) {
+  async analyze(formJson, jsFiles = []) {
     if (!formJson) {
       return { error: 'No form JSON provided' };
     }
@@ -74,24 +75,43 @@ export class RuleCycleAnalyzer {
       // Register custom functions for form initialization
       const { FunctionRuntime, createFormInstanceSync } = await import('@aemforms/af-core');
       
-      // Extract ALL function names used in the form
-      // Note: We use mocks, not real implementations, because:
-      // 1. Can't safely execute arbitrary code in GitHub Actions
-      // 2. Can't resolve imports/requires from real functions
-      // 3. Rule cycle detection only needs field references ($form.fieldName), not function logic
-      // 4. af-core's RuleEngine tracks dependencies from expressions, not function internals
-      const functionNames = this.extractAllFunctionNames(formJson);
-      core.info(`Detected ${functionNames.length} function(s) used in form, registering mocks...`);
+      // Try to load real custom function implementations from the codebase
+      // This allows af-core to track dependencies from INSIDE custom functions
+      const customFunctionsPath = formJson.properties?.customFunctionsPath;
       
-      // Create generic mock implementations
-      // These are safe placeholders that allow af-core to parse and track field dependencies
+      let realFunctions = {};
+      let loadedCount = 0;
+      
+      if (customFunctionsPath && jsFiles && jsFiles.length > 0) {
+        const result = this.loadCustomFunctions(customFunctionsPath, jsFiles);
+        if (result) {
+          realFunctions = result.functions;
+          loadedCount = result.count;
+        }
+      }
+      
+      // Extract ALL function names used in the form
+      const functionNames = this.extractAllFunctionNames(formJson);
+      core.info(`Detected ${functionNames.length} function(s) in form, loaded ${loadedCount} real implementation(s)`);
+      
+      // Register real functions first (if any)
+      if (loadedCount > 0) {
+        FunctionRuntime.registerFunctions(realFunctions);
+      }
+      
+      // Create mocks for remaining functions
       const mockFunctions = {};
       functionNames.forEach(fnName => {
-        mockFunctions[fnName] = (...args) => Promise.resolve(null);
+        if (!realFunctions[fnName]) {
+          mockFunctions[fnName] = (...args) => Promise.resolve(null);
+        }
       });
       
-      FunctionRuntime.registerFunctions(mockFunctions);
-      core.info(`Registered ${functionNames.length} mock function(s) successfully`);
+      if (Object.keys(mockFunctions).length > 0) {
+        FunctionRuntime.registerFunctions(mockFunctions);
+      }
+      
+      core.info(`Registered ${loadedCount} real + ${Object.keys(mockFunctions).length} mock function(s)`);
       
       // Use createFormInstanceSync which waits for all promises (including rule execution)
       // This ensures ExecuteRule event completes and dependencies are tracked
@@ -154,6 +174,77 @@ export class RuleCycleAnalyzer {
         skipped: true,
         skipReason: `Analysis error: ${error.message}`,
       };
+    }
+  }
+
+  /**
+   * Load custom function implementations from the codebase
+   * @param {string} customFunctionsPath - Path like "/blocks/form/functions.js"
+   * @param {Array} jsFiles - Array of {filename, content} from branch
+   * @returns {Object|null} {functions: {...}, count: number} or null
+   */
+  loadCustomFunctions(customFunctionsPath, jsFiles) {
+    try {
+      // Find the functions file
+      const normalizedPath = customFunctionsPath.replace(/^\/+/, '');
+      const functionsFile = jsFiles.find(file => 
+        file.filename === normalizedPath || 
+        file.filename.endsWith(normalizedPath)
+      );
+
+      if (!functionsFile) {
+        core.info(`Custom functions file not found: ${customFunctionsPath}`);
+        return null;
+      }
+
+      core.info(`Found custom functions file: ${functionsFile.filename}`);
+
+      // Extract function exports using simple eval in isolated context
+      // Strategy: Let it fail if it needs imports/DOM - we'll catch and return partial results
+      const functions = {};
+      let code = functionsFile.content;
+
+      // Remove import statements (they'll fail anyway)
+      code = code.replace(/import\s+.*?from\s+['"].*?['"]\s*;?/g, '');
+      
+      // Wrap in try-catch per function to isolate failures
+      // Look for: export function name(...) or export const name = (...) =>
+      const functionPattern = /export\s+(?:function\s+(\w+)|const\s+(\w+)\s*=\s*(?:async\s+)?\(([^)]*)\)\s*=>)\s*({[\s\S]*?})/g;
+      
+      let match;
+      let extractedCount = 0;
+      
+      while ((match = functionPattern.exec(code)) !== null) {
+        const functionName = match[1] || match[2];
+        const params = match[3] || '';
+        const body = match[4];
+        
+        if (!functionName) continue;
+
+        try {
+          // Create a safe function wrapper that returns null on any error
+          // This allows af-core to track property access even if the function logic fails
+          const safeFunction = new Function('return function ' + functionName + '(' + params + ') { try { ' + 
+            body.slice(1, -1) + // Remove outer braces
+            ' } catch (e) { return null; } }')();
+          
+          functions[functionName] = safeFunction;
+          extractedCount++;
+        } catch (e) {
+          // This specific function failed to parse/create - skip it
+          core.info(`Could not load function ${functionName}: ${e.message}`);
+        }
+      }
+
+      if (extractedCount > 0) {
+        core.info(`Successfully extracted ${extractedCount} function(s) from ${functionsFile.filename}`);
+        return { functions, count: extractedCount };
+      }
+
+      return null;
+    } catch (error) {
+      core.warning(`Error loading custom functions: ${error.message}`);
+      return null;
     }
   }
 
