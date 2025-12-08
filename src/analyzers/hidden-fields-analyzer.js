@@ -210,42 +210,60 @@ export class HiddenFieldsAnalyzer {
    */
   detectUnnecessaryHiddenFields(hiddenFields, visibilityChanges) {
     const issues = [];
+    let foundInJS = 0;
 
     core.info(`[HiddenFields] Analyzing ${hiddenFields.length} hidden field(s) for unnecessary usage...`);
 
     hiddenFields.forEach((field, index) => {
       const { name, path, hasVisibleRule, hasVisibleEvent, visibleRule } = field;
       
-      core.info(`[HiddenFields] Field ${index + 1}/${hiddenFields.length}: "${name}" (path: "${path}")`);
-      core.info(`[HiddenFields]   - Has visible rule: ${hasVisibleRule}`);
-      core.info(`[HiddenFields]   - Has visible event: ${hasVisibleEvent}`);
-      
       // Check if field is ever made visible in JS
-      // Try matching by full path first (more accurate), then by name (fallback)
+      // Try multiple matching strategies for robustness:
+      // 1. Exact path match (most accurate)
+      // 2. Exact name match (fallback for simple cases)
+      // 3. Fuzzy match: any JS path ends with our path (handles parent path differences)
+      
       const jsVisibilityByPath = visibilityChanges[path];
       const jsVisibilityByName = visibilityChanges[name];
       
-      core.info(`[HiddenFields]   - Checking JS visibility by path "${path}": ${jsVisibilityByPath ? 'FOUND' : 'NOT FOUND'}`);
-      if (jsVisibilityByPath) {
-        core.info(`[HiddenFields]     → Made visible: ${jsVisibilityByPath.madeVisible}, Files: ${jsVisibilityByPath.files.map(f => f.filename).join(', ')}`);
-      }
-      
-      core.info(`[HiddenFields]   - Checking JS visibility by name "${name}": ${jsVisibilityByName ? 'FOUND' : 'NOT FOUND'}`);
-      if (jsVisibilityByName) {
-        core.info(`[HiddenFields]     → Made visible: ${jsVisibilityByName.madeVisible}, Files: ${jsVisibilityByName.files.map(f => f.filename).join(', ')}`);
+      let fuzzyMatch = null;
+      let fuzzyMatchPath = null;
+      if (!jsVisibilityByPath && !jsVisibilityByName) {
+        for (const [jsPath, jsVisibility] of Object.entries(visibilityChanges)) {
+          // Check if JS path ends with our path (e.g., "parentPanel.panel.field" matches "panel.field")
+          if (jsPath.endsWith(path) || jsPath.endsWith(`.${name}`)) {
+            fuzzyMatch = jsVisibility;
+            fuzzyMatchPath = jsPath;
+            break;
+          }
+        }
       }
       
       const madeVisibleInJS = 
         jsVisibilityByPath?.madeVisible === true || 
-        jsVisibilityByName?.madeVisible === true;
+        jsVisibilityByName?.madeVisible === true ||
+        fuzzyMatch?.madeVisible === true;
+
+      // Only log when we find a visibility change in JS (reduces noise)
+      if (jsVisibilityByPath) {
+        foundInJS++;
+        core.info(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by exact path match`);
+        core.info(`[HiddenFields]   → Made visible: ${jsVisibilityByPath.madeVisible}, Files: ${jsVisibilityByPath.files.map(f => f.filename).join(', ')}`);
+      } else if (jsVisibilityByName) {
+        foundInJS++;
+        core.info(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by name match`);
+        core.info(`[HiddenFields]   → Made visible: ${jsVisibilityByName.madeVisible}, Files: ${jsVisibilityByName.files.map(f => f.filename).join(', ')}`);
+      } else if (fuzzyMatch) {
+        foundInJS++;
+        core.info(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by fuzzy match (JS path: "${fuzzyMatchPath}")`);
+        core.info(`[HiddenFields]   → Made visible: ${fuzzyMatch.madeVisible}, Files: ${fuzzyMatch.files.map(f => f.filename).join(', ')}`);
+      }
 
       // Field is potentially unnecessary if:
       // 1. It has no visible rule in JSON
       // 2. It has no event that sets visibility
-      // 3. It's never made visible in JavaScript (checked by both path and name)
+      // 3. It's never made visible in JavaScript
       const isUnnecessary = !hasVisibleRule && !hasVisibleEvent && !madeVisibleInJS;
-
-      core.info(`[HiddenFields]   ✓ Result: ${isUnnecessary ? 'UNNECESSARY (will be flagged)' : 'OK (has visibility control)'}`);
 
       if (isUnnecessary) {
         issues.push({
@@ -271,6 +289,9 @@ export class HiddenFieldsAnalyzer {
         });
       }
     });
+
+    core.info(`[HiddenFields] Summary: ${foundInJS}/${hiddenFields.length} hidden fields have visibility controls in JS`);
+    core.info(`[HiddenFields] Found ${issues.length} unnecessary hidden field(s)`);
 
     return issues;
   }
