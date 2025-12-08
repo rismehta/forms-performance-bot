@@ -2,6 +2,8 @@
  * Analyzes hidden fields to detect unnecessary DOM bloat
  * Detects fields that are always hidden and only used for data storage
  */
+import * as core from '@actions/core';
+
 export class HiddenFieldsAnalyzer {
   constructor(config = null) {
     this.config = config;
@@ -18,8 +20,19 @@ export class HiddenFieldsAnalyzer {
       return { error: 'No form JSON provided' };
     }
 
+    core.info(`[HiddenFields] Starting analysis with ${jsFiles.length} JS file(s)`);
+    
     const hiddenFields = this.findHiddenFields(formJson);
+    core.info(`[HiddenFields] Found ${hiddenFields.length} hidden field(s) in form JSON`);
+    
     const fieldVisibilityChanges = this.analyzeJSForVisibilityChanges(jsFiles);
+    const visibilityChangeCount = Object.keys(fieldVisibilityChanges).length;
+    core.info(`[HiddenFields] Found visibility changes for ${visibilityChangeCount} field identifier(s) in JS`);
+    
+    if (visibilityChangeCount > 0) {
+      core.info(`[HiddenFields] Visibility changes detected for: ${Object.keys(fieldVisibilityChanges).slice(0, 5).join(', ')}${visibilityChangeCount > 5 ? '...' : ''}`);
+    }
+    
     const issues = this.detectUnnecessaryHiddenFields(hiddenFields, fieldVisibilityChanges);
 
     return {
@@ -90,9 +103,13 @@ export class HiddenFieldsAnalyzer {
    */
   analyzeJSForVisibilityChanges(jsFiles) {
     const visibilityChanges = {};
+    let totalMatches = 0;
+
+    core.info(`[HiddenFields] Scanning ${jsFiles.length} JS file(s) for visibility changes...`);
 
     jsFiles.forEach(file => {
       const { filename, content } = file;
+      let fileMatches = 0;
       
       // Pattern 1: globals.functions.setProperty(globals.form.fieldName, { visible: true/false })
       const setPropertyPattern = /globals\.functions\.setProperty\s*\(\s*globals\.form(?:\?\.)?([a-zA-Z0-9_.?]+)\s*,\s*\{[^}]*visible\s*:\s*(true|false)[^}]*\}/g;
@@ -101,6 +118,8 @@ export class HiddenFieldsAnalyzer {
       while ((match = setPropertyPattern.exec(content)) !== null) {
         const fieldPath = match[1];
         const visibleValue = match[2] === 'true';
+        fileMatches++;
+        totalMatches++;
         
         // Extract both field name AND full path for matching
         // e.g., "?.panel?.subPanel?.email" → path: "panel.subPanel.email", name: "email"
@@ -186,13 +205,29 @@ export class HiddenFieldsAnalyzer {
   detectUnnecessaryHiddenFields(hiddenFields, visibilityChanges) {
     const issues = [];
 
-    hiddenFields.forEach(field => {
+    core.info(`[HiddenFields] Analyzing ${hiddenFields.length} hidden field(s) for unnecessary usage...`);
+
+    hiddenFields.forEach((field, index) => {
       const { name, path, hasVisibleRule, hasVisibleEvent, visibleRule } = field;
+      
+      core.info(`[HiddenFields] Field ${index + 1}/${hiddenFields.length}: "${name}" (path: "${path}")`);
+      core.info(`[HiddenFields]   - Has visible rule: ${hasVisibleRule}`);
+      core.info(`[HiddenFields]   - Has visible event: ${hasVisibleEvent}`);
       
       // Check if field is ever made visible in JS
       // Try matching by full path first (more accurate), then by name (fallback)
       const jsVisibilityByPath = visibilityChanges[path];
       const jsVisibilityByName = visibilityChanges[name];
+      
+      core.info(`[HiddenFields]   - Checking JS visibility by path "${path}": ${jsVisibilityByPath ? 'FOUND' : 'NOT FOUND'}`);
+      if (jsVisibilityByPath) {
+        core.info(`[HiddenFields]     → Made visible: ${jsVisibilityByPath.madeVisible}, Files: ${jsVisibilityByPath.files.map(f => f.filename).join(', ')}`);
+      }
+      
+      core.info(`[HiddenFields]   - Checking JS visibility by name "${name}": ${jsVisibilityByName ? 'FOUND' : 'NOT FOUND'}`);
+      if (jsVisibilityByName) {
+        core.info(`[HiddenFields]     → Made visible: ${jsVisibilityByName.madeVisible}, Files: ${jsVisibilityByName.files.map(f => f.filename).join(', ')}`);
+      }
       
       const madeVisibleInJS = 
         jsVisibilityByPath?.madeVisible === true || 
@@ -203,6 +238,8 @@ export class HiddenFieldsAnalyzer {
       // 2. It has no event that sets visibility
       // 3. It's never made visible in JavaScript (checked by both path and name)
       const isUnnecessary = !hasVisibleRule && !hasVisibleEvent && !madeVisibleInJS;
+
+      core.info(`[HiddenFields]   ✓ Result: ${isUnnecessary ? 'UNNECESSARY (will be flagged)' : 'OK (has visibility control)'}`);
 
       if (isUnnecessary) {
         issues.push({

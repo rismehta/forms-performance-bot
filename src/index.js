@@ -1,5 +1,7 @@
 import * as core from '@actions/core';
 import * as github from '@actions/github';
+import { readdirSync, readFileSync, statSync } from 'fs';
+import { join } from 'path';
 import { URLAnalyzer } from './analyzers/url-analyzer.js';
 import { FormAnalyzer } from './analyzers/form-analyzer.js';
 import { FormEventsAnalyzer } from './analyzers/form-events-analyzer.js';
@@ -110,12 +112,9 @@ async function run() {
       core.warning('Analysis will continue but results may not show differences.');
     }
 
-    // Get JavaScript and CSS files from PR branch
-    core.info(' Fetching JavaScript files from PR branch...');
-    const jsFiles = await fetchJSFilesFromPR(context, octokit);
-    
-    core.info(' Fetching CSS files from PR branch...');
-    const cssFiles = await fetchCSSFilesFromPR(context, octokit);
+    // Load JavaScript and CSS files from checked-out repository (faster than API)
+    core.info('Loading JavaScript and CSS files from checked-out repository...');
+    const { jsFiles, cssFiles } = await loadFilesFromWorkspace();
 
     // Perform form-specific analyses IN PARALLEL for speed
     core.info('Running all analyses in parallel...');
@@ -266,7 +265,93 @@ function detectCriticalIssues(results) {
 }
 
 /**
- * Fetch ALL JavaScript files from the PR branch
+ * Load JavaScript and CSS files from the checked-out repository
+ * This is faster than fetching via GitHub API and works with the same files
+ * that RuleCycleAnalyzer uses for loading custom functions
+ */
+async function loadFilesFromWorkspace() {
+  const workspaceRoot = process.cwd();
+  const jsFiles = [];
+  const cssFiles = [];
+  
+  core.info(`Scanning workspace: ${workspaceRoot}`);
+  
+  // Recursively scan directory for JS and CSS files
+  function scanDirectory(dir, depth = 0) {
+    // Prevent infinite recursion and skip deep node_modules
+    if (depth > 10) return;
+    
+    try {
+      const entries = readdirSync(dir);
+      
+      for (const entry of entries) {
+        const fullPath = join(dir, entry);
+        
+        // Skip common ignore patterns
+        if (entry === 'node_modules' || 
+            entry === '.git' || 
+            entry === 'dist' ||
+            entry === 'coverage' ||
+            entry.startsWith('.')) {
+          continue;
+        }
+        
+        try {
+          const stats = statSync(fullPath);
+          
+          if (stats.isDirectory()) {
+            scanDirectory(fullPath, depth + 1);
+          } else if (stats.isFile()) {
+            const relativePath = fullPath.replace(workspaceRoot + '/', '');
+            
+            // JavaScript files
+            if ((entry.endsWith('.js') || entry.endsWith('.mjs')) &&
+                !relativePath.includes('test') &&
+                !relativePath.includes('__tests__') &&
+                !entry.includes('.test.') &&
+                !entry.includes('.spec.')) {
+              jsFiles.push({
+                filename: relativePath,
+                content: readFileSync(fullPath, 'utf-8')
+              });
+            }
+            
+            // CSS files
+            if (entry.endsWith('.css') &&
+                !relativePath.includes('test') &&
+                !relativePath.includes('__tests__')) {
+              cssFiles.push({
+                filename: relativePath,
+                content: readFileSync(fullPath, 'utf-8')
+              });
+            }
+          }
+        } catch (error) {
+          // Skip files/dirs we can't access
+          continue;
+        }
+      }
+    } catch (error) {
+      core.warning(`Could not scan directory ${dir}: ${error.message}`);
+    }
+  }
+  
+  scanDirectory(workspaceRoot);
+  
+  // Limit to reasonable numbers (same as API approach)
+  const jsFilesLimited = jsFiles.slice(0, 50);
+  const cssFilesLimited = cssFiles.slice(0, 30);
+  
+  core.info(`Found ${jsFiles.length} JS files (analyzing ${jsFilesLimited.length}), ${cssFiles.length} CSS files (analyzing ${cssFilesLimited.length})`);
+  
+  return {
+    jsFiles: jsFilesLimited,
+    cssFiles: cssFilesLimited
+  };
+}
+
+/**
+ * Fetch ALL JavaScript files from the PR branch (DEPRECATED - use loadFilesFromWorkspace instead)
  * Not just the diff - we need to scan all JS files to find hidden field references
  */
 async function fetchJSFilesFromPR(context, octokit) {
