@@ -1,5 +1,4 @@
 import puppeteer from 'puppeteer-core';
-import chromium from '@sparticuz/chromium';
 import { JSONExtractor } from '../extractors/json-extractor.js';
 
 /**
@@ -21,21 +20,26 @@ export class URLAnalyzer {
     try {
       console.log(`Launching headless browser for URL: ${url}`);
       
-      // Launch browser (uses local Chrome in dev, @sparticuz/chromium in GitHub Actions)
+      // Detect Chrome executable path
       const isCI = !!process.env.CI || !!process.env.GITHUB_ACTIONS;
       
       let executablePath;
       if (isCI) {
-        // GitHub Actions: use @sparticuz/chromium
-        executablePath = await chromium.executablePath();
+        // GitHub Actions: use pre-installed Chrome
+        executablePath = '/usr/bin/google-chrome';
       } else {
-        // Local development: use system Chrome
+        // Local development: use system Chrome (macOS)
         executablePath = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
       }
       
       browser = await puppeteer.launch({
-        args: isCI ? chromium.args : ['--no-sandbox', '--disable-setuid-sandbox'],
-        defaultViewport: isCI ? chromium.defaultViewport : { width: 1280, height: 720 },
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage', // Overcome limited resource problems
+          '--disable-gpu',
+        ],
+        defaultViewport: { width: 1280, height: 720 },
         executablePath,
         headless: true,
         ignoreHTTPSErrors: true,
