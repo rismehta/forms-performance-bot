@@ -83,12 +83,14 @@ export class RuleCycleAnalyzer {
       
       let realFunctions = {};
       let loadedCount = 0;
+      let functionFailures = null;
       
       if (customFunctionsPath) {
         const result = await this.loadCustomFunctions(customFunctionsPath);
         if (result) {
           realFunctions = result.functions;
           loadedCount = result.count;
+          functionFailures = result.failureTracker;
         }
       }
       
@@ -137,6 +139,23 @@ export class RuleCycleAnalyzer {
           skipped: true,
           skipReason: `Unable to analyze form structure: ${coreError.message}`,
         };
+      }
+      
+      // Log function execution failures if any occurred during rule execution
+      if (functionFailures && functionFailures.size > 0) {
+        core.info(`[CustomFunctions] ${functionFailures.size} function(s) encountered errors during execution:`);
+        let loggedCount = 0;
+        for (const [fnName, failure] of functionFailures.entries()) {
+          if (loggedCount < 5) { // Only log first 5 to avoid noise
+            const errorMessages = Array.from(failure.errors).join(', ');
+            core.info(`[CustomFunctions]   - ${fnName}(): ${failure.count} error(s) - ${errorMessages}`);
+            loggedCount++;
+          }
+        }
+        if (functionFailures.size > 5) {
+          core.info(`[CustomFunctions]   ... and ${functionFailures.size - 5} more function(s) with errors`);
+        }
+        core.info(`[CustomFunctions] Note: Errors are expected for functions accessing formData/globals in test context`);
       }
       
       // After createFormInstance returns, the event queue has run and dependencies are tracked
@@ -258,23 +277,41 @@ export class RuleCycleAnalyzer {
       const functions = {};
       let loadedCount = 0;
       
+      // Track function execution failures for debugging
+      const functionFailures = new Map(); // functionName -> { count, errors: Set }
+      
       for (const name of exportedNames) {
         if (typeof context[name] === 'function') {
           // Wrap in try-catch for safe execution
           // Custom functions may reference globals.form, formData, etc. that don't exist in test context
-          // Silently catch ALL errors and return null to prevent crashes
+          // Log failures but continue execution to prevent crashes
           functions[name] = function safeFunctionWrapper(...args) {
             try {
               const result = context[name].apply(this, args);
               
               // If result is a promise, catch rejections
               if (result && typeof result.then === 'function') {
-                return result.catch(() => null);
+                return result.catch((err) => {
+                  // Log promise rejection
+                  if (!functionFailures.has(name)) {
+                    functionFailures.set(name, { count: 0, errors: new Set() });
+                  }
+                  const failure = functionFailures.get(name);
+                  failure.count++;
+                  failure.errors.add(err?.message || 'Promise rejected');
+                  return null;
+                });
               }
               
               return result;
             } catch (e) {
-              // Silently handle errors - functions expect different runtime context
+              // Log sync error - functions expect different runtime context
+              if (!functionFailures.has(name)) {
+                functionFailures.set(name, { count: 0, errors: new Set() });
+              }
+              const failure = functionFailures.get(name);
+              failure.count++;
+              failure.errors.add(e?.message || 'Unknown error');
               return null;
             }
           };
@@ -283,7 +320,7 @@ export class RuleCycleAnalyzer {
       }
       
       core.info(`Successfully loaded ${loadedCount} real function(s)`);
-      return { functions, count: loadedCount };
+      return { functions, count: loadedCount, failureTracker: functionFailures };
       
     } catch (error) {
       core.warning(`Could not load custom functions: ${error.message}`);

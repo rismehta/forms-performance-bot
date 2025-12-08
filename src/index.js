@@ -344,6 +344,13 @@ async function loadFilesFromWorkspace() {
   
   core.info(`Found ${jsFiles.length} JS files (analyzing ${jsFilesLimited.length}), ${cssFiles.length} CSS files (analyzing ${cssFilesLimited.length})`);
   
+  // Log first few JS files to verify functions.js is included
+  const functionsJsIncluded = jsFilesLimited.some(f => f.filename.includes('functions.js'));
+  core.info(`functions.js included: ${functionsJsIncluded}`);
+  if (jsFilesLimited.length > 0) {
+    core.info(`Sample JS files: ${jsFilesLimited.slice(0, 5).map(f => f.filename).join(', ')}`);
+  }
+  
   return {
     jsFiles: jsFilesLimited,
     cssFiles: cssFilesLimited

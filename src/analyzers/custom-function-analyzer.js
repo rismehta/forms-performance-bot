@@ -1,5 +1,6 @@
 import * as acorn from 'acorn';
 import * as walk from 'acorn-walk';
+import * as core from '@actions/core';
 
 /**
  * Analyzes custom functions used in forms for performance anti-patterns
@@ -22,14 +23,27 @@ export class CustomFunctionAnalyzer {
       return { error: 'No form JSON provided' };
     }
 
+    core.info(`[CustomFunctions] Starting analysis with ${jsFiles.length} JS file(s)`);
+
     // Step 1: Extract function names from form JSON
     const functionNames = this.extractFunctionNames(formJson);
+    core.info(`[CustomFunctions] Extracted ${functionNames.length} custom function(s) from form JSON`);
 
     // Step 2: Find and analyze these functions in JS files
     const functionAnalyses = this.analyzeFunctionsInJS(functionNames, jsFiles);
+    core.info(`[CustomFunctions] Found ${functionAnalyses.length} function definition(s) in JS files`);
 
     // Step 3: Detect violations
     const violations = this.detectViolations(functionAnalyses);
+    
+    if (violations.length > 0) {
+      core.info(`[CustomFunctions] Detected ${violations.length} violation(s):`);
+      violations.forEach(v => {
+        core.info(`[CustomFunctions]   - ${v.functionName}() in ${v.file}: ${v.type}`);
+      });
+    } else {
+      core.info(`[CustomFunctions] No violations detected`);
+    }
 
     return {
       functionsFound: functionNames.length,
@@ -49,6 +63,17 @@ export class CustomFunctionAnalyzer {
    */
   extractFunctionNames(formJson) {
     const functionNames = new Set();
+    
+    // JavaScript keywords and built-in functions to exclude
+    const jsKeywords = new Set([
+      'if', 'else', 'for', 'while', 'do', 'switch', 'case', 'break', 'continue',
+      'return', 'throw', 'try', 'catch', 'finally', 'typeof', 'instanceof',
+      'new', 'delete', 'void', 'yield', 'await', 'async', 'function',
+      'true', 'false', 'null', 'undefined', 'NaN', 'Infinity',
+      'var', 'let', 'const', 'class', 'extends', 'super', 'this',
+      'Array', 'Object', 'String', 'Number', 'Boolean', 'Date', 'Math',
+      'parseInt', 'parseFloat', 'isNaN', 'isFinite', 'encodeURI', 'decodeURI'
+    ]);
 
     // Helper to extract function names from expressions
     const extractFromExpression = (expression) => {
@@ -59,8 +84,11 @@ export class CustomFunctionAnalyzer {
       let match;
 
       while ((match = functionPattern.exec(expression)) !== null) {
-        // Add the function name to our set (no filtering - matches RuleUtils logic)
-        functionNames.add(match[1]);
+        const fnName = match[1];
+        // Filter out JavaScript keywords
+        if (!jsKeywords.has(fnName)) {
+          functionNames.add(fnName);
+        }
       }
     };
 
@@ -220,6 +248,7 @@ export class CustomFunctionAnalyzer {
         const calleeName = this.getCallExpressionName(callNode.callee);
         
         if (calleeName === 'fetch' ||
+            calleeName === 'request' ||  // AEM Forms standard HTTP function
             calleeName === 'XMLHttpRequest' ||
             calleeName.includes('ajax') ||
             calleeName.includes('axios') ||
