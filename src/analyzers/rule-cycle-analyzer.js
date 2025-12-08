@@ -1,8 +1,10 @@
 import { createFormInstance } from '@aemforms/af-core';
 import * as core from '@actions/core';
 import { resolve } from 'path';
-import { existsSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import nodeCrypto from 'crypto';
+import vm from 'vm';
+import { pathToFileURL } from 'url';
 
 /**
  * Analyzes form rules for circular dependencies
@@ -78,7 +80,6 @@ export class RuleCycleAnalyzer {
       const { FunctionRuntime, createFormInstanceSync } = await import('@aemforms/af-core');
       
       // Try to load real custom function implementations from the checked-out repository
-      // With browser globals mocked, we can now load functions that depend on window/crypto
       const customFunctionsPath = formJson.properties?.customFunctionsPath;
       
       let realFunctions = {};
@@ -179,61 +180,47 @@ export class RuleCycleAnalyzer {
     }
   }
 
+
   /**
    * Load custom function implementations from the checked-out repository
+   * Uses vm.SourceTextModule to execute ESM modules in a controlled context
    * @param {string} customFunctionsPath - Path like "/blocks/form/functions.js"
    * @returns {Promise<Object|null>} {functions: {...}, count: number} or null
    */
   async loadCustomFunctions(customFunctionsPath) {
     if (!customFunctionsPath) {
-      core.info('No customFunctionsPath specified in form JSON');
       return null;
     }
 
     try {
-      // The repository is already checked out by the GitHub Action workflow
-      // process.cwd() returns: /home/runner/work/{owner}/{repo}
-      // customFunctionsPath is like: /blocks/form/functions.js
       const normalizedPath = customFunctionsPath.replace(/^\/+/, '');
-      const workingDir = process.cwd();
-      const absolutePath = resolve(workingDir, normalizedPath);
+      const absolutePath = resolve(process.cwd(), normalizedPath);
       
-      core.info(`Working directory: ${workingDir}`);
-      core.info(`Looking for custom functions at: ${absolutePath}`);
-      
-      // Check if file exists before trying to import
       if (!existsSync(absolutePath)) {
-        core.info(`File not found: ${absolutePath} - using mocks for all functions`);
+        core.info(`Custom functions file not found: ${absolutePath}`);
         return null;
       }
       
-      core.info(`File exists, attempting import...`);
-      core.info(`Absolute path: ${absolutePath}`);
+      core.info(`Loading custom functions from: ${absolutePath}`);
       
-      // Inject browser globals that the functions.js file expects
-      // Many AEM form functions check for window, document, crypto, etc.
-      const originalWindow = global.window;
-      const originalDocument = global.document;
-      const originalCrypto = global.crypto;
+      // Read the ESM module source code
+      const sourceCode = readFileSync(absolutePath, 'utf-8');
       
-      // Make crypto available as a bare identifier
-      // The functions.js uses 'crypto' at top level which needs to be in scope
+      // Setup browser globals before module evaluation
       if (!global.crypto) {
         try {
-          // Try to use Node.js Web Crypto API
           Object.defineProperty(global, 'crypto', {
             value: nodeCrypto.webcrypto || nodeCrypto,
             writable: true,
             configurable: true
           });
         } catch (e) {
-          core.info(`Could not set global.crypto: ${e.message}`);
+          // Ignore if crypto is already defined
         }
       }
       
-      // Mock window with minimal browser API
-      global.window = {
-        msCrypto: undefined, // Makes supportsES6 check pass
+      global.window = global.window || {
+        msCrypto: undefined,
         location: { href: '', protocol: 'https:' },
         navigator: { userAgent: 'Node.js' },
         document: {},
@@ -244,8 +231,7 @@ export class RuleCycleAnalyzer {
         matchMedia: () => ({ matches: false }),
       };
       
-      // Mock document
-      global.document = {
+      global.document = global.document || {
         createElement: () => ({}),
         querySelector: () => null,
         querySelectorAll: () => [],
@@ -255,77 +241,59 @@ export class RuleCycleAnalyzer {
         addEventListener: () => {},
       };
       
-      try {
-        // Use dynamic import with file:// protocol for ESM modules
-        const fileUrl = `file://${absolutePath}`;
-        core.info(`Attempting import: ${fileUrl}`);
-        core.info(`Node version: ${process.version}`);
-        core.info(`Current working dir: ${process.cwd()}`);
-        core.info(`__dirname: ${typeof __dirname !== 'undefined' ? __dirname : 'undefined (ESM)'}`);
-        
-        const module = await import(fileUrl);
-        
-        core.info(`✓ Successfully imported module!`);
-        
-        // Extract all exported functions
-        const functions = {};
-        let loadedCount = 0;
-        
-        for (const [name, value] of Object.entries(module)) {
-          if (typeof value === 'function') {
-            // Wrap in try-catch to handle runtime errors gracefully (DOM access, etc.)
-            functions[name] = (...args) => {
-              try {
-                return value(...args);
-              } catch (e) {
-                // Function crashed (probably DOM/window access) - return null
-                core.warning(`Function '${name}' threw error during execution: ${e.message}`);
-                return null;
-              }
-            };
-            loadedCount++;
-          }
+      // Create a SourceTextModule to evaluate the ESM code
+      const module = new vm.SourceTextModule(sourceCode, {
+        identifier: pathToFileURL(absolutePath).href,
+        context: vm.createContext(global),
+        initializeImportMeta(meta) {
+          meta.url = pathToFileURL(absolutePath).href;
+        },
+        async importModuleDynamically(specifier, script) {
+          // If the module tries to import something, we need to resolve it
+          // For now, return an empty module to prevent crashes
+          core.info(`Module tried to import: ${specifier}`);
+          return new vm.SyntheticModule(['default'], function() {
+            this.setExport('default', {});
+          }, { context: vm.createContext(global) });
         }
-        
-        core.info(`Loaded ${loadedCount} real function(s) from ${absolutePath}`);
-        return { functions, count: loadedCount };
-        
-      } catch (importError) {
-        core.warning(`Failed to import functions: ${importError.message}`);
-        core.warning(`Error name: ${importError.name}`);
-        core.warning(`Error code: ${importError.code || 'none'}`);
-        core.warning(`Error stack: ${importError.stack}`);
-        
-        // The issue might be that ncc bundling breaks dynamic imports
-        // Try to read and log first few lines to verify file is readable
-        try {
-          const { readFileSync } = await import('fs');
-          const content = readFileSync(absolutePath, 'utf-8');
-          core.info(`File is readable, size: ${content.length} bytes`);
-          core.info(`First line: ${content.split('\n')[0]}`);
-        } catch (readError) {
-          core.warning(`Could not read file: ${readError.message}`);
+      });
+      
+      // Link and evaluate the module
+      await module.link(() => {
+        // Return empty module for any imports
+        return new vm.SyntheticModule(['default'], function() {
+          this.setExport('default', {});
+        }, { context: vm.createContext(global) });
+      });
+      
+      await module.evaluate();
+      
+      // Extract exported functions from the module namespace
+      const namespace = module.namespace;
+      const functions = {};
+      let loadedCount = 0;
+      
+      for (const key of Object.keys(namespace)) {
+        const value = namespace[key];
+        if (typeof value === 'function') {
+          functions[key] = (...args) => {
+            try {
+              return value(...args);
+            } catch (e) {
+              core.warning(`Function '${key}' threw error: ${e.message}`);
+              return null;
+            }
+          };
+          loadedCount++;
         }
-        
-        return null;
-      } finally {
-        // Restore original globals (clean up)
-        if (originalWindow === undefined) {
-          delete global.window;
-        } else {
-          global.window = originalWindow;
-        }
-        if (originalDocument === undefined) {
-          delete global.document;
-        } else {
-          global.document = originalDocument;
-        }
-        // Skip restoring crypto - it's often a read-only getter in Node.js
-        // If we set it, leave it; if we didn't, it's already correct
       }
+      
+      core.info(`Successfully loaded ${loadedCount} real function(s)`);
+      return { functions, count: loadedCount };
       
     } catch (error) {
       core.warning(`Could not load custom functions: ${error.message}`);
+      core.warning(`Stack: ${error.stack}`);
       return null;
     }
   }
