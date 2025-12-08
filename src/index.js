@@ -197,7 +197,12 @@ async function run() {
     
     // Generate and post PR comment
     const reporter = new FormPRReporter(octokit, owner, repo, prNumber);
-    await reporter.generateReport(results, urls);
+    await reporter.generateReport(results, {
+      before: urls.before,
+      after: urls.after,
+      beforeData, // Include performance metrics
+      afterData,  // Include performance metrics
+    });
 
     // Fail the build if critical issues are detected
     if (criticalIssues.hasCritical) {
