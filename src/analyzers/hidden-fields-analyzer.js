@@ -80,7 +80,10 @@ export class HiddenFieldsAnalyzer {
     if (node.items) {
       if (Array.isArray(node.items)) {
         node.items.forEach((child, index) => {
-          const childPath = path ? `${path}.items[${index}]` : `items[${index}]`;
+          // Use child's name if available, otherwise fall back to index
+          const childPath = child?.name 
+            ? (path ? `${path}.${child.name}` : child.name)
+            : (path ? `${path}.items[${index}]` : `items[${index}]`);
           this.findHiddenFields(child, fields, childPath);
         });
       }
@@ -88,7 +91,10 @@ export class HiddenFieldsAnalyzer {
 
     if (node[':items']) {
       Object.entries(node[':items']).forEach(([key, child]) => {
-        const childPath = path ? `${path}.${key}` : key;
+        // Use child's name property, NOT the key (which is the node ID)
+        const childPath = child?.name 
+          ? (path ? `${path}.${child.name}` : child.name)
+          : (path ? `${path}.${key}` : key);
         this.findHiddenFields(child, fields, childPath);
       });
     }

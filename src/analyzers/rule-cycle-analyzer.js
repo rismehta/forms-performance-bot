@@ -261,11 +261,20 @@ export class RuleCycleAnalyzer {
       for (const name of exportedNames) {
         if (typeof context[name] === 'function') {
           // Wrap in try-catch for safe execution
-          functions[name] = (...args) => {
+          // Custom functions may reference globals.form, formData, etc. that don't exist in test context
+          // Silently catch ALL errors and return null to prevent crashes
+          functions[name] = function safeFunctionWrapper(...args) {
             try {
-              return context[name](...args);
+              const result = context[name].apply(this, args);
+              
+              // If result is a promise, catch rejections
+              if (result && typeof result.then === 'function') {
+                return result.catch(() => null);
+              }
+              
+              return result;
             } catch (e) {
-              core.warning(`Function '${name}' threw error: ${e.message}`);
+              // Silently handle errors - functions expect different runtime context
               return null;
             }
           };
