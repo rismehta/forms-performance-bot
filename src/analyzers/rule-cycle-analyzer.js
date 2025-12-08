@@ -73,23 +73,18 @@ export class RuleCycleAnalyzer {
       
       // Extract ALL function names used in the form to register mocks
       const functionNames = this.extractAllFunctionNames(formJson);
-      core.info(`Detected ${functionNames.length} unique function(s) in form, registering mocks...`);
+      core.info(`Detected ${functionNames.length} unique function(s) in form, registering generic mocks...`);
       
-      // Create mock implementations for all detected functions
+      // Create generic mock implementations for all detected functions
+      // All mocks return a safe, generic value that won't crash af-core
       const mockFunctions = {};
       functionNames.forEach(fnName => {
-        // Mock functions that return promises
-        if (['request', 'loadUserData', 'docuploadAPI', 'fetchMergedBranchDetails'].includes(fnName)) {
-          mockFunctions[fnName] = () => Promise.resolve({});
-        }
-        // Mock functions that return basic values
-        else if (['createJourneyId', 'getJourneyId', 'getJourneyName', 'getBrowserDetail'].includes(fnName)) {
-          mockFunctions[fnName] = () => 'mock-value';
-        }
-        // Default: return empty function or undefined
-        else {
-          mockFunctions[fnName] = () => undefined;
-        }
+        // Generic mock that works for both sync and async calls
+        // Returns a value that can be used in conditions/expressions
+        mockFunctions[fnName] = (...args) => {
+          // Return a promise for potential async functions
+          return Promise.resolve(null);
+        };
       });
       
       // Register all mock functions
