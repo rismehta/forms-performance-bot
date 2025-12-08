@@ -118,7 +118,7 @@ async function run() {
     const cssFiles = await fetchCSSFilesFromPR(context, octokit);
 
     // Perform form-specific analyses IN PARALLEL for speed
-    core.info(' Running all analyses in parallel...');
+    core.info('Running all analyses in parallel...');
     
     const [
       formStructureAnalysis,
@@ -142,10 +142,25 @@ async function run() {
       }),
       
       // 4. Rule Cycles (async - uses createFormInstance)
-      Promise.all([
-        ruleCycleAnalyzer.analyze(beforeData.formJson),
-        ruleCycleAnalyzer.analyze(afterData.formJson)
-      ]).then(([beforeRuleCycles, afterRuleCycles]) => ({ beforeRuleCycles, afterRuleCycles })),
+      (async () => {
+        try {
+          core.info('Starting rule cycle analysis...');
+          const beforeRuleCycles = await ruleCycleAnalyzer.analyze(beforeData.formJson);
+          core.info(`Before rules: ${beforeRuleCycles.totalRules || 0} rules, ${beforeRuleCycles.cycles || 0} cycles`);
+          
+          const afterRuleCycles = await ruleCycleAnalyzer.analyze(afterData.formJson);
+          core.info(`After rules: ${afterRuleCycles.totalRules || 0} rules, ${afterRuleCycles.cycles || 0} cycles`);
+          
+          return { beforeRuleCycles, afterRuleCycles };
+        } catch (error) {
+          core.error(`Rule cycle analysis failed: ${error.message}`);
+          core.error(error.stack);
+          return {
+            beforeRuleCycles: { totalRules: 0, cycles: 0, error: error.message },
+            afterRuleCycles: { totalRules: 0, cycles: 0, error: error.message }
+          };
+        }
+      })(),
       
       // 5. Form HTML (synchronous)
       Promise.resolve(formHTMLAnalyzer.compare(beforeData.html, afterData.html)),
