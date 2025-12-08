@@ -33,12 +33,14 @@ export class RuleCycleAnalyzer {
       return { error: 'Form JSON must be an object' };
     }
 
-    // Check if this is a valid AEM form JSON (must have items array or be a proper form object)
-    // Some forms might have the items nested or have a different structure
-    const hasItems = formJson.items && Array.isArray(formJson.items);
+    // Check if this is a valid AEM form JSON
+    // AEM forms use :items (with colon) or items
+    const hasItems = (formJson[':items'] && typeof formJson[':items'] === 'object') || 
+                     (formJson.items && Array.isArray(formJson.items));
     const hasFormProperties = formJson.fieldType === 'form' || formJson[':type'] === 'fd/franklin/components/form/v1/form';
     
     if (!hasItems && !hasFormProperties) {
+      core.info('Form validation: No :items or items found, no form properties');
       return {
         totalRules: 0,
         fieldsWithRules: 0,
@@ -48,12 +50,13 @@ export class RuleCycleAnalyzer {
         issues: [],
         circularDependencies: [],
         skipped: true,
-        skipReason: 'Form JSON structure not recognized - missing items array',
+        skipReason: 'Form JSON structure not recognized - missing :items or items',
       };
     }
     
-    // If form has no items but has form properties, it might still be valid but has no fields to analyze
+    // If form has form properties but no items, skip (empty form)
     if (!hasItems) {
+      core.info('Form has no :items or items to analyze (empty form)');
       return {
         totalRules: 0,
         fieldsWithRules: 0,
@@ -68,27 +71,27 @@ export class RuleCycleAnalyzer {
     }
 
     try {
-      // Register mock custom functions to prevent crashes during form initialization
+      // Register custom functions for form initialization
       const { FunctionRuntime, createFormInstanceSync } = await import('@aemforms/af-core');
       
-      // Extract ALL function names used in the form to register mocks
+      // Extract ALL function names used in the form
+      // Note: We use mocks, not real implementations, because:
+      // 1. Can't safely execute arbitrary code in GitHub Actions
+      // 2. Can't resolve imports/requires from real functions
+      // 3. Rule cycle detection only needs field references ($form.fieldName), not function logic
+      // 4. af-core's RuleEngine tracks dependencies from expressions, not function internals
       const functionNames = this.extractAllFunctionNames(formJson);
-      core.info(`Detected ${functionNames.length} unique function(s) in form, registering generic mocks...`);
+      core.info(`Detected ${functionNames.length} function(s) used in form, registering mocks...`);
       
-      // Create generic mock implementations for all detected functions
-      // All mocks return a safe, generic value that won't crash af-core
+      // Create generic mock implementations
+      // These are safe placeholders that allow af-core to parse and track field dependencies
       const mockFunctions = {};
       functionNames.forEach(fnName => {
-        // Generic mock that works for both sync and async calls
-        // Returns a value that can be used in conditions/expressions
-        mockFunctions[fnName] = (...args) => {
-          // Return a promise for potential async functions
-          return Promise.resolve(null);
-        };
+        mockFunctions[fnName] = (...args) => Promise.resolve(null);
       });
       
-      // Register all mock functions
       FunctionRuntime.registerFunctions(mockFunctions);
+      core.info(`Registered ${functionNames.length} mock function(s) successfully`);
       
       // Use createFormInstanceSync which waits for all promises (including rule execution)
       // This ensures ExecuteRule event completes and dependencies are tracked

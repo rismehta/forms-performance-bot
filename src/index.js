@@ -141,7 +141,7 @@ async function run() {
         afterHiddenFields: hiddenFieldsAnalyzer.analyze(afterData.formJson, jsFiles)
       }),
       
-      // 4. Rule Cycles (async - uses createFormInstance)
+      // 4. Rule Cycles (async - uses createFormInstance with mock functions)
       (async () => {
         try {
           core.info('Starting rule cycle analysis...');
