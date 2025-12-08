@@ -4,7 +4,6 @@ import { resolve } from 'path';
 import { existsSync, readFileSync } from 'fs';
 import nodeCrypto from 'crypto';
 import vm from 'vm';
-import { pathToFileURL } from 'url';
 
 /**
  * Analyzes form rules for circular dependencies
@@ -183,7 +182,7 @@ export class RuleCycleAnalyzer {
 
   /**
    * Load custom function implementations from the checked-out repository
-   * Uses vm.SourceTextModule to execute ESM modules in a controlled context
+   * Removes export statements and evaluates in a sandboxed vm context
    * @param {string} customFunctionsPath - Path like "/blocks/form/functions.js"
    * @returns {Promise<Object|null>} {functions: {...}, count: number} or null
    */
@@ -204,83 +203,69 @@ export class RuleCycleAnalyzer {
       core.info(`Loading custom functions from: ${absolutePath}`);
       
       // Read the ESM module source code
-      const sourceCode = readFileSync(absolutePath, 'utf-8');
+      let sourceCode = readFileSync(absolutePath, 'utf-8');
       
-      // Setup browser globals before module evaluation
-      if (!global.crypto) {
-        try {
-          Object.defineProperty(global, 'crypto', {
-            value: nodeCrypto.webcrypto || nodeCrypto,
-            writable: true,
-            configurable: true
-          });
-        } catch (e) {
-          // Ignore if crypto is already defined
-        }
+      // Extract function names from export block (export { fn1, fn2, ... })
+      const exportMatch = sourceCode.match(/export\s*\{([^}]+)\}/s);
+      let exportedNames = [];
+      if (exportMatch) {
+        exportedNames = exportMatch[1]
+          .split(',')
+          .map(name => name.trim())
+          .filter(name => name && !name.startsWith('//'));
+        core.info(`Found ${exportedNames.length} exported names in export block`);
       }
       
-      global.window = global.window || {
-        msCrypto: undefined,
-        location: { href: '', protocol: 'https:' },
-        navigator: { userAgent: 'Node.js' },
-        document: {},
-        crypto: global.crypto,
-        addEventListener: () => {},
-        removeEventListener: () => {},
-        getComputedStyle: () => ({}),
-        matchMedia: () => ({ matches: false }),
-      };
+      // Remove ALL export statements to make it executable in non-ESM context
+      sourceCode = sourceCode
+        .replace(/export\s+function\s+/g, 'function ')  // export function -> function
+        .replace(/export\s*\{[^}]+\}/gs, '')             // remove export { ... }
+        .replace(/export\s+default\s+/g, '');            // export default (if any)
       
-      global.document = global.document || {
-        createElement: () => ({}),
-        querySelector: () => null,
-        querySelectorAll: () => [],
-        getElementById: () => null,
-        body: {},
-        head: {},
-        addEventListener: () => {},
-      };
-      
-      // Create a SourceTextModule to evaluate the ESM code
-      const module = new vm.SourceTextModule(sourceCode, {
-        identifier: pathToFileURL(absolutePath).href,
-        context: vm.createContext(global),
-        initializeImportMeta(meta) {
-          meta.url = pathToFileURL(absolutePath).href;
+      // Create sandbox with browser globals
+      const sandbox = {
+        console,
+        crypto: nodeCrypto.webcrypto || nodeCrypto,
+        window: {
+          msCrypto: undefined,
+          location: { href: '', protocol: 'https:' },
+          navigator: { userAgent: 'Node.js' },
+          document: {},
+          addEventListener: () => {},
+          removeEventListener: () => {},
+          getComputedStyle: () => ({}),
+          matchMedia: () => ({ matches: false }),
         },
-        async importModuleDynamically(specifier, script) {
-          // If the module tries to import something, we need to resolve it
-          // For now, return an empty module to prevent crashes
-          core.info(`Module tried to import: ${specifier}`);
-          return new vm.SyntheticModule(['default'], function() {
-            this.setExport('default', {});
-          }, { context: vm.createContext(global) });
-        }
+        document: {
+          createElement: () => ({}),
+          querySelector: () => null,
+          querySelectorAll: () => [],
+          getElementById: () => null,
+          body: {},
+          head: {},
+          addEventListener: () => {},
+        },
+      };
+      
+      // Create context and run script
+      const context = vm.createContext(sandbox);
+      vm.runInContext(sourceCode, context, {
+        filename: 'functions.js',
+        timeout: 10000,
       });
       
-      // Link and evaluate the module
-      await module.link(() => {
-        // Return empty module for any imports
-        return new vm.SyntheticModule(['default'], function() {
-          this.setExport('default', {});
-        }, { context: vm.createContext(global) });
-      });
-      
-      await module.evaluate();
-      
-      // Extract exported functions from the module namespace
-      const namespace = module.namespace;
+      // Collect exported functions from the context
       const functions = {};
       let loadedCount = 0;
       
-      for (const key of Object.keys(namespace)) {
-        const value = namespace[key];
-        if (typeof value === 'function') {
-          functions[key] = (...args) => {
+      for (const name of exportedNames) {
+        if (typeof context[name] === 'function') {
+          // Wrap in try-catch for safe execution
+          functions[name] = (...args) => {
             try {
-              return value(...args);
+              return context[name](...args);
             } catch (e) {
-              core.warning(`Function '${key}' threw error: ${e.message}`);
+              core.warning(`Function '${name}' threw error: ${e.message}`);
               return null;
             }
           };
