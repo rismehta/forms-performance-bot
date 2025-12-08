@@ -195,11 +195,12 @@ export class RuleCycleAnalyzer {
       core.info(`Working directory: ${workingDir}`);
       core.info(`Attempting to load custom functions from: ${absolutePath}`);
       
-      // Use dynamic import to load the module with all its dependencies
+      // Use dynamic import with file:// protocol for ESM modules
       // This automatically resolves ALL import chains!
-      const module = await import(absolutePath);
+      const fileUrl = `file://${absolutePath}`;
+      const module = await import(fileUrl);
       
-      core.info(`Successfully imported ${absolutePath}`);
+      core.info(`Successfully imported ${fileUrl}`);
       
       // Extract all exported functions
       const functions = {};
