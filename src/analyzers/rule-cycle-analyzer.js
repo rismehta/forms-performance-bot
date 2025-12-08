@@ -2,7 +2,7 @@ import { createFormInstance } from '@aemforms/af-core';
 import * as core from '@actions/core';
 import { resolve } from 'path';
 import { existsSync } from 'fs';
-import crypto from 'crypto';
+import nodeCrypto from 'crypto';
 
 /**
  * Analyzes form rules for circular dependencies
@@ -213,19 +213,27 @@ export class RuleCycleAnalyzer {
       // Many AEM form functions check for window, document, crypto, etc.
       const originalWindow = global.window;
       const originalDocument = global.document;
-      const originalCrypto = global.crypto;
       
       // Mock window with minimal browser API
+      // Note: Node.js has globalThis.crypto (Web Crypto API) since v15+
       global.window = {
         msCrypto: undefined, // Makes supportsES6 check pass
         location: { href: '', protocol: 'https:' },
         navigator: { userAgent: 'Node.js' },
         document: {},
+        crypto: globalThis.crypto || nodeCrypto, // Use Web Crypto API or Node crypto
         addEventListener: () => {},
         removeEventListener: () => {},
         getComputedStyle: () => ({}),
         matchMedia: () => ({ matches: false }),
       };
+      
+      // Make crypto available in global scope for ESM module evaluation
+      // The functions.js file uses 'crypto' directly at top level (line 24)
+      if (!globalThis.crypto && nodeCrypto.webcrypto) {
+        // Node 15+ has webcrypto
+        globalThis.crypto = nodeCrypto.webcrypto;
+      }
       
       // Mock document
       global.document = {
@@ -237,9 +245,6 @@ export class RuleCycleAnalyzer {
         head: {},
         addEventListener: () => {},
       };
-      
-      // Use Node.js crypto (it's already available in Node.js)
-      global.crypto = crypto;
       
       try {
         // Use dynamic import with file:// protocol for ESM modules
@@ -286,11 +291,7 @@ export class RuleCycleAnalyzer {
         } else {
           global.document = originalDocument;
         }
-        if (originalCrypto === undefined) {
-          delete global.crypto;
-        } else {
-          global.crypto = originalCrypto;
-        }
+        // Note: global.crypto is read-only in Node.js, so we don't touch it
       }
       
     } catch (error) {
