@@ -2,6 +2,7 @@ import { createFormInstance } from '@aemforms/af-core';
 import * as core from '@actions/core';
 import { resolve } from 'path';
 import { existsSync } from 'fs';
+import crypto from 'crypto';
 
 /**
  * Analyzes form rules for circular dependencies
@@ -77,8 +78,7 @@ export class RuleCycleAnalyzer {
       const { FunctionRuntime, createFormInstanceSync } = await import('@aemforms/af-core');
       
       // Try to load real custom function implementations from the checked-out repository
-      // This allows af-core to track dependencies from INSIDE custom functions
-      // The repository is already checked out by GitHub Actions, so we can import directly!
+      // With browser globals mocked, we can now load functions that depend on window/crypto
       const customFunctionsPath = formJson.properties?.customFunctionsPath;
       
       let realFunctions = {};
@@ -185,6 +185,11 @@ export class RuleCycleAnalyzer {
    * @returns {Promise<Object|null>} {functions: {...}, count: number} or null
    */
   async loadCustomFunctions(customFunctionsPath) {
+    if (!customFunctionsPath) {
+      core.info('No customFunctionsPath specified in form JSON');
+      return null;
+    }
+
     try {
       // The repository is already checked out by the GitHub Action workflow
       // process.cwd() returns: /home/runner/work/{owner}/{repo}
@@ -202,45 +207,94 @@ export class RuleCycleAnalyzer {
         return null;
       }
       
-      core.info(`File exists, attempting to import...`);
+      core.info(`File exists, injecting browser mocks and attempting import...`);
       
-      // Use dynamic import with file:// protocol for ESM modules
-      // This automatically resolves ALL import chains!
-      const fileUrl = `file://${absolutePath}`;
-      const module = await import(fileUrl);
+      // Inject browser globals that the functions.js file expects
+      // Many AEM form functions check for window, document, crypto, etc.
+      const originalWindow = global.window;
+      const originalDocument = global.document;
+      const originalCrypto = global.crypto;
       
-      core.info(`Successfully imported ${fileUrl}`);
+      // Mock window with minimal browser API
+      global.window = {
+        msCrypto: undefined, // Makes supportsES6 check pass
+        location: { href: '', protocol: 'https:' },
+        navigator: { userAgent: 'Node.js' },
+        document: {},
+        addEventListener: () => {},
+        removeEventListener: () => {},
+        getComputedStyle: () => ({}),
+        matchMedia: () => ({ matches: false }),
+      };
       
-      // Extract all exported functions
-      const functions = {};
-      let loadedCount = 0;
+      // Mock document
+      global.document = {
+        createElement: () => ({}),
+        querySelector: () => null,
+        querySelectorAll: () => [],
+        getElementById: () => null,
+        body: {},
+        head: {},
+        addEventListener: () => {},
+      };
       
-      for (const [name, value] of Object.entries(module)) {
-        if (typeof value === 'function') {
-          // Wrap in try-catch to handle runtime errors gracefully (DOM access, etc.)
-          functions[name] = (...args) => {
-            try {
-              return value(...args);
-            } catch (e) {
-              // Function crashed (probably DOM/window access) - return null
-              return null;
-            }
-          };
-          loadedCount++;
+      // Use Node.js crypto (it's already available in Node.js)
+      global.crypto = crypto;
+      
+      try {
+        // Use dynamic import with file:// protocol for ESM modules
+        const fileUrl = `file://${absolutePath}`;
+        const module = await import(fileUrl);
+        
+        core.info(`Successfully imported ${fileUrl}`);
+        
+        // Extract all exported functions
+        const functions = {};
+        let loadedCount = 0;
+        
+        for (const [name, value] of Object.entries(module)) {
+          if (typeof value === 'function') {
+            // Wrap in try-catch to handle runtime errors gracefully (DOM access, etc.)
+            functions[name] = (...args) => {
+              try {
+                return value(...args);
+              } catch (e) {
+                // Function crashed (probably DOM/window access) - return null
+                core.warning(`Function '${name}' threw error during execution: ${e.message}`);
+                return null;
+              }
+            };
+            loadedCount++;
+          }
+        }
+        
+        core.info(`Loaded ${loadedCount} real function(s) from ${absolutePath}`);
+        return { functions, count: loadedCount };
+        
+      } catch (importError) {
+        core.warning(`Failed to import functions: ${importError.message}`);
+        return null;
+      } finally {
+        // Restore original globals (clean up)
+        if (originalWindow === undefined) {
+          delete global.window;
+        } else {
+          global.window = originalWindow;
+        }
+        if (originalDocument === undefined) {
+          delete global.document;
+        } else {
+          global.document = originalDocument;
+        }
+        if (originalCrypto === undefined) {
+          delete global.crypto;
+        } else {
+          global.crypto = originalCrypto;
         }
       }
       
-      if (loadedCount > 0) {
-        core.info(`Loaded ${loadedCount} function(s) from ${filePath}`);
-        return { functions, count: loadedCount };
-      }
-      
-      core.info(`No functions found in ${filePath}`);
-      return null;
-      
     } catch (error) {
-      // Import failed - file not found, syntax error, or import chain broken
-      core.info(`Could not load custom functions: ${error.message}`);
+      core.warning(`Could not load custom functions: ${error.message}`);
       return null;
     }
   }
