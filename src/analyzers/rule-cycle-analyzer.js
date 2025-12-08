@@ -1,6 +1,7 @@
 import { createFormInstance } from '@aemforms/af-core';
 import * as core from '@actions/core';
 import { resolve } from 'path';
+import { existsSync } from 'fs';
 
 /**
  * Analyzes form rules for circular dependencies
@@ -193,7 +194,15 @@ export class RuleCycleAnalyzer {
       const absolutePath = resolve(workingDir, normalizedPath);
       
       core.info(`Working directory: ${workingDir}`);
-      core.info(`Attempting to load custom functions from: ${absolutePath}`);
+      core.info(`Looking for custom functions at: ${absolutePath}`);
+      
+      // Check if file exists before trying to import
+      if (!existsSync(absolutePath)) {
+        core.info(`File not found: ${absolutePath} - using mocks for all functions`);
+        return null;
+      }
+      
+      core.info(`File exists, attempting to import...`);
       
       // Use dynamic import with file:// protocol for ESM modules
       // This automatically resolves ALL import chains!
