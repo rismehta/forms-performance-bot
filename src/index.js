@@ -63,8 +63,9 @@ async function run() {
     const customFunctionAnalyzer = new CustomFunctionAnalyzer(config);
 
     // Analyze both URLs
-    core.info(' Fetching and analyzing before URL...');
+    core.info('Fetching and analyzing before URL...');
     const beforeData = await urlAnalyzer.analyze(urls.before);
+    core.info(`✓ Fetched before URL: ${beforeData.rawSize} bytes HTML`);
     
     // Validate that form JSON was extracted from before URL
     if (!beforeData.formJson) {
@@ -75,10 +76,15 @@ async function run() {
       core.setFailed(errorMsg);
       return;
     }
-    core.info(` Form JSON extracted from before URL (${JSON.stringify(beforeData.formJson).length} bytes)`);
+    const beforeJsonStr = JSON.stringify(beforeData.formJson);
+    const beforeFormId = beforeData.formJson.id || 'unknown';
+    const beforeFormTitle = beforeData.formJson.title || 'unknown';
+    core.info(`Form JSON extracted from before URL (${beforeJsonStr.length} bytes)`);
+    core.info(`Before form: id="${beforeFormId}", title="${beforeFormTitle}"`);
 
-    core.info(' Fetching and analyzing after URL...');
+    core.info('Fetching and analyzing after URL...');
     const afterData = await urlAnalyzer.analyze(urls.after);
+    core.info(`✓ Fetched after URL: ${afterData.rawSize} bytes HTML`);
     
     // Validate that form JSON was extracted from after URL
     if (!afterData.formJson) {
@@ -89,7 +95,20 @@ async function run() {
       core.setFailed(errorMsg);
       return;
     }
-    core.info(` Form JSON extracted from after URL (${JSON.stringify(afterData.formJson).length} bytes)`);
+    const afterJsonStr = JSON.stringify(afterData.formJson);
+    const afterFormId = afterData.formJson.id || 'unknown';
+    const afterFormTitle = afterData.formJson.title || 'unknown';
+    core.info(`Form JSON extracted from after URL (${afterJsonStr.length} bytes)`);
+    core.info(`After form: id="${afterFormId}", title="${afterFormTitle}"`);
+    
+    // Warn if both JSONs appear identical
+    if (beforeJsonStr === afterJsonStr) {
+      core.warning('⚠️ WARNING: Before and After form JSONs are identical! This may indicate:');
+      core.warning('  1. The URLs are pointing to the same content (caching issue?)');
+      core.warning('  2. The PR branch has not been deployed yet');
+      core.warning('  3. The form has not changed between branches');
+      core.warning('Analysis will continue but results may not show differences.');
+    }
 
     // Get JavaScript and CSS files from PR branch
     core.info(' Fetching JavaScript files from PR branch...');

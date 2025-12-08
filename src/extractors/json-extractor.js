@@ -64,13 +64,28 @@ export class JSONExtractor {
   }
 
   /**
-   * Parse JSON string safely
-   * @param {string} jsonText - JSON string
+   * Parse JSON string safely, handling double-encoded JSON
+   * @param {string} jsonText - JSON string (may be double-encoded)
    * @returns {Object|null} Parsed JSON or null
    */
   parseJSON(jsonText) {
     try {
-      return JSON.parse(jsonText);
+      let parsed = JSON.parse(jsonText);
+      
+      // Handle double-encoded JSON (common in AEM forms)
+      // If first parse returns a string, parse again
+      if (typeof parsed === 'string') {
+        console.log('Detected double-encoded JSON, parsing again...');
+        parsed = JSON.parse(parsed);
+      }
+      
+      // Validate that we got an object (the form JSON)
+      if (typeof parsed !== 'object' || parsed === null) {
+        console.warn('Parsed JSON is not an object:', typeof parsed);
+        return null;
+      }
+      
+      return parsed;
     } catch (error) {
       console.warn('Failed to parse JSON from div.form pre:', error.message);
       return null;
