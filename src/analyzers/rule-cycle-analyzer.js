@@ -207,33 +207,42 @@ export class RuleCycleAnalyzer {
         return null;
       }
       
-      core.info(`File exists, injecting browser mocks and attempting import...`);
+      core.info(`File exists, attempting import...`);
+      core.info(`Absolute path: ${absolutePath}`);
       
       // Inject browser globals that the functions.js file expects
       // Many AEM form functions check for window, document, crypto, etc.
       const originalWindow = global.window;
       const originalDocument = global.document;
+      const originalCrypto = global.crypto;
+      
+      // Make crypto available as a bare identifier
+      // The functions.js uses 'crypto' at top level which needs to be in scope
+      if (!global.crypto) {
+        try {
+          // Try to use Node.js Web Crypto API
+          Object.defineProperty(global, 'crypto', {
+            value: nodeCrypto.webcrypto || nodeCrypto,
+            writable: true,
+            configurable: true
+          });
+        } catch (e) {
+          core.info(`Could not set global.crypto: ${e.message}`);
+        }
+      }
       
       // Mock window with minimal browser API
-      // Note: Node.js has globalThis.crypto (Web Crypto API) since v15+
       global.window = {
         msCrypto: undefined, // Makes supportsES6 check pass
         location: { href: '', protocol: 'https:' },
         navigator: { userAgent: 'Node.js' },
         document: {},
-        crypto: globalThis.crypto || nodeCrypto, // Use Web Crypto API or Node crypto
+        crypto: global.crypto,
         addEventListener: () => {},
         removeEventListener: () => {},
         getComputedStyle: () => ({}),
         matchMedia: () => ({ matches: false }),
       };
-      
-      // Make crypto available in global scope for ESM module evaluation
-      // The functions.js file uses 'crypto' directly at top level (line 24)
-      if (!globalThis.crypto && nodeCrypto.webcrypto) {
-        // Node 15+ has webcrypto
-        globalThis.crypto = nodeCrypto.webcrypto;
-      }
       
       // Mock document
       global.document = {
@@ -249,9 +258,11 @@ export class RuleCycleAnalyzer {
       try {
         // Use dynamic import with file:// protocol for ESM modules
         const fileUrl = `file://${absolutePath}`;
+        core.info(`Attempting import: ${fileUrl}`);
+        
         const module = await import(fileUrl);
         
-        core.info(`Successfully imported ${fileUrl}`);
+        core.info(`✓ Successfully imported module!`);
         
         // Extract all exported functions
         const functions = {};
@@ -291,7 +302,8 @@ export class RuleCycleAnalyzer {
         } else {
           global.document = originalDocument;
         }
-        // Note: global.crypto is read-only in Node.js, so we don't touch it
+        // Skip restoring crypto - it's often a read-only getter in Node.js
+        // If we set it, leave it; if we didn't, it's already correct
       }
       
     } catch (error) {
