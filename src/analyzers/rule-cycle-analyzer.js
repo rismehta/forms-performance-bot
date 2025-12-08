@@ -70,14 +70,29 @@ export class RuleCycleAnalyzer {
     try {
       // Register mock custom functions to prevent crashes during form initialization
       const { FunctionRuntime, createFormInstanceSync } = await import('@aemforms/af-core');
-      const mockFunctions = {
-        createJourneyId: () => 'mock-journey-id',
-        loadUserData: () => {},
-        mockApiCall: () => {},
-        request: () => Promise.resolve({}),
-      };
       
-      // Register mock functions
+      // Extract ALL function names used in the form to register mocks
+      const functionNames = this.extractAllFunctionNames(formJson);
+      core.info(`Detected ${functionNames.length} unique function(s) in form, registering mocks...`);
+      
+      // Create mock implementations for all detected functions
+      const mockFunctions = {};
+      functionNames.forEach(fnName => {
+        // Mock functions that return promises
+        if (['request', 'loadUserData', 'docuploadAPI', 'fetchMergedBranchDetails'].includes(fnName)) {
+          mockFunctions[fnName] = () => Promise.resolve({});
+        }
+        // Mock functions that return basic values
+        else if (['createJourneyId', 'getJourneyId', 'getJourneyName', 'getBrowserDetail'].includes(fnName)) {
+          mockFunctions[fnName] = () => 'mock-value';
+        }
+        // Default: return empty function or undefined
+        else {
+          mockFunctions[fnName] = () => undefined;
+        }
+      });
+      
+      // Register all mock functions
       FunctionRuntime.registerFunctions(mockFunctions);
       
       // Use createFormInstanceSync which waits for all promises (including rule execution)
@@ -142,6 +157,65 @@ export class RuleCycleAnalyzer {
         skipReason: `Analysis error: ${error.message}`,
       };
     }
+  }
+
+  /**
+   * Extract all function names from form JSON (rules, events, expressions)
+   * @param {Object} formJson - Form JSON object
+   * @returns {Array<string>} Array of unique function names
+   */
+  extractAllFunctionNames(formJson) {
+    const functionNames = new Set();
+    const functionPattern = /(\w+)\s*\(/g;
+
+    const extractFromString = (str) => {
+      if (typeof str !== 'string') return;
+      let match;
+      while ((match = functionPattern.exec(str)) !== null) {
+        functionNames.add(match[1]);
+      }
+    };
+
+    const traverse = (node) => {
+      if (!node || typeof node !== 'object') return;
+
+      // Check events
+      if (node.events && typeof node.events === 'object') {
+        Object.values(node.events).forEach(eventHandlers => {
+          if (Array.isArray(eventHandlers)) {
+            eventHandlers.forEach(handler => extractFromString(handler));
+          } else {
+            extractFromString(eventHandlers);
+          }
+        });
+      }
+
+      // Check rules
+      if (node.rules && typeof node.rules === 'object') {
+        Object.values(node.rules).forEach(rule => {
+          if (typeof rule === 'object' && rule.expression) {
+            extractFromString(rule.expression);
+          } else {
+            extractFromString(rule);
+          }
+        });
+      }
+
+      // Check validation/display expressions
+      if (node.validationExpression) extractFromString(node.validationExpression);
+      if (node.displayValueExpression) extractFromString(node.displayValueExpression);
+
+      // Traverse children
+      if (node[':items']) {
+        Object.values(node[':items']).forEach(child => traverse(child));
+      }
+      if (node.items && Array.isArray(node.items)) {
+        node.items.forEach(child => traverse(child));
+      }
+    };
+
+    traverse(formJson);
+    return Array.from(functionNames);
   }
 
   /**
