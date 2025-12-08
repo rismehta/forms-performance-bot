@@ -291,12 +291,27 @@ export class RuleCycleAnalyzer {
   extractAllFunctionNames(formJson) {
     const functionNames = new Set();
     const functionPattern = /(\w+)\s*\(/g;
+    
+    // JavaScript keywords that should NOT be treated as custom functions
+    const jsKeywords = new Set([
+      'if', 'else', 'for', 'while', 'do', 'switch', 'case', 'break', 'continue',
+      'return', 'throw', 'try', 'catch', 'finally', 'typeof', 'instanceof',
+      'new', 'delete', 'void', 'yield', 'await', 'async', 'function',
+      'true', 'false', 'null', 'undefined', 'NaN', 'Infinity',
+      'var', 'let', 'const', 'class', 'extends', 'super', 'this',
+      'Array', 'Object', 'String', 'Number', 'Boolean', 'Date', 'Math',
+      'parseInt', 'parseFloat', 'isNaN', 'isFinite', 'encodeURI', 'decodeURI'
+    ]);
 
     const extractFromString = (str) => {
       if (typeof str !== 'string') return;
       let match;
       while ((match = functionPattern.exec(str)) !== null) {
-        functionNames.add(match[1]);
+        const fnName = match[1];
+        // Only add if it's not a JavaScript keyword
+        if (!jsKeywords.has(fnName)) {
+          functionNames.add(fnName);
+        }
       }
     };
 
