@@ -1,0 +1,86 @@
+/* Sample CSS file for testing CSS issues */
+
+/* Background image - should be flagged */
+.hero-banner {
+  background-image: url('images/hero.jpg');
+  background-size: cover;
+  width: 100%;
+  height: 400px;
+}
+
+.card-image {
+  background-image: url('/assets/card-bg.png');
+  background-repeat: no-repeat;
+}
+
+/* Inline data URI - small, won't be flagged */
+.icon-small {
+  background: url('data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTYiIGhlaWdodD0iMTYiPjwvc3ZnPg==');
+}
+
+/* @import - should be flagged as blocking */
+@import url('theme.css');
+
+/* Excessive !important usage */
+.field {
+  color: red !important;
+  padding: 10px !important;
+  margin: 5px !important;
+}
+
+.input {
+  border: 1px solid blue !important;
+  background: white !important;
+}
+
+.button {
+  background: green !important;
+  color: white !important;
+}
+
+/* Deep selector - should be flagged */
+.form .panel .section .field-group .input-wrapper .field .label {
+  font-size: 14px;
+}
+
+/* Hardcoded colors - should suggest CSS variables */
+.primary-button {
+  background-color: #3366cc;
+  color: #ffffff;
+  border: 1px solid #2255aa;
+}
+
+.secondary-button {
+  background-color: #666666;
+  color: #ffffff;
+}
+
+.text {
+  color: #333333;
+}
+
+.error {
+  color: #cc0000;
+}
+
+.success {
+  color: #00cc00;
+}
+
+/* Duplicate selectors - should be flagged */
+.field {
+  display: block;
+}
+
+/* ... more styles ... */
+
+.field {
+  width: 100%;
+}
+
+/* ... more styles ... */
+
+.field {
+  margin-bottom: 20px;
+}
+

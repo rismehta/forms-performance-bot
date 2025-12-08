@@ -1,0 +1,584 @@
+{
+  "formStructure": {
+    "metadata": {
+      "id": "L2NvbnRlbnQvZm9ybXMvYWYvc2FtcGxlLWZvcm0",
+      "title": "Sample Test Form",
+      "version": "0.14.0"
+    },
+    "components": {
+      "total": 13,
+      "byType": {
+        "number-input": 3,
+        "panel": 3,
+        "text-input": 7
+      },
+      "maxDepth": 2,
+      "nestedPanels": 3,
+      "repeatable": 0,
+      "visible": 6,
+      "hidden": 7
+    },
+    "events": {
+      "total": 1,
+      "byType": {
+        "change": 1
+      },
+      "componentsWithEvents": 2
+    },
+    "rules": {
+      "total": 0,
+      "componentsWithRules": 0,
+      "validationRules": 1,
+      "customRules": 0
+    },
+    "fragments": {
+      "count": 0,
+      "paths": []
+    },
+    "issues": []
+  },
+  "formEvents": {
+    "apiCallsInInitialize": [],
+    "issues": []
+  },
+  "hiddenFields": {
+    "totalHiddenFields": 7,
+    "hiddenFields": [
+      {
+        "name": "hiddenPanel",
+        "path": "hiddenPanel",
+        "fieldType": "panel",
+        "hasVisibleRule": false,
+        "likelyUnnecessary": true
+      },
+      {
+        "name": "tempField",
+        "path": "hiddenPanel.tempField",
+        "fieldType": "text-input",
+        "hasVisibleRule": false,
+        "likelyUnnecessary": true
+      },
+      {
+        "name": "unusedField",
+        "path": "hiddenPanel.unusedField",
+        "fieldType": "text-input",
+        "hasVisibleRule": false,
+        "likelyUnnecessary": true
+      },
+      {
+        "name": "dataStorage",
+        "path": "dataStorage",
+        "fieldType": "panel",
+        "hasVisibleRule": false,
+        "likelyUnnecessary": true
+      },
+      {
+        "name": "userId",
+        "path": "dataStorage.userId",
+        "fieldType": "text-input",
+        "hasVisibleRule": false,
+        "likelyUnnecessary": true
+      },
+      {
+        "name": "sessionId",
+        "path": "dataStorage.sessionId",
+        "fieldType": "text-input",
+        "hasVisibleRule": false,
+        "likelyUnnecessary": true
+      },
+      {
+        "name": "email",
+        "path": "dataStorage.email",
+        "fieldType": "text-input",
+        "hasVisibleRule": false,
+        "likelyUnnecessary": true
+      }
+    ],
+    "fieldVisibilityChanges": {
+      "tempField": {
+        "files": [
+          {
+            "filename": "sample-functions.js",
+            "visible": true,
+            "line": 9
+          },
+          {
+            "filename": "sample-functions.js",
+            "visible": true,
+            "line": 21
+          }
+        ],
+        "madeVisible": true,
+        "madeHidden": false
+      },
+      "hiddenPanel.tempField": {
+        "files": [
+          {
+            "filename": "sample-functions.js",
+            "visible": true,
+            "line": 9
+          },
+          {
+            "filename": "sample-functions.js",
+            "visible": true,
+            "line": 21
+          }
+        ],
+        "madeVisible": true,
+        "madeHidden": false
+      }
+    },
+    "unnecessaryHiddenFields": 6,
+    "issues": [
+      {
+        "severity": "warning",
+        "type": "unnecessary-hidden-field",
+        "field": "hiddenPanel",
+        "path": "hiddenPanel",
+        "message": "Field \"hiddenPanel\" is always hidden and increases DOM size unnecessarily.",
+        "recommendation": "Consider removing this field from the form and storing this as form variable. Hidden fields that are never shown bloat the DOM and impact performance."
+      },
+      {
+        "severity": "warning",
+        "type": "unnecessary-hidden-field",
+        "field": "unusedField",
+        "path": "hiddenPanel.unusedField",
+        "message": "Field \"unusedField\" is always hidden and increases DOM size unnecessarily.",
+        "recommendation": "Consider removing this field from the form and storing this as form variable. Hidden fields that are never shown bloat the DOM and impact performance."
+      },
+      {
+        "severity": "warning",
+        "type": "unnecessary-hidden-field",
+        "field": "dataStorage",
+        "path": "dataStorage",
+        "message": "Field \"dataStorage\" is always hidden and increases DOM size unnecessarily.",
+        "recommendation": "Consider removing this field from the form and storing this as form variable. Hidden fields that are never shown bloat the DOM and impact performance."
+      },
+      {
+        "severity": "warning",
+        "type": "unnecessary-hidden-field",
+        "field": "userId",
+        "path": "dataStorage.userId",
+        "message": "Field \"userId\" is always hidden and increases DOM size unnecessarily.",
+        "recommendation": "Consider removing this field from the form and storing this as form variable. Hidden fields that are never shown bloat the DOM and impact performance."
+      },
+      {
+        "severity": "warning",
+        "type": "unnecessary-hidden-field",
+        "field": "sessionId",
+        "path": "dataStorage.sessionId",
+        "message": "Field \"sessionId\" is always hidden and increases DOM size unnecessarily.",
+        "recommendation": "Consider removing this field from the form and storing this as form variable. Hidden fields that are never shown bloat the DOM and impact performance."
+      },
+      {
+        "severity": "warning",
+        "type": "unnecessary-hidden-field",
+        "field": "email",
+        "path": "dataStorage.email",
+        "message": "Field \"email\" is always hidden and increases DOM size unnecessarily.",
+        "recommendation": "Consider removing this field from the form and storing this as form variable. Hidden fields that are never shown bloat the DOM and impact performance."
+      }
+    ]
+  },
+  "ruleCycles": {
+    "totalRules": 4,
+    "fieldsWithRules": 4,
+    "dependencies": {
+      "fieldA": {
+        "id": "fieldA",
+        "dependents": [
+          "fieldC"
+        ],
+        "dependsOn": [
+          "fieldB"
+        ]
+      },
+      "fieldB": {
+        "id": "fieldB",
+        "dependents": [
+          "fieldA"
+        ],
+        "dependsOn": [
+          "fieldC"
+        ]
+      },
+      "fieldC": {
+        "id": "fieldC",
+        "dependents": [
+          "fieldB"
+        ],
+        "dependsOn": [
+          "fieldA"
+        ]
+      }
+    },
+    "cycles": 1,
+    "cycleDetails": [
+      {
+        "key": "fieldA->fieldA->fieldB->fieldC",
+        "fields": [
+          "fieldA",
+          "fieldA",
+          "fieldB",
+          "fieldC"
+        ],
+        "path": [
+          "fieldA",
+          "fieldB",
+          "fieldC",
+          "fieldA"
+        ]
+      }
+    ],
+    "issues": [
+      {
+        "severity": "error",
+        "type": "rule-cycle",
+        "message": "Circular dependency detected: fieldA → fieldA → fieldB → fieldC",
+        "fields": [
+          "fieldA",
+          "fieldA",
+          "fieldB",
+          "fieldC"
+        ],
+        "path": [
+          "fieldA",
+          "fieldB",
+          "fieldC",
+          "fieldA"
+        ],
+        "recommendation": "Break the circular dependency by removing or modifying one of the rules. Circular dependencies can cause infinite loops and performance issues. Consider using events or consolidating the logic."
+      }
+    ],
+    "circularDependencies": [
+      {
+        "cycle": [
+          "fieldA",
+          "fieldA",
+          "fieldB",
+          "fieldC"
+        ],
+        "fields": [
+          "fieldA",
+          "fieldA",
+          "fieldB",
+          "fieldC"
+        ]
+      }
+    ]
+  },
+  "customFunctions": {
+    "functionsFound": 1,
+    "functionNames": [
+      "validateUserName"
+    ],
+    "functionsAnalyzed": 1,
+    "violations": 1,
+    "issues": [
+      {
+        "severity": "error",
+        "type": "dom-access-in-custom-function",
+        "functionName": "validateUserName",
+        "file": "sample-functions.js",
+        "line": 44,
+        "message": "Custom function \"validateUserName\" accesses the DOM. Custom functions should not manipulate the DOM directly.",
+        "details": [
+          {
+            "type": "document",
+            "line": 45
+          }
+        ],
+        "recommendation": "Remove DOM access from custom functions. Use form data model and rules engine for UI updates. DOM manipulations should be handled in custom component, not custom functions.",
+        "cwvImpact": "INP, CLS"
+      }
+    ],
+    "details": [
+      {
+        "functionName": "validateUserName",
+        "file": "sample-functions.js",
+        "line": 44,
+        "hasDOMAccess": true,
+        "hasHTTPRequests": false,
+        "domAccesses": [
+          {
+            "type": "document",
+            "line": 45
+          }
+        ],
+        "httpRequests": []
+      }
+    ]
+  },
+  "htmlAnalysis": {
+    "images": {
+      "total": 3,
+      "lazyLoaded": 2,
+      "nonLazyLoaded": 1,
+      "withoutDimensions": 2,
+      "images": [
+        {
+          "src": "/images/hero-banner.jpg",
+          "alt": "Hero Banner",
+          "hasLazyLoading": false,
+          "hasDimensions": false
+        },
+        {
+          "src": "/images/logo.png",
+          "alt": "Company Logo",
+          "loading": "lazy",
+          "hasLazyLoading": true,
+          "hasDimensions": false
+        },
+        {
+          "src": "/images/icon.svg",
+          "alt": "Icon",
+          "loading": "lazy",
+          "width": "24",
+          "height": "24",
+          "hasLazyLoading": true,
+          "hasDimensions": true
+        }
+      ],
+      "nonLazyImages": [
+        {
+          "src": "/images/hero-banner.jpg",
+          "alt": "Hero Banner",
+          "hasLazyLoading": false,
+          "hasDimensions": false
+        }
+      ],
+      "imagesWithoutDimensions": [
+        {
+          "src": "/images/hero-banner.jpg",
+          "alt": "Hero Banner",
+          "hasLazyLoading": false,
+          "hasDimensions": false
+        },
+        {
+          "src": "/images/logo.png",
+          "alt": "Company Logo",
+          "loading": "lazy",
+          "hasLazyLoading": true,
+          "hasDimensions": false
+        }
+      ]
+    },
+    "scripts": {
+      "inline": 1,
+      "inlineSize": 190,
+      "external": 1,
+      "blocking": 0,
+      "scripts": {
+        "inline": [
+          {
+            "size": 190,
+            "hasContent": true
+          }
+        ],
+        "external": [
+          {
+            "src": "/scripts/form-validation.js",
+            "async": true,
+            "defer": false
+          }
+        ]
+      }
+    },
+    "resources": {
+      "iframes": 1,
+      "videos": 1,
+      "autoplayVideos": 1,
+      "elementsWithLargeData": 0,
+      "iframeList": [
+        {
+          "src": "/widgets/social-share"
+        }
+      ],
+      "videoList": [
+        {
+          "src": "/videos/intro.mp4",
+          "autoplay": true
+        }
+      ]
+    },
+    "rendering": {
+      "totalElements": 27,
+      "maxDepth": 5,
+      "formFields": 8,
+      "inlineStyleElements": 0,
+      "hiddenElements": 0
+    },
+    "issues": []
+  },
+  "cssAnalysis": {
+    "filesAnalyzed": 1,
+    "issues": [
+      {
+        "severity": "warning",
+        "type": "css-background-image",
+        "file": "sample-form.css",
+        "line": 5,
+        "message": "CSS background-image detected: \"images/hero.jpg\". Consider using Image component instead.",
+        "imageUrl": "images/hero.jpg",
+        "recommendation": "Replace with <Image> component for better lazy loading, responsive images, and automatic optimization. Background images cannot be lazy loaded and impact form rendering performance."
+      },
+      {
+        "severity": "warning",
+        "type": "css-background-image",
+        "file": "sample-form.css",
+        "line": 12,
+        "message": "CSS background-image detected: \"/assets/card-bg.png\". Consider using Image component instead.",
+        "imageUrl": "/assets/card-bg.png",
+        "recommendation": "Replace with <Image> component for better lazy loading, responsive images, and automatic optimization. Background images cannot be lazy loaded and impact form rendering performance."
+      },
+      {
+        "severity": "info",
+        "type": "deep-selector",
+        "file": "sample-form.css",
+        "line": 1,
+        "message": "Overly specific selector (depth: 18): \"/* Sample CSS file for testing CSS issues */\n\n/* Background image - should be fl...\"",
+        "selector": "/* Sample CSS file for testing CSS issues */\n\n/* Background image - should be flagged */\n.hero-banner",
+        "depth": 18,
+        "recommendation": "Use BEM or utility classes to reduce selector depth. Deep selectors slow down CSS matching in forms with many elements."
+      },
+      {
+        "severity": "info",
+        "type": "deep-selector",
+        "file": "sample-form.css",
+        "line": 4,
+        "message": "Overly specific selector (depth: 16): \"background-image: url('images/hero.jpg');\n  background-size: cover;\n  width: 100...\"",
+        "selector": "background-image: url('images/hero.jpg');\n  background-size: cover;\n  width: 100%;\n  height: 400px;\n}\n\n.card-image",
+        "depth": 16,
+        "recommendation": "Use BEM or utility classes to reduce selector depth. Deep selectors slow down CSS matching in forms with many elements."
+      },
+      {
+        "severity": "info",
+        "type": "deep-selector",
+        "file": "sample-form.css",
+        "line": 11,
+        "message": "Overly specific selector (depth: 18): \"background-image: url('/assets/card-bg.png');\n  background-repeat: no-repeat;\n}\n...\"",
+        "selector": "background-image: url('/assets/card-bg.png');\n  background-repeat: no-repeat;\n}\n\n/* Inline data URI - small, won't be flagged */\n.icon-small",
+        "depth": 18,
+        "recommendation": "Use BEM or utility classes to reduce selector depth. Deep selectors slow down CSS matching in forms with many elements."
+      },
+      {
+        "severity": "info",
+        "type": "deep-selector",
+        "file": "sample-form.css",
+        "line": 17,
+        "message": "Overly specific selector (depth: 22): \"background: url('data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTYiIGhlaWdodD0iMTYiP...\"",
+        "selector": "background: url('data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTYiIGhlaWdodD0iMTYiPjwvc3ZnPg==');\n}\n\n/* @import - should be flagged as blocking */\n@import url('theme.css');\n\n/* Excessive !important usage */\n.field",
+        "depth": 22,
+        "recommendation": "Use BEM or utility classes to reduce selector depth. Deep selectors slow down CSS matching in forms with many elements."
+      },
+      {
+        "severity": "info",
+        "type": "deep-selector",
+        "file": "sample-form.css",
+        "line": 25,
+        "message": "Overly specific selector (depth: 15): \"color: red !important;\n  padding: 10px !important;\n  margin: 5px !important;\n}\n\n...\"",
+        "selector": "color: red !important;\n  padding: 10px !important;\n  margin: 5px !important;\n}\n\n.input",
+        "depth": 15,
+        "recommendation": "Use BEM or utility classes to reduce selector depth. Deep selectors slow down CSS matching in forms with many elements."
+      },
+      {
+        "severity": "info",
+        "type": "deep-selector",
+        "file": "sample-form.css",
+        "line": 31,
+        "message": "Overly specific selector (depth: 12): \"border: 1px solid blue !important;\n  background: white !important;\n}\n\n.button...\"",
+        "selector": "border: 1px solid blue !important;\n  background: white !important;\n}\n\n.button",
+        "depth": 12,
+        "recommendation": "Use BEM or utility classes to reduce selector depth. Deep selectors slow down CSS matching in forms with many elements."
+      },
+      {
+        "severity": "info",
+        "type": "deep-selector",
+        "file": "sample-form.css",
+        "line": 36,
+        "message": "Overly specific selector (depth: 24): \"background: green !important;\n  color: white !important;\n}\n\n/* Deep selector - s...\"",
+        "selector": "background: green !important;\n  color: white !important;\n}\n\n/* Deep selector - should be flagged */\n.form .panel .section .field-group .input-wrapper .field .label",
+        "depth": 24,
+        "recommendation": "Use BEM or utility classes to reduce selector depth. Deep selectors slow down CSS matching in forms with many elements."
+      },
+      {
+        "severity": "info",
+        "type": "deep-selector",
+        "file": "sample-form.css",
+        "line": 42,
+        "message": "Overly specific selector (depth: 13): \"font-size: 14px;\n}\n\n/* Hardcoded colors - should suggest CSS variables */\n.prima...\"",
+        "selector": "font-size: 14px;\n}\n\n/* Hardcoded colors - should suggest CSS variables */\n.primary-button",
+        "depth": 13,
+        "recommendation": "Use BEM or utility classes to reduce selector depth. Deep selectors slow down CSS matching in forms with many elements."
+      },
+      {
+        "severity": "info",
+        "type": "deep-selector",
+        "file": "sample-form.css",
+        "line": 47,
+        "message": "Overly specific selector (depth: 14): \"background-color: #3366cc;\n  color: #ffffff;\n  border: 1px solid #2255aa;\n}\n\n.se...\"",
+        "selector": "background-color: #3366cc;\n  color: #ffffff;\n  border: 1px solid #2255aa;\n}\n\n.secondary-button",
+        "depth": 14,
+        "recommendation": "Use BEM or utility classes to reduce selector depth. Deep selectors slow down CSS matching in forms with many elements."
+      },
+      {
+        "severity": "info",
+        "type": "deep-selector",
+        "file": "sample-form.css",
+        "line": 53,
+        "message": "Overly specific selector (depth: 8): \"background-color: #666666;\n  color: #ffffff;\n}\n\n.text...\"",
+        "selector": "background-color: #666666;\n  color: #ffffff;\n}\n\n.text",
+        "depth": 8,
+        "recommendation": "Use BEM or utility classes to reduce selector depth. Deep selectors slow down CSS matching in forms with many elements."
+      },
+      {
+        "severity": "info",
+        "type": "deep-selector",
+        "file": "sample-form.css",
+        "line": 66,
+        "message": "Overly specific selector (depth: 12): \"color: #00cc00;\n}\n\n/* Duplicate selectors - should be flagged */\n.field...\"",
+        "selector": "color: #00cc00;\n}\n\n/* Duplicate selectors - should be flagged */\n.field",
+        "depth": 12,
+        "recommendation": "Use BEM or utility classes to reduce selector depth. Deep selectors slow down CSS matching in forms with many elements."
+      },
+      {
+        "severity": "info",
+        "type": "deep-selector",
+        "file": "sample-form.css",
+        "line": 71,
+        "message": "Overly specific selector (depth: 11): \"display: block;\n}\n\n/* ... more styles ... */\n\n.field...\"",
+        "selector": "display: block;\n}\n\n/* ... more styles ... */\n\n.field",
+        "depth": 11,
+        "recommendation": "Use BEM or utility classes to reduce selector depth. Deep selectors slow down CSS matching in forms with many elements."
+      },
+      {
+        "severity": "info",
+        "type": "deep-selector",
+        "file": "sample-form.css",
+        "line": 77,
+        "message": "Overly specific selector (depth: 11): \"width: 100%;\n}\n\n/* ... more styles ... */\n\n.field...\"",
+        "selector": "width: 100%;\n}\n\n/* ... more styles ... */\n\n.field",
+        "depth": 11,
+        "recommendation": "Use BEM or utility classes to reduce selector depth. Deep selectors slow down CSS matching in forms with many elements."
+      },
+      {
+        "severity": "warning",
+        "type": "css-import-blocking",
+        "file": "sample-form.css",
+        "line": 22,
+        "message": "@import blocks rendering: \"theme.css\"",
+        "importUrl": "theme.css",
+        "recommendation": "Replace @import with <link> tags or bundle CSS files. @import forces sequential loading and delays form rendering."
+      }
+    ],
+    "summary": {
+      "totalFiles": 1,
+      "backgroundImages": 2,
+      "importantRules": 0,
+      "inlineDataURIs": 0,
+      "deepSelectors": 13,
+      "duplicateSelectors": 0
+    }
+  },
+  "totalIssues": 24
+}

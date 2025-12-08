@@ -1,0 +1,143 @@
+{
+  "id": "L2NvbnRlbnQvZm9ybXMvYWYvaGRmY19oYWYvbG9hbi1hZ2FpbnN0LWFzc2V0cy9zbWFydGVtaS9zbWFydGVtaQ==",
+  "fieldType": "form",
+  "lang": "en-US",
+  "title": "SMART EMI Form",
+  "action": "/adobe/forms/af/submit/L2NvbnRlbnQvZm9ybXMvYWYvaGRmY19oYWYvbG9hbi1hZ2FpbnN0LWFzc2V0cy9zbWFydGVtaS9zbWFydGVtaQ==",
+  "properties": {
+    "flow:sessionTimeoutMessage": "Your session is timed out. Please try again.",
+    "cq:styleIds": ["1722941358234"],
+    "schemaRef": "/content/dam/formsanddocuments/hdfc_haf/cards/semi/schema/semi.schema.json",
+    "themeClientLibRef": "adaptiveform.theme.canvas3",
+    "variant": "popup",
+    "fd:path": "/content/forms/af/hdfc_haf/loan-against-assets/smartemi/smartemi/jcr:content/guideContainer"
+  },
+  "events": {
+    "initialize": ["createJourneyId('online',runtime.journeyName.$value,runtime.channel.$value)"],
+    "custom:setProperty": ["$event.payload"]
+  },
+  ":itemsOrder": ["panelcontainer_1854092574", "wizard_500725986", "fragment", "panelcontainer", "panelcontainer_1883119894"],
+  "adaptiveform": "0.14.0",
+  "metadata": {
+    "grammar": "json-formula-1.0.0",
+    "version": "1.0.0"
+  },
+  ":type": "formsninja/components/adaptiveForm/formcontainer",
+  ":items": {
+    "panelcontainer_1854092574": {
+      "id": "panelcontainer-7f114ac30c",
+      "fieldType": "panel",
+      "name": "aem_semicreditCardDisplay",
+      "visible": false,
+      "enabled": true,
+      "repeatable": false,
+      "readOnly": false,
+      "label": {
+        "visible": false,
+        "value": "semicreditCardDisplay"
+      },
+      "events": {
+        "custom:setProperty": ["$event.payload"]
+      },
+      ":itemsOrder": ["image_2079132024", "panelcontainer_15913", "text_copy", "text_2070476188_copy"],
+      ":items": {
+        "image_2079132024": {
+          "id": "image-762a1630aa",
+          "fieldType": "image",
+          "name": "aem_cardfacia",
+          "visible": true
+        },
+        "panelcontainer_15913": {
+          "id": "panelcontainer-45342b6f25",
+          "fieldType": "panel",
+          "name": "aem_semicreditCardContent",
+          "visible": true,
+          "enabled": true,
+          "repeatable": false,
+          "readOnly": false,
+          ":itemsOrder": ["text_copy_copy", "text_1300104599", "text_1043826505"],
+          ":items": {
+            "text_copy_copy": {
+              "id": "text-a26bc24d04",
+              "fieldType": "plain-text",
+              "name": "aem_customerNameLabel",
+              "value": "<p>Dear&nbsp;</p>\n",
+              "visible": true,
+              "richText": true
+            },
+            "text_1300104599": {
+              "id": "text-9f10420932",
+              "fieldType": "plain-text",
+              "name": "aem_outStandingLabel",
+              "value": "<p>Your Total Outstanding Amount is</p>\n",
+              "visible": true,
+              "richText": true
+            },
+            "text_1043826505": {
+              "id": "text-cb2ebe7225",
+              "fieldType": "plain-text",
+              "name": "aem_outStandingAmt",
+              "value": "<p>₹ 10000</p>\n",
+              "visible": true,
+              "richText": true
+            }
+          }
+        },
+        "text_copy": {
+          "id": "text-00ad3c3ed2",
+          "fieldType": "plain-text",
+          "name": "cardFaciaCardNo",
+          "value": "<p>XXXX-XXXX-XXXX-1000</p>\n",
+          "visible": true,
+          "richText": true
+        },
+        "text_2070476188_copy": {
+          "id": "text-33533c13b5",
+          "fieldType": "plain-text",
+          "name": "cardFaciaCardName",
+          "value": "<p>TEST NAME&nbsp;&nbsp;</p>\n",
+          "visible": true,
+          "richText": true
+        }
+      }
+    },
+    "wizard_500725986": {
+      "id": "wizard-c8af4b0005",
+      "fieldType": "panel",
+      "name": "aem_semiWizard",
+      "visible": true,
+      "enabled": true,
+      "repeatable": false,
+      "readOnly": false,
+      "events": {
+        "custom:setProperty": ["$event.payload"]
+      },
+      ":items": {}
+    },
+    "panelcontainer_1883119894": {
+      "id": "panelcontainer-runtime",
+      "fieldType": "panel",
+      "name": "runtime",
+      "visible": false,
+      ":items": {
+        "textinput": {
+          "id": "textinput-123",
+          "fieldType": "text-input",
+          "name": "journeyId",
+          "visible": true
+        },
+        "textinput_1059408118": {
+          "id": "textinput-915b32003c",
+          "fieldType": "text-input",
+          "name": "journeyName",
+          "visible": true,
+          "default": "SMART_EMI_JOURNEY",
+          "events": {
+            "change": ["if(contains($event.payload.changes[].propertyName, 'value'),[sendAnalytics($field.$value)],{})"]
+          }
+        }
+      }
+    }
+  }
+}
+

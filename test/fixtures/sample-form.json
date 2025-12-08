@@ -1,0 +1,189 @@
+{
+  "id": "L2NvbnRlbnQvZm9ybXMvYWYvc2FtcGxlLWZvcm0",
+  "fieldType": "form",
+  "title": "Sample Test Form",
+  "name": "sample-test-form",
+  "adaptiveform": "0.14.0",
+  "metadata": {
+    "grammar": "json-formula-1.0.0",
+    "version": "1.0.0"
+  },
+  "events": {
+  },
+  "properties": {
+    "fd:path": "/content/forms/af/sample-test-form",
+    "fd:schemaType": "BASIC"
+  },
+  ":itemsOrder": [
+    "hiddenPanel",
+    "dataStorage",
+    "visiblePanel",
+    "fieldA",
+    "fieldB",
+    "fieldC"
+  ],
+  ":items": {
+    "fieldA": {
+      "id": "fieldA",
+      "fieldType": "number-input",
+      "name": "fieldA",
+      "visible": true,
+      "label": {
+        "value": "Field A"
+      },
+      "rules": {
+        "value": "$form.fieldB + 1"
+      }
+    },
+    "fieldB": {
+      "id": "fieldB",
+      "fieldType": "number-input",
+      "name": "fieldB",
+      "visible": true,
+      "label": {
+        "value": "Field B"
+      },
+      "rules": {
+        "value": "$form.fieldC * 2"
+      }
+    },
+    "fieldC": {
+      "id": "fieldC",
+      "fieldType": "number-input",
+      "name": "fieldC",
+      "visible": true,
+      "label": {
+        "value": "Field C"
+      },
+      "rules": {
+        "value": "$form.fieldA - 5"
+      }
+    },
+    "hiddenPanel": {
+      "id": "hiddenPanel",
+      "fieldType": "panel",
+      "name": "hiddenPanel",
+      "visible": false,
+      "label": {
+        "value": "Hidden Panel"
+      },
+      "description": "Panel that starts hidden",
+      ":itemsOrder": [
+        "tempField",
+        "unusedField"
+      ],
+      ":items": {
+        "tempField": {
+          "id": "tempField",
+          "fieldType": "text-input",
+          "name": "tempField",
+          "visible": false,
+          "label": {
+            "value": "Temporary Field"
+          },
+          "description": "This field is made visible via JS"
+        },
+        "unusedField": {
+          "id": "unusedField",
+          "fieldType": "text-input",
+          "name": "unusedField",
+          "visible": false,
+          "label": {
+            "value": "Unused Field"
+          },
+          "description": "This field is never made visible - should be flagged"
+        }
+      }
+    },
+    "dataStorage": {
+      "id": "dataStorage",
+      "fieldType": "panel",
+      "name": "dataStorage",
+      "visible": false,
+      "label": {
+        "value": "Data Storage Panel"
+      },
+      ":itemsOrder": [
+        "userId",
+        "sessionId",
+        "email"
+      ],
+      ":items": {
+        "userId": {
+          "id": "userId",
+          "fieldType": "text-input",
+          "name": "userId",
+          "visible": false,
+          "label": {
+            "value": "User ID"
+          },
+          "description": "Used only for data storage"
+        },
+        "sessionId": {
+          "id": "sessionId",
+          "fieldType": "text-input",
+          "name": "sessionId",
+          "visible": false,
+          "label": {
+            "value": "Session ID"
+          },
+          "description": "Session tracking field"
+        },
+        "email": {
+          "id": "email",
+          "fieldType": "text-input",
+          "name": "email",
+          "visible": false,
+          "label": {
+            "value": "Email"
+          },
+          "description": "Same name as in hiddenPanel but different path"
+        }
+      }
+    },
+    "visiblePanel": {
+      "id": "visiblePanel",
+      "fieldType": "panel",
+      "name": "visiblePanel",
+      "visible": true,
+      "label": {
+        "value": "User Information"
+      },
+      ":itemsOrder": [
+        "userName",
+        "phoneNumber"
+      ],
+      ":items": {
+        "userName": {
+          "id": "userName",
+          "fieldType": "text-input",
+          "name": "userName",
+          "visible": true,
+          "label": {
+            "value": "User Name"
+          },
+          "required": true,
+          "events": {
+            "change": [
+              "validateUserName()"
+            ]
+          },
+          "rules": {
+            "visible": "true"
+          }
+        },
+        "phoneNumber": {
+          "id": "phoneNumber",
+          "fieldType": "text-input",
+          "name": "phoneNumber",
+          "visible": true,
+          "label": {
+            "value": "Phone Number"
+          },
+          "format": "phone"
+        }
+      }
+    }
+  }
+}
+

@@ -1,0 +1,12 @@
+{
+  "thresholds": {
+    "form": {
+      "maxComponents": 75,
+      "maxDepth": 8
+    },
+    "html": {
+      "maxDOMSize": 800
+    }
+  }
+}
+

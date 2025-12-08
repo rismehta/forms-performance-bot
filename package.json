@@ -1,0 +1,34 @@
+{
+  "name": "performance-bot",
+  "version": "1.0.0",
+  "description": "GitHub Action to analyze form performance in PRs",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node test/run-test.js --sample",
+    "test:live": "node test/run-test.js"
+  },
+  "keywords": [
+    "github-action",
+    "performance",
+    "forms",
+    "aem"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@actions/core": "^1.10.1",
+    "@actions/github": "^6.0.0",
+    "@aemforms/af-core": "^0.22.148",
+    "cheerio": "^1.0.0-rc.12",
+    "node-fetch": "^3.3.2",
+    "acorn": "^8.11.3",
+    "acorn-walk": "^8.3.2",
+    "commander": "^11.1.0"
+  },
+  "devDependencies": {
+    "eslint": "^8.57.0"
+  }
+}
+

@@ -1,0 +1,60 @@
+{
+  "id": "sample-form",
+  "fieldType": "form",
+  "title": "Sample Form",
+  "action": "/submit",
+  "adaptiveform": "0.14.0",
+  "properties": {
+    "themeClientLibRef": "adaptiveform.theme.canvas3",
+    "variant": "popup"
+  },
+  ":items": {
+    "panel1": {
+      "id": "panel-1",
+      "fieldType": "panel",
+      "name": "mainPanel",
+      "visible": true,
+      "label": {
+        "value": "Main Panel"
+      },
+      ":items": {
+        "textinput1": {
+          "id": "textinput-1",
+          "fieldType": "text-input",
+          "name": "email",
+          "type": "string",
+          "required": true,
+          "pattern": "^[\\w-\\.]+@([\\w-]+\\.)+[\\w-]{2,4}$",
+          "label": {
+            "value": "Email Address"
+          },
+          "events": {
+            "change": ["validateEmail()"]
+          }
+        },
+        "textinput2": {
+          "id": "textinput-2",
+          "fieldType": "text-input",
+          "name": "phone",
+          "type": "string",
+          "required": true,
+          "label": {
+            "value": "Phone Number"
+          }
+        }
+      }
+    },
+    "button1": {
+      "id": "button-1",
+      "fieldType": "button",
+      "name": "submit",
+      "label": {
+        "value": "Submit"
+      },
+      "events": {
+        "click": ["submitForm()"]
+      }
+    }
+  }
+}
+

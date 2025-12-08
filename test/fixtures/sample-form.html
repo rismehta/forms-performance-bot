@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sample Test Form</title>
+  <link rel="stylesheet" href="/styles/form.css">
+  
+  <!-- ❌ Blocking script without async/defer -->
+  <script src="/scripts/blocking-analytics.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Sample Form Page</h1>
+  </header>
+  
+  <main>
+    <!-- Form JSON embedded in page -->
+    <div class="form">
+      <div>
+        <div>
+          <pre><code>{
+  "id": "L2NvbnRlbnQvZm9ybXMvYWYvc2FtcGxlLWZvcm0",
+  "fieldType": "form",
+  "title": "Sample Test Form",
+  "name": "sample-test-form",
+  "adaptiveform": "0.14.0",
+  "metadata": {
+    "grammar": "json-formula-1.0.0",
+    "version": "1.0.0"
+  },
+  "events": {
+    "initialize": [
+      "createJourneyId(\"online\")",
+      "fetch(\"https://api.example.com/init\")",
+      "loadUserData()"
+    ],
+    "render": [
+      "console.log(\"Form rendered\")"
+    ]
+  },
+  ":items": {
+    "hiddenPanel": {
+      "fieldType": "panel",
+      "name": "hiddenPanel",
+      "visible": false
+    },
+    "visiblePanel": {
+      "fieldType": "panel",
+      "name": "visiblePanel",
+      "visible": true
+    }
+  }
+}</code></pre>
+        </div>
+      </div>
+    </div>
+    
+    <!-- Rendered form with performance issues -->
+    <form id="sample-form" class="adaptive-form">
+      
+      <!-- ❌ Image without lazy loading -->
+      <img src="/images/hero-banner.jpg" alt="Hero Banner" class="hero-image">
+      
+      <!-- ❌ Image without dimensions (causes layout shift) -->
+      <img src="/images/logo.png" alt="Company Logo" loading="lazy">
+      
+      <!-- ✅ Good image - has lazy loading and dimensions -->
+      <img src="/images/icon.svg" alt="Icon" loading="lazy" width="24" height="24">
+      
+      <div class="form-content">
+        <!-- Visible fields -->
+        <div class="field-container">
+          <label for="userName">User Name *</label>
+          <input type="text" id="userName" name="userName" required>
+        </div>
+        
+        <div class="field-container">
+          <label for="phoneNumber">Phone Number</label>
+          <input type="tel" id="phoneNumber" name="phoneNumber">
+        </div>
+        
+        <!-- Hidden fields that bloat DOM -->
+        <input type="hidden" name="tempField" id="tempField">
+        <input type="hidden" name="unusedField" id="unusedField">
+        <input type="hidden" name="userId" id="userId">
+        <input type="hidden" name="sessionId" id="sessionId">
+        <input type="hidden" name="email" id="email">
+        
+        <div class="button-container">
+          <button type="submit">Submit</button>
+        </div>
+      </div>
+      
+      <!-- ❌ Iframe blocks rendering -->
+      <iframe src="/widgets/social-share" title="Social Share" width="100%" height="200"></iframe>
+      
+      <!-- ❌ Video with autoplay -->
+      <video src="/videos/intro.mp4" autoplay muted width="640" height="360"></video>
+    </form>
+    
+    <!-- ✅ Good - async script -->
+    <script src="/scripts/form-validation.js" async></script>
+    
+    <!-- ❌ Another blocking inline script -->
+    <script>
+      console.log('Inline script executed');
+      // This blocks rendering
+      document.addEventListener('DOMContentLoaded', function() {
+        console.log('DOM ready');
+      });
+    </script>
+  </main>
+  
+  <footer>
+    <p>&copy; 2024 Sample Form</p>
+  </footer>
+</body>
+</html>
+
