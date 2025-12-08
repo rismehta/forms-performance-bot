@@ -84,10 +84,13 @@ export class RuleCycleAnalyzer {
       // After this call returns, all rules have executed and _dependents arrays are populated
       let form;
       try {
+        console.log('Creating form instance with af-core...');
         form = await createFormInstanceSync(formJson, undefined, 'off');
+        console.log('Form instance created successfully');
       } catch (coreError) {
         // If af-core fails to create the form instance, return gracefully
         console.warn('af-core failed to create form instance:', coreError.message);
+        console.warn('Stack:', coreError.stack);
         return {
           totalRules: 0,
           fieldsWithRules: 0,
@@ -103,7 +106,10 @@ export class RuleCycleAnalyzer {
       
       // After createFormInstance returns, the event queue has run and dependencies are tracked
       // Now build the dependency graph from the form instance's internal state
+      console.log('Building dependency graph from form instance...');
       const dependencyGraph = this.buildDependencyGraphFromForm(form);
+      console.log(`Found ${dependencyGraph.totalRules} rules in ${dependencyGraph.fieldsWithRules} fields`);
+      
       const cycles = this.detectCycles(dependencyGraph);
       const issues = this.generateIssues(cycles);
 
@@ -150,9 +156,12 @@ export class RuleCycleAnalyzer {
       fieldMap: {}, // Map field IDs to names for lookup
     };
 
+    let visitedFieldsCount = 0;
+    let fieldsWithRulesProperty = 0;
 
     // Visit each field in the form using the built-in visitor
     form.visit((field) => {
+      visitedFieldsCount++;
       const fieldName = field.name;
       const fieldId = field.id;
       
@@ -161,9 +170,16 @@ export class RuleCycleAnalyzer {
       // Store field mapping
       graph.fieldMap[fieldId] = fieldName;
 
-      // Check if field has rules
+      // Check if field has rules - try multiple possible locations
       const fieldJson = field._jsonModel || {};
+      
+      // Log first few fields to understand structure
+      if (visitedFieldsCount <= 3) {
+        console.log(`Field ${visitedFieldsCount}: name="${fieldName}", has _jsonModel: ${!!field._jsonModel}, has rules: ${!!fieldJson.rules}`);
+      }
+      
       if (fieldJson.rules && typeof fieldJson.rules === 'object') {
+        fieldsWithRulesProperty++;
         const ruleProperties = Object.keys(fieldJson.rules);
         
         if (ruleProperties.length > 0) {
@@ -216,6 +232,8 @@ export class RuleCycleAnalyzer {
         }
       });
     });
+
+    console.log(`Dependency graph summary: visited ${visitedFieldsCount} fields, ${fieldsWithRulesProperty} had rules property, ${graph.fieldsWithRules} had non-empty rules, ${graph.totalRules} total rules`);
 
     return graph;
   }

@@ -178,16 +178,76 @@ async function run() {
       customFunctions: customFunctionAnalysis,
     };
 
+    // Check for critical performance issues BEFORE posting report
+    const criticalIssues = detectCriticalIssues(results);
+    
     // Generate and post PR comment
     const reporter = new FormPRReporter(octokit, owner, repo, prNumber);
     await reporter.generateReport(results, urls);
 
-    core.info(' Performance analysis complete!');
+    // Fail the build if critical issues are detected
+    if (criticalIssues.hasCritical) {
+      core.error('Critical performance issues detected!');
+      criticalIssues.issues.forEach(issue => core.error(`  - ${issue}`));
+      core.setFailed(`Performance check failed: ${criticalIssues.count} critical issue(s) detected. See PR comment for details.`);
+      return;
+    }
+
+    core.info('Performance analysis complete! No critical issues detected.');
 
   } catch (error) {
     core.setFailed(`Performance Bot failed: ${error.message}`);
     core.error(error.stack);
   }
+}
+
+/**
+ * Detect critical performance issues that should fail the build
+ * @param {Object} results - Analysis results
+ * @returns {Object} Critical issues summary
+ */
+function detectCriticalIssues(results) {
+  const critical = {
+    hasCritical: false,
+    count: 0,
+    issues: [],
+  };
+
+  // 1. API calls in initialize events (CRITICAL - blocks form rendering)
+  if (results.formEvents?.newIssues && results.formEvents.newIssues.length > 0) {
+    critical.hasCritical = true;
+    critical.count += results.formEvents.newIssues.length;
+    critical.issues.push(`${results.formEvents.newIssues.length} API call(s) in initialize events (blocks form rendering)`);
+  }
+
+  // 2. Circular dependencies (CRITICAL - causes infinite loops)
+  if (results.ruleCycles?.newCycles && results.ruleCycles.newCycles.length > 0) {
+    critical.hasCritical = true;
+    critical.count += results.ruleCycles.newCycles.length;
+    critical.issues.push(`${results.ruleCycles.newCycles.length} new circular dependenc${results.ruleCycles.newCycles.length > 1 ? 'ies' : 'y'} (infinite loops)`);
+  }
+
+  // 3. Custom functions with DOM access (CRITICAL - breaks architecture)
+  if (results.customFunctions?.newIssues) {
+    const domAccessIssues = results.customFunctions.newIssues.filter(i => i.type === 'dom-access-in-custom-function');
+    if (domAccessIssues.length > 0) {
+      critical.hasCritical = true;
+      critical.count += domAccessIssues.length;
+      critical.issues.push(`${domAccessIssues.length} custom function(s) directly accessing DOM`);
+    }
+  }
+
+  // 4. Blocking @import in CSS (CRITICAL - blocks rendering)
+  if (results.formCSS?.newIssues) {
+    const blockingImports = results.formCSS.newIssues.filter(i => i.type === 'css-import-blocking');
+    if (blockingImports.length > 0) {
+      critical.hasCritical = true;
+      critical.count += blockingImports.length;
+      critical.issues.push(`${blockingImports.length} @import statement(s) in CSS (blocks rendering)`);
+    }
+  }
+
+  return critical;
 }
 
 /**
