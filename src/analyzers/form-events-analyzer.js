@@ -129,22 +129,20 @@ export class FormEventsAnalyzer {
     const beforeAnalysis = this.analyze(beforeJson);
     const afterAnalysis = this.analyze(afterJson);
 
+    const resolvedIssues = beforeAnalysis.issues.filter(beforeIssue =>
+      !afterAnalysis.issues.some(afterIssue =>
+        afterIssue.field === beforeIssue.field && afterIssue.type === beforeIssue.type
+      )
+    );
+
     return {
       before: beforeAnalysis,
       after: afterAnalysis,
       delta: {
         apiCallsAdded: afterAnalysis.apiCallsInInitialize.length - beforeAnalysis.apiCallsInInitialize.length,
       },
-      newIssues: afterAnalysis.issues.filter(afterIssue =>
-        !beforeAnalysis.issues.some(beforeIssue =>
-          beforeIssue.field === afterIssue.field && beforeIssue.type === afterIssue.type
-        )
-      ),
-      resolvedIssues: beforeAnalysis.issues.filter(beforeIssue =>
-        !afterAnalysis.issues.some(afterIssue =>
-          afterIssue.field === beforeIssue.field && afterIssue.type === beforeIssue.type
-        )
-      ),
+      newIssues: afterAnalysis.issues, // Report ALL issues in current state
+      resolvedIssues,
     };
   }
 }

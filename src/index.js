@@ -241,13 +241,21 @@ function detectCriticalIssues(results) {
     critical.issues.push(`${results.ruleCycles.newCycles.length} new circular dependenc${results.ruleCycles.newCycles.length > 1 ? 'ies' : 'y'} (infinite loops)`);
   }
 
-  // 3. Custom functions with DOM access (CRITICAL - breaks architecture)
+  // 3. Custom functions with violations (CRITICAL - breaks architecture)
   if (results.customFunctions?.newIssues) {
     const domAccessIssues = results.customFunctions.newIssues.filter(i => i.type === 'dom-access-in-custom-function');
+    const httpRequestIssues = results.customFunctions.newIssues.filter(i => i.type === 'http-request-in-custom-function');
+    
     if (domAccessIssues.length > 0) {
       critical.hasCritical = true;
       critical.count += domAccessIssues.length;
       critical.issues.push(`${domAccessIssues.length} custom function(s) directly accessing DOM`);
+    }
+    
+    if (httpRequestIssues.length > 0) {
+      critical.hasCritical = true;
+      critical.count += httpRequestIssues.length;
+      critical.issues.push(`${httpRequestIssues.length} custom function(s) making HTTP requests`);
     }
   }
 

@@ -346,6 +346,13 @@ export class CustomFunctionAnalyzer {
       return { error: 'Missing analysis for comparison' };
     }
 
+    const resolvedIssues = beforeAnalysis.issues.filter(beforeIssue =>
+      !afterAnalysis.issues.some(afterIssue =>
+        afterIssue.functionName === beforeIssue.functionName &&
+        afterIssue.type === beforeIssue.type
+      )
+    );
+
     return {
       before: beforeAnalysis,
       after: afterAnalysis,
@@ -353,18 +360,8 @@ export class CustomFunctionAnalyzer {
         functionsAdded: afterAnalysis.functionsFound - beforeAnalysis.functionsFound,
         violationsAdded: afterAnalysis.violations - beforeAnalysis.violations,
       },
-      newIssues: afterAnalysis.issues.filter(afterIssue =>
-        !beforeAnalysis.issues.some(beforeIssue =>
-          beforeIssue.functionName === afterIssue.functionName &&
-          beforeIssue.type === afterIssue.type
-        )
-      ),
-      resolvedIssues: beforeAnalysis.issues.filter(beforeIssue =>
-        !afterAnalysis.issues.some(afterIssue =>
-          afterIssue.functionName === beforeIssue.functionName &&
-          afterIssue.type === beforeIssue.type
-        )
-      ),
+      newIssues: afterAnalysis.issues, // Report ALL issues found in current state
+      resolvedIssues,
     };
   }
 }

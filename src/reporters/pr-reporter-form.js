@@ -438,48 +438,32 @@ export class FormPRReporter {
     if (after) {
       lines.push(`**Functions Found:** ${after.functionsFound}`);
       lines.push(`**Functions Analyzed:** ${after.functionsAnalyzed}`);
-      
-      if (after.functionNames && after.functionNames.length > 0) {
-        lines.push(`**Function Names:** \`${after.functionNames.join('`, `')}\``);
-      }
       lines.push('');
     }
 
-    // Show new violations
+    // Show all violations in current state
     if (newIssues && newIssues.length > 0) {
-      lines.push('####  Custom Function Violations\n');
+      lines.push('####  Violations Detected\n');
       
       const domAccessIssues = newIssues.filter(i => i.type === 'dom-access-in-custom-function');
       const httpRequestIssues = newIssues.filter(i => i.type === 'http-request-in-custom-function');
 
-      if (domAccessIssues.length > 0) {
-        lines.push('** DOM Access Detected:**\n');
-        domAccessIssues.forEach(issue => {
-          lines.push(`**Function:** \`${issue.functionName}\` (${issue.file}:${issue.line})`);
-          lines.push(`- ${issue.message}`);
-          lines.push(`- **Impact:** ${issue.cwvImpact}`);
-          if (issue.details && issue.details.length > 0) {
-            const accessTypes = issue.details.map(d => d.type).join(', ');
-            lines.push(`- **Accesses:** ${accessTypes}`);
-          }
-          lines.push(`-  *${issue.recommendation}*`);
-          lines.push('');
+      if (httpRequestIssues.length > 0) {
+        lines.push(`** ${httpRequestIssues.length} HTTP Request(s) in Custom Functions:**\n`);
+        httpRequestIssues.forEach(issue => {
+          lines.push(`- \`${issue.functionName}\` in \`${issue.file}\``);
+          lines.push(`  - ${issue.recommendation}`);
         });
+        lines.push('');
       }
 
-      if (httpRequestIssues.length > 0) {
-        lines.push('** HTTP Requests Detected:**\n');
-        httpRequestIssues.forEach(issue => {
-          lines.push(`**Function:** \`${issue.functionName}\` (${issue.file}:${issue.line})`);
-          lines.push(`- ${issue.message}`);
-          lines.push(`- **Impact:** ${issue.cwvImpact}`);
-          if (issue.details && issue.details.length > 0) {
-            const requestTypes = issue.details.map(d => d.type).join(', ');
-            lines.push(`- **Request Types:** ${requestTypes}`);
-          }
-          lines.push(`-  *${issue.recommendation}*`);
-          lines.push('');
+      if (domAccessIssues.length > 0) {
+        lines.push(`** ${domAccessIssues.length} DOM Access(es) in Custom Functions:**\n`);
+        domAccessIssues.forEach(issue => {
+          lines.push(`- \`${issue.functionName}\` in \`${issue.file}\``);
+          lines.push(`  - ${issue.recommendation}`);
         });
+        lines.push('');
       }
     }
 

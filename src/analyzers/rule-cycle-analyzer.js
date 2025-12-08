@@ -568,6 +568,10 @@ export class RuleCycleAnalyzer {
    * Compare before and after analyses
    */
   compare(beforeData, afterData) {
+    const resolvedCycles = (beforeData.cycleDetails || []).filter(beforeCycle =>
+      !(afterData.cycleDetails || []).some(afterCycle => afterCycle.key === beforeCycle.key)
+    );
+
     return {
       before: beforeData,
       after: afterData,
@@ -575,12 +579,8 @@ export class RuleCycleAnalyzer {
         cycles: (afterData.cycles || 0) - (beforeData.cycles || 0),
         totalRules: (afterData.totalRules || 0) - (beforeData.totalRules || 0),
       },
-      newCycles: (afterData.cycleDetails || []).filter(afterCycle =>
-        !(beforeData.cycleDetails || []).some(beforeCycle => beforeCycle.key === afterCycle.key)
-      ),
-      resolvedCycles: (beforeData.cycleDetails || []).filter(beforeCycle =>
-        !(afterData.cycleDetails || []).some(afterCycle => afterCycle.key === beforeCycle.key)
-      ),
+      newCycles: afterData.cycleDetails || [], // Report ALL cycles in current state
+      resolvedCycles,
     };
   }
 }

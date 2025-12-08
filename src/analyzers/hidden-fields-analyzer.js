@@ -317,6 +317,12 @@ export class HiddenFieldsAnalyzer {
    * Compare before and after analyses
    */
   compare(beforeData, afterData) {
+    const resolvedIssues = beforeData.issues.filter(beforeIssue =>
+      !afterData.issues.some(afterIssue =>
+        afterIssue.field === beforeIssue.field && afterIssue.type === afterIssue.type
+      )
+    );
+
     return {
       before: beforeData,
       after: afterData,
@@ -324,16 +330,8 @@ export class HiddenFieldsAnalyzer {
         hiddenFields: afterData.totalHiddenFields - beforeData.totalHiddenFields,
         unnecessaryFields: afterData.unnecessaryHiddenFields - beforeData.unnecessaryHiddenFields,
       },
-      newIssues: afterData.issues.filter(afterIssue =>
-        !beforeData.issues.some(beforeIssue =>
-          beforeIssue.field === afterIssue.field && beforeIssue.type === afterIssue.type
-        )
-      ),
-      resolvedIssues: beforeData.issues.filter(beforeIssue =>
-        !afterData.issues.some(afterIssue =>
-          afterIssue.field === beforeIssue.field && afterIssue.type === beforeIssue.type
-        )
-      ),
+      newIssues: afterData.issues, // Report ALL issues in current state
+      resolvedIssues,
     };
   }
 }
