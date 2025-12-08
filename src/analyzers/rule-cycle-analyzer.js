@@ -186,10 +186,13 @@ export class RuleCycleAnalyzer {
   async loadCustomFunctions(customFunctionsPath) {
     try {
       // The repository is already checked out by the GitHub Action workflow
-      // Files are in the current working directory (GITHUB_WORKSPACE)
+      // process.cwd() returns: /home/runner/work/{owner}/{repo}
+      // customFunctionsPath is like: /blocks/form/functions.js
       const normalizedPath = customFunctionsPath.replace(/^\/+/, '');
-      const absolutePath = resolve(process.cwd(), normalizedPath);
+      const workingDir = process.cwd();
+      const absolutePath = resolve(workingDir, normalizedPath);
       
+      core.info(`Working directory: ${workingDir}`);
       core.info(`Attempting to load custom functions from: ${absolutePath}`);
       
       // Use dynamic import to load the module with all its dependencies
