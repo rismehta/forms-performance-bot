@@ -1,5 +1,6 @@
 import { createFormInstance } from '@aemforms/af-core';
 import * as core from '@actions/core';
+import { resolve } from 'path';
 
 /**
  * Analyzes form rules for circular dependencies
@@ -13,10 +14,9 @@ export class RuleCycleAnalyzer {
   /**
    * Analyze form JSON for rule cycles
    * @param {Object} formJson - Form JSON object
-   * @param {Array} jsFiles - Optional array of JS files from branch for loading real functions
    * @returns {Promise<Object>} Analysis results
    */
-  async analyze(formJson, jsFiles = []) {
+  async analyze(formJson) {
     if (!formJson) {
       return { error: 'No form JSON provided' };
     }
@@ -75,15 +75,16 @@ export class RuleCycleAnalyzer {
       // Register custom functions for form initialization
       const { FunctionRuntime, createFormInstanceSync } = await import('@aemforms/af-core');
       
-      // Try to load real custom function implementations from the codebase
+      // Try to load real custom function implementations from the checked-out repository
       // This allows af-core to track dependencies from INSIDE custom functions
+      // The repository is already checked out by GitHub Actions, so we can import directly!
       const customFunctionsPath = formJson.properties?.customFunctionsPath;
       
       let realFunctions = {};
       let loadedCount = 0;
       
-      if (customFunctionsPath && jsFiles && jsFiles.length > 0) {
-        const result = this.loadCustomFunctions(customFunctionsPath, jsFiles);
+      if (customFunctionsPath) {
+        const result = await this.loadCustomFunctions(customFunctionsPath);
         if (result) {
           realFunctions = result.functions;
           loadedCount = result.count;
@@ -178,72 +179,55 @@ export class RuleCycleAnalyzer {
   }
 
   /**
-   * Load custom function implementations from the codebase
+   * Load custom function implementations from the checked-out repository
    * @param {string} customFunctionsPath - Path like "/blocks/form/functions.js"
-   * @param {Array} jsFiles - Array of {filename, content} from branch
-   * @returns {Object|null} {functions: {...}, count: number} or null
+   * @returns {Promise<Object|null>} {functions: {...}, count: number} or null
    */
-  loadCustomFunctions(customFunctionsPath, jsFiles) {
+  async loadCustomFunctions(customFunctionsPath) {
     try {
-      // Find the functions file
+      // The repository is already checked out by the GitHub Action workflow
+      // Files are in the current working directory (GITHUB_WORKSPACE)
       const normalizedPath = customFunctionsPath.replace(/^\/+/, '');
-      const functionsFile = jsFiles.find(file => 
-        file.filename === normalizedPath || 
-        file.filename.endsWith(normalizedPath)
-      );
-
-      if (!functionsFile) {
-        core.info(`Custom functions file not found: ${customFunctionsPath}`);
-        return null;
-      }
-
-      core.info(`Found custom functions file: ${functionsFile.filename}`);
-
-      // Extract function exports using simple eval in isolated context
-      // Strategy: Let it fail if it needs imports/DOM - we'll catch and return partial results
+      const absolutePath = resolve(process.cwd(), normalizedPath);
+      
+      core.info(`Attempting to load custom functions from: ${absolutePath}`);
+      
+      // Use dynamic import to load the module with all its dependencies
+      // This automatically resolves ALL import chains!
+      const module = await import(absolutePath);
+      
+      core.info(`Successfully imported ${absolutePath}`);
+      
+      // Extract all exported functions
       const functions = {};
-      let code = functionsFile.content;
-
-      // Remove import statements (they'll fail anyway)
-      code = code.replace(/import\s+.*?from\s+['"].*?['"]\s*;?/g, '');
+      let loadedCount = 0;
       
-      // Wrap in try-catch per function to isolate failures
-      // Look for: export function name(...) or export const name = (...) =>
-      const functionPattern = /export\s+(?:function\s+(\w+)|const\s+(\w+)\s*=\s*(?:async\s+)?\(([^)]*)\)\s*=>)\s*({[\s\S]*?})/g;
-      
-      let match;
-      let extractedCount = 0;
-      
-      while ((match = functionPattern.exec(code)) !== null) {
-        const functionName = match[1] || match[2];
-        const params = match[3] || '';
-        const body = match[4];
-        
-        if (!functionName) continue;
-
-        try {
-          // Create a safe function wrapper that returns null on any error
-          // This allows af-core to track property access even if the function logic fails
-          const safeFunction = new Function('return function ' + functionName + '(' + params + ') { try { ' + 
-            body.slice(1, -1) + // Remove outer braces
-            ' } catch (e) { return null; } }')();
-          
-          functions[functionName] = safeFunction;
-          extractedCount++;
-        } catch (e) {
-          // This specific function failed to parse/create - skip it
-          core.info(`Could not load function ${functionName}: ${e.message}`);
+      for (const [name, value] of Object.entries(module)) {
+        if (typeof value === 'function') {
+          // Wrap in try-catch to handle runtime errors gracefully (DOM access, etc.)
+          functions[name] = (...args) => {
+            try {
+              return value(...args);
+            } catch (e) {
+              // Function crashed (probably DOM/window access) - return null
+              return null;
+            }
+          };
+          loadedCount++;
         }
       }
-
-      if (extractedCount > 0) {
-        core.info(`Successfully extracted ${extractedCount} function(s) from ${functionsFile.filename}`);
-        return { functions, count: extractedCount };
+      
+      if (loadedCount > 0) {
+        core.info(`Loaded ${loadedCount} function(s) from ${filePath}`);
+        return { functions, count: loadedCount };
       }
-
+      
+      core.info(`No functions found in ${filePath}`);
       return null;
+      
     } catch (error) {
-      core.warning(`Error loading custom functions: ${error.message}`);
+      // Import failed - file not found, syntax error, or import chain broken
+      core.info(`Could not load custom functions: ${error.message}`);
       return null;
     }
   }

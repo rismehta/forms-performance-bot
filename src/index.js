@@ -141,14 +141,14 @@ async function run() {
         afterHiddenFields: hiddenFieldsAnalyzer.analyze(afterData.formJson, jsFiles)
       }),
       
-      // 4. Rule Cycles (async - tries to use real function implementations)
+      // 4. Rule Cycles (async - uses real function implementations from checked-out repo)
       (async () => {
         try {
           core.info('Starting rule cycle analysis...');
-          const beforeRuleCycles = await ruleCycleAnalyzer.analyze(beforeData.formJson, jsFiles);
+          const beforeRuleCycles = await ruleCycleAnalyzer.analyze(beforeData.formJson);
           core.info(`Before rules: ${beforeRuleCycles.totalRules || 0} rules, ${beforeRuleCycles.cycles || 0} cycles`);
           
-          const afterRuleCycles = await ruleCycleAnalyzer.analyze(afterData.formJson, jsFiles);
+          const afterRuleCycles = await ruleCycleAnalyzer.analyze(afterData.formJson);
           core.info(`After rules: ${afterRuleCycles.totalRules || 0} rules, ${afterRuleCycles.cycles || 0} cycles`);
           
           return { beforeRuleCycles, afterRuleCycles };
