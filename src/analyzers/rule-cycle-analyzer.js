@@ -259,6 +259,9 @@ export class RuleCycleAnalyzer {
         // Use dynamic import with file:// protocol for ESM modules
         const fileUrl = `file://${absolutePath}`;
         core.info(`Attempting import: ${fileUrl}`);
+        core.info(`Node version: ${process.version}`);
+        core.info(`Current working dir: ${process.cwd()}`);
+        core.info(`__dirname: ${typeof __dirname !== 'undefined' ? __dirname : 'undefined (ESM)'}`);
         
         const module = await import(fileUrl);
         
@@ -289,6 +292,21 @@ export class RuleCycleAnalyzer {
         
       } catch (importError) {
         core.warning(`Failed to import functions: ${importError.message}`);
+        core.warning(`Error name: ${importError.name}`);
+        core.warning(`Error code: ${importError.code || 'none'}`);
+        core.warning(`Error stack: ${importError.stack}`);
+        
+        // The issue might be that ncc bundling breaks dynamic imports
+        // Try to read and log first few lines to verify file is readable
+        try {
+          const { readFileSync } = await import('fs');
+          const content = readFileSync(absolutePath, 'utf-8');
+          core.info(`File is readable, size: ${content.length} bytes`);
+          core.info(`First line: ${content.split('\n')[0]}`);
+        } catch (readError) {
+          core.warning(`Could not read file: ${readError.message}`);
+        }
+        
         return null;
       } finally {
         // Restore original globals (clean up)
