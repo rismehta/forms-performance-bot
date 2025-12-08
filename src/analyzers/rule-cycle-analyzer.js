@@ -1,4 +1,5 @@
 import { createFormInstance } from '@aemforms/af-core';
+import * as core from '@actions/core';
 
 /**
  * Analyzes form rules for circular dependencies
@@ -84,10 +85,12 @@ export class RuleCycleAnalyzer {
       // After this call returns, all rules have executed and _dependents arrays are populated
       let form;
       try {
+        core.info('Creating form instance with af-core...');
         form = await createFormInstanceSync(formJson, undefined, 'off');
+        core.info('Form instance created successfully');
       } catch (coreError) {
         // If af-core fails to create the form instance, return gracefully
-        console.error('ERROR: af-core failed to create form instance:', coreError.message);
+        core.error(`af-core failed to create form instance: ${coreError.message}`);
         return {
           totalRules: 0,
           fieldsWithRules: 0,
@@ -103,9 +106,14 @@ export class RuleCycleAnalyzer {
       
       // After createFormInstance returns, the event queue has run and dependencies are tracked
       // Now build the dependency graph from the form instance's internal state
+      core.info('Building dependency graph from form instance...');
       const dependencyGraph = this.buildDependencyGraphFromForm(form);
+      core.info(`Rule detection: Found ${dependencyGraph.totalRules} rules in ${dependencyGraph.fieldsWithRules} fields`);
       
       const cycles = this.detectCycles(dependencyGraph);
+      if (cycles.length > 0) {
+        core.warning(`Detected ${cycles.length} circular dependenc${cycles.length > 1 ? 'ies' : 'y'} in rules`);
+      }
       const issues = this.generateIssues(cycles);
 
       return {
@@ -151,8 +159,11 @@ export class RuleCycleAnalyzer {
       fieldMap: {}, // Map field IDs to names for lookup
     };
 
+    let visitedFieldCount = 0;
+
     // Visit each field in the form using the built-in visitor
     form.visit((field) => {
+      visitedFieldCount++;
       const fieldName = field.name;
       const fieldId = field.id;
       
@@ -217,6 +228,8 @@ export class RuleCycleAnalyzer {
         }
       });
     });
+
+    core.info(`Visited ${visitedFieldCount} fields, ${graph.fieldsWithRules} have rules`);
 
     return graph;
   }
