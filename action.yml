@@ -1,5 +1,5 @@
-name: 'Performance Bot'
-description: 'Analyzes form performance by comparing before/after URLs in pull requests'
+name: 'AEM Forms Performance Analyzer'
+description: 'Analyzes Adobe Experience Manager (AEM) Adaptive Forms performance by comparing before/after URLs in pull requests. Detects API calls in initialize, hidden field bloat, rule cycles, custom function violations, and CSS issues.'
 author: 'rismehta'
 
 branding:
