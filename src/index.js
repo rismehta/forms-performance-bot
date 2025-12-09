@@ -291,6 +291,30 @@ function detectCriticalIssues(results) {
     }
   }
 
+  // 5. Blocking JavaScript (CRITICAL - blocks parsing and rendering)
+  if (results.formHTML?.newIssues) {
+    const blockingJS = results.formHTML.newIssues.filter(i => 
+      i.type === 'inline-scripts-on-page' || i.type === 'blocking-scripts-on-page'
+    );
+    
+    if (blockingJS.length > 0) {
+      critical.hasCritical = true;
+      critical.count += blockingJS.length;
+      
+      const inlineScripts = blockingJS.filter(i => i.type === 'inline-scripts-on-page');
+      const syncScripts = blockingJS.filter(i => i.type === 'blocking-scripts-on-page');
+      
+      if (inlineScripts.length > 0 && inlineScripts[0].count) {
+        const breakdown = inlineScripts[0].breakdown || {};
+        critical.issues.push(`${inlineScripts[0].count} inline script(s) on page (${breakdown.head || 0} in <head>, ${breakdown.body || 0} in <body>) - block form rendering`);
+      }
+      if (syncScripts.length > 0 && syncScripts[0].count) {
+        const breakdown = syncScripts[0].breakdown || {};
+        critical.issues.push(`${syncScripts[0].count} synchronous script(s) without defer (${breakdown.head || 0} in <head>, ${breakdown.body || 0} in <body>) - block parsing`);
+      }
+    }
+  }
+
   return critical;
 }
 

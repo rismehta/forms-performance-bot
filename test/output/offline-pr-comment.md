@@ -2,7 +2,7 @@
 
 > **Automated analysis of Adaptive Form performance**
 
-**Analysis Time:** 2025-12-09T07:05:34.588Z
+**Analysis Time:** 2025-12-09T07:10:46.010Z
 **Before:** `https://main--test-repo.aem.live/`
 **After:** `https://feature--test-repo.aem.live/`
 
@@ -110,7 +110,7 @@
 - 2 CSS background-image(s) should use Image component
 
 ** Recommendations:**
-- Remove hidden fields that are never shown - use JavaScript variables instead
+- Remove hidden fields that are never shown - use Form variables instead
 - Break circular dependencies immediately - these cause severe performance issues
 - Replace CSS background images with <Image> component for lazy loading and optimization
 - Replace @import with <link> tags or bundle CSS

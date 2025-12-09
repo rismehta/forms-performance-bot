@@ -624,7 +624,7 @@ export class FormPRReporter {
       
       if (newIssues && newIssues.length > 0) {
         impact.warnings.push(`${newIssues.length} unnecessary hidden field(s) bloating DOM`);
-        impact.recommendations.push('Remove hidden fields that are never shown - use JavaScript variables instead');
+        impact.recommendations.push('Remove hidden fields that are never shown - use Form variables instead');
         score -= newIssues.length * 10;
       }
 
