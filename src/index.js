@@ -10,6 +10,7 @@ import { RulePerformanceAnalyzer } from './analyzers/rule-performance-analyzer.j
 import { FormHTMLAnalyzer } from './analyzers/form-html-analyzer.js';
 import { FormCSSAnalyzer } from './analyzers/form-css-analyzer.js';
 import { CustomFunctionAnalyzer } from './analyzers/custom-function-analyzer.js';
+import { AIAutoFixAnalyzer } from './analyzers/ai-autofix-analyzer.js';
 import { FormPRReporter } from './reporters/pr-reporter-form.js';
 import { extractURLsFromPR } from './utils/github-helper.js';
 import { loadConfig } from './utils/config-loader.js';
@@ -63,6 +64,7 @@ async function run() {
     const formHTMLAnalyzer = new FormHTMLAnalyzer(config);
     const formCSSAnalyzer = new FormCSSAnalyzer(config);
     const customFunctionAnalyzer = new CustomFunctionAnalyzer(config);
+    const aiAutoFixAnalyzer = new AIAutoFixAnalyzer(config);
 
     // Analyze both URLs
     core.info('Fetching and analyzing before URL...');
@@ -195,6 +197,21 @@ async function run() {
     // Check for critical performance issues BEFORE posting report
     const criticalIssues = detectCriticalIssues(results);
     
+    // 🤖 AI AUTO-FIX SUGGESTIONS (runs after all analyzers complete)
+    // Generates one-click fixable code suggestions for critical issues
+    core.info(' Running AI Auto-Fix Analysis...');
+    const autoFixSuggestions = await aiAutoFixAnalyzer.analyze(results);
+    
+    if (autoFixSuggestions.enabled) {
+      core.info(` AI Auto-Fix completed: ${autoFixSuggestions.suggestions.length} suggestion(s) generated`);
+      if (autoFixSuggestions.suggestions.length > 0) {
+        core.info('  Fix suggestions for:');
+        autoFixSuggestions.suggestions.forEach(s => {
+          core.info(`    - ${s.title}`);
+        });
+      }
+    }
+    
     // Generate and post PR comment
     const reporter = new FormPRReporter(octokit, owner, repo, prNumber);
     await reporter.generateReport(results, {
@@ -202,6 +219,7 @@ async function run() {
       after: urls.after,
       beforeData, // Include performance metrics
       afterData,  // Include performance metrics
+      autoFixSuggestions, // Include AI-generated fix suggestions
     });
 
     // Fail the build if critical issues are detected

@@ -11,6 +11,7 @@ A GitHub Action that analyzes Adaptive Form performance by comparing before/afte
 - ⚙️ **Custom Function Validation**: Detects DOM access and HTTP requests in custom functions
 - 🎨 **Form HTML Analysis**: Checks lazy loading, image dimensions, blocking scripts
 - 📝 **CSS Analysis**: Detects architectural issues like background-image, @import, deep selectors
+- 🤖 **AI Auto-Fix Suggestions**: Generates one-click fixable code suggestions for critical issues (Azure OpenAI GPT-4.1)
 - 📊 **CWV-Optimized Reports**: Actionable insights with Core Web Vitals impact
 - ⚙️ **Configurable Thresholds**: Smart defaults, fully customizable
 
@@ -91,6 +92,40 @@ jobs:
         uses: your-org/performance-bot@v1
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
+        env:
+          # Optional: Enable AI Auto-Fix Suggestions
+          AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+          AZURE_OPENAI_ENDPOINT: 'https://forms-azure-openai-stg-eastus2.openai.azure.com/'
+          AZURE_OPENAI_DEPLOYMENT: 'gpt-4.1-garage-week'
+          AZURE_OPENAI_API_VERSION: '2024-12-01-preview'
+```
+
+### AI Auto-Fix Configuration (Optional)
+
+To enable AI-powered auto-fix suggestions, add Azure OpenAI credentials to your repository secrets:
+
+1. Go to **Settings** → **Secrets and variables** → **Actions**
+2. Add secret: `AZURE_OPENAI_API_KEY` with your Azure OpenAI API key
+3. (Optional) Override endpoint/deployment in workflow env vars
+
+**Environment Variables:**
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `AZURE_OPENAI_API_KEY` | Azure OpenAI API Key | *(required for AI features)* |
+| `AZURE_OPENAI_ENDPOINT` | Azure OpenAI endpoint URL | `https://forms-azure-openai-stg-eastus2.openai.azure.com/` |
+| `AZURE_OPENAI_DEPLOYMENT` | Model deployment name | `gpt-4.1-garage-week` |
+| `AZURE_OPENAI_API_VERSION` | Azure API version | `2024-12-01-preview` |
+
+**What AI Auto-Fix Does:**
+- 🔧 Generates code suggestions for CSS @import → bundling
+- 🔧 Converts CSS background-image → lazy-loaded Image components
+- 🔧 Adds defer attributes to blocking scripts
+- 🔧 Suggests removal of unnecessary hidden fields
+- 🔧 Refactors API calls from initialize → custom events
+
+All suggestions are **reviewed by you** before applying — the bot never commits code automatically.
+
 ```
 
 ## Architecture
