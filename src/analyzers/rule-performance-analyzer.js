@@ -1,4 +1,4 @@
-import { createFormInstance, createFormInstanceSync, RuleEngine, FunctionRuntime } from '@aemforms/af-core';
+import { createFormInstance, createFormInstanceSync, FunctionRuntime } from '@aemforms/af-core';
 import * as core from '@actions/core';
 import { resolve } from 'path';
 import { existsSync, readFileSync } from 'fs';
@@ -124,7 +124,12 @@ export class RulePerformanceAnalyzer {
       const slowRules = [];
       const ruleExecutionCounts = new Map(); // Track how many times each rule executes
       
-      // Hook into RuleEngine.prototype.execute to measure rule execution times
+      // RuleEngine is not exported from af-core, so we need to get it from a form instance
+      // Create a minimal dummy form to get access to the RuleEngine class
+      const dummyForm = await createFormInstanceSync({ fieldType: 'form', id: 'dummy', title: 'dummy', ':items': {} }, undefined, 'off');
+      const RuleEngine = dummyForm.ruleEngine.constructor;
+      
+      // Now hook into RuleEngine.prototype.execute to measure rule execution times
       const originalExecute = RuleEngine.prototype.execute;
       
       // Wrap execute to profile
