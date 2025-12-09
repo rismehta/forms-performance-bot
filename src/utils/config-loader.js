@@ -14,7 +14,8 @@ const DEFAULT_CONFIG = {
       maxHiddenFields: 20,
       maxRulesPerField: 5,
       maxTotalRules: 50,
-      maxNestedPanels: 15
+      maxNestedPanels: 15,
+      slowRuleThreshold: 50 // ms - flag rules taking longer than this
     },
     html: {
       maxDOMSize: 800,

@@ -6,18 +6,23 @@ import nodeCrypto from 'crypto';
 import vm from 'vm';
 
 /**
- * Analyzes form rules for circular dependencies
+ * Analyzes form rules for performance issues:
+ * 1. Circular dependencies (cycles) - causes infinite loops
+ * 2. Slow rule execution (runtime profiling) - blocks rendering
+ * 
  * Uses @aemforms/af-core to leverage the built-in dependency tracking
+ * and hooks into RuleEngine.execute() to measure actual execution times
  */
-export class RuleCycleAnalyzer {
+export class RulePerformanceAnalyzer {
   constructor(config = null) {
     this.config = config;
+    this.slowRuleThreshold = config?.thresholds?.form?.slowRuleThreshold || 50; // ms
   }
 
   /**
-   * Analyze form JSON for rule cycles
+   * Analyze form JSON for rule cycles and slow rules
    * @param {Object} formJson - Form JSON object
-   * @returns {Promise<Object>} Analysis results
+   * @returns {Promise<Object>} Analysis results with cycles and slow rules
    */
   async analyze(formJson) {
     if (!formJson) {
@@ -117,12 +122,47 @@ export class RuleCycleAnalyzer {
       
       core.info(`Registered ${loadedCount} real + ${Object.keys(mockFunctions).length} mock function(s)`);
       
+      // RUNTIME PROFILING: Hook into RuleEngine.execute() to measure actual rule execution times
+      const slowRules = [];
+      const ruleExecutionCounts = new Map(); // Track how many times each rule executes
+      
+      // Get RuleEngine class to hook into
+      const { RuleEngine } = await import('@aemforms/af-core');
+      const originalExecute = RuleEngine.prototype.execute;
+      
+      // Wrap execute to profile
+      RuleEngine.prototype.execute = function(node, data, globals, useValueOf, eString) {
+        const start = performance.now();
+        const result = originalExecute.call(this, node, data, globals, useValueOf, eString);
+        const duration = performance.now() - start;
+        
+        // Track execution
+        const fieldName = globals?.field?.name || 'unknown';
+        const eventType = globals?.$event?.type || 'unknown';
+        const ruleKey = `${fieldName}:${eString}`;
+        
+        // Count executions
+        ruleExecutionCounts.set(ruleKey, (ruleExecutionCounts.get(ruleKey) || 0) + 1);
+        
+        // Flag slow rules (only if they take significant time)
+        if (duration > this.slowRuleThreshold) {
+          slowRules.push({
+            field: fieldName,
+            expression: eString.substring(0, 150), // Truncate long expressions
+            duration: Math.round(duration * 10) / 10, // Round to 1 decimal
+            event: eventType,
+          });
+        }
+        
+        return result;
+      }.bind(this); // Bind this to access slowRuleThreshold
+      
       // Use createFormInstanceSync which waits for all promises (including rule execution)
       // This ensures ExecuteRule event completes and dependencies are tracked
       // After this call returns, all rules have executed and _dependents arrays are populated
       let form;
       try {
-        core.info('Creating form instance with af-core...');
+        core.info('Creating form instance with af-core (profiling rule execution)...');
         form = await createFormInstanceSync(formJson, undefined, 'off');
         core.info('Form instance created successfully');
       } catch (coreError) {
@@ -158,6 +198,9 @@ export class RuleCycleAnalyzer {
         core.info(`[CustomFunctions] Note: Errors are expected for functions accessing formData/globals in test context`);
       }
       
+      // Restore original RuleEngine.execute
+      RuleEngine.prototype.execute = originalExecute;
+      
       // After createFormInstance returns, the event queue has run and dependencies are tracked
       // Now build the dependency graph from the form instance's internal state
       core.info('Building dependency graph from form instance...');
@@ -170,12 +213,27 @@ export class RuleCycleAnalyzer {
       }
       const issues = this.generateIssues(cycles);
 
+      // Process slow rules
+      const sortedSlowRules = slowRules
+        .sort((a, b) => b.duration - a.duration) // Sort by duration descending
+        .slice(0, 10); // Top 10 slowest
+      
+      if (sortedSlowRules.length > 0) {
+        core.warning(`Detected ${slowRules.length} slow rule execution(s) (> ${this.slowRuleThreshold}ms)`);
+        core.info(`Top ${Math.min(3, sortedSlowRules.length)} slowest rules:`);
+        sortedSlowRules.slice(0, 3).forEach(rule => {
+          core.info(`  - Field "${rule.field}" took ${rule.duration}ms during ${rule.event}`);
+        });
+      }
+
       return {
         totalRules: dependencyGraph.totalRules,
         fieldsWithRules: dependencyGraph.fieldsWithRules,
         dependencies: dependencyGraph.dependencies,
         cycles: cycles.length,
         cycleDetails: cycles,
+        slowRules: sortedSlowRules, // Add slow rules to results
+        slowRuleCount: slowRules.length,
         issues,
         circularDependencies: cycles.map(cycle => ({
           cycle: cycle.fields || cycle.path,
@@ -578,10 +636,14 @@ export class RuleCycleAnalyzer {
       delta: {
         cycles: (afterData.cycles || 0) - (beforeData.cycles || 0),
         totalRules: (afterData.totalRules || 0) - (beforeData.totalRules || 0),
+        slowRules: (afterData.slowRuleCount || 0) - (beforeData.slowRuleCount || 0),
       },
       newCycles: afterData.cycleDetails || [], // Report ALL cycles in current state
       resolvedCycles,
+      slowRules: afterData.slowRules || [], // Top 10 slowest rules
+      slowRuleCount: afterData.slowRuleCount || 0,
     };
   }
 }
+
 

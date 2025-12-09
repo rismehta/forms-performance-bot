@@ -286,14 +286,39 @@ export class FormPRReporter {
    * Build rule cycles section
    */
   buildRuleCyclesSection(ruleCycles) {
-    const lines = ['###  Rule Dependency Cycles\n'];
+    const lines = ['###  Rule Performance Analysis\n'];
 
-    const { newCycles, resolvedCycles, after } = ruleCycles;
+    const { newCycles, resolvedCycles, after, slowRules, slowRuleCount } = ruleCycles;
 
     if (after && !after.error) {
       lines.push(`**Total Rules:** ${after.totalRules || 0}`);
       lines.push(`**Fields with Rules:** ${after.fieldsWithRules || 0}`);
-      lines.push(`**Circular Dependencies:** ${after.cycles || 0}\n`);
+      lines.push(`**Circular Dependencies:** ${after.cycles || 0}`);
+      if (slowRuleCount > 0) {
+        lines.push(`**Slow Rules:** ${slowRuleCount} (> 50ms execution)\n`);
+      } else {
+        lines.push('');
+      }
+
+      // Show slow rules first (these impact every interaction)
+      if (slowRules && slowRules.length > 0) {
+        lines.push('####  Slow Rule Execution\n');
+        lines.push(`**${slowRuleCount} rule(s) take > 50ms to execute** - these slow down form interactions.\n`);
+        
+        // Show top 5 slowest
+        const top5 = slowRules.slice(0, 5);
+        top5.forEach(rule => {
+          lines.push(`- **\`${rule.field}\`** - ${rule.duration}ms`);
+          lines.push(`  Event: ${rule.event}, Expression: \`${rule.expression.substring(0, 60)}...\``);
+        });
+        
+        if (slowRuleCount > 5) {
+          lines.push(`\n*... and ${slowRuleCount - 5} more slow rule(s)*`);
+        }
+        
+        lines.push('');
+        lines.push('** Recommendation:** Optimize these rules by reducing complex computations, caching results, or moving expensive operations to custom events.\n');
+      }
 
       // Show cycle details
       if (after.cycleDetails && after.cycleDetails.length > 0) {
@@ -301,9 +326,9 @@ export class FormPRReporter {
         
         after.cycleDetails.forEach((cycle, index) => {
           lines.push(`**Cycle ${index + 1}:** \`${cycle.fields.join(' → ')}\``);
-          lines.push(`- **Fields involved:** ${cycle.fields.filter((f, i, arr) => arr.indexOf(f) === i).join(', ')}`);
-          lines.push(`- ** Recommendation:** Break this circular dependency by removing or modifying one of the rules. This can cause infinite loops and severely impact performance.\n`);
         });
+        lines.push('');
+        lines.push('** Recommendation:** Break circular dependencies immediately - these cause infinite loops and severely impact performance.\n');
       }
     }
 
@@ -609,12 +634,12 @@ export class FormPRReporter {
       }
     }
 
-    // Rule cycles
+    // Rule cycles and slow rules
     if (results.ruleCycles && !results.ruleCycles.after?.error) {
-      const { newCycles, resolvedCycles, after } = results.ruleCycles;
+      const { newCycles, resolvedCycles, after, slowRuleCount } = results.ruleCycles;
       
       if (newCycles && newCycles.length > 0) {
-        impact.critical.push(`${newCycles.length} circular dependenc${newCycles.length > 1 ? 'ies' : 'y'} introduced - can cause infinite loops`);
+        impact.critical.push(`${newCycles.length} circular dependenc${newCycles.length > 1 ? 'ies' : 'y'} - can cause infinite loops`);
         impact.recommendations.push('Break circular dependencies immediately - these cause severe performance issues');
         score -= newCycles.length * 50;
       }
@@ -626,6 +651,13 @@ export class FormPRReporter {
 
       if (after && after.cycles > 0 && !newCycles?.length) {
         impact.warnings.push(`${after.cycles} existing circular dependenc${after.cycles > 1 ? 'ies' : 'y'} still present`);
+      }
+      
+      // Slow rules (CRITICAL - blocks interactions)
+      if (slowRuleCount > 0) {
+        impact.critical.push(`${slowRuleCount} slow rule(s) detected (> 50ms execution) - blocks form interactions`);
+        impact.recommendations.push('Optimize slow rules: reduce computations, or defer this rule until after form renders');
+        score -= slowRuleCount * 20;
       }
     }
 

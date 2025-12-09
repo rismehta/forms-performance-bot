@@ -6,7 +6,7 @@ import { URLAnalyzer } from './analyzers/url-analyzer.js';
 import { FormAnalyzer } from './analyzers/form-analyzer.js';
 import { FormEventsAnalyzer } from './analyzers/form-events-analyzer.js';
 import { HiddenFieldsAnalyzer } from './analyzers/hidden-fields-analyzer.js';
-import { RuleCycleAnalyzer } from './analyzers/rule-cycle-analyzer.js';
+import { RulePerformanceAnalyzer } from './analyzers/rule-performance-analyzer.js';
 import { FormHTMLAnalyzer } from './analyzers/form-html-analyzer.js';
 import { FormCSSAnalyzer } from './analyzers/form-css-analyzer.js';
 import { CustomFunctionAnalyzer } from './analyzers/custom-function-analyzer.js';
@@ -59,7 +59,7 @@ async function run() {
     const formAnalyzer = new FormAnalyzer(config);
     const formEventsAnalyzer = new FormEventsAnalyzer(config);
     const hiddenFieldsAnalyzer = new HiddenFieldsAnalyzer(config);
-    const ruleCycleAnalyzer = new RuleCycleAnalyzer(config);
+    const rulePerformanceAnalyzer = new RulePerformanceAnalyzer(config);
     const formHTMLAnalyzer = new FormHTMLAnalyzer(config);
     const formCSSAnalyzer = new FormCSSAnalyzer(config);
     const customFunctionAnalyzer = new CustomFunctionAnalyzer(config);
@@ -144,11 +144,11 @@ async function run() {
       (async () => {
         try {
           core.info('Starting rule cycle analysis...');
-          const beforeRuleCycles = await ruleCycleAnalyzer.analyze(beforeData.formJson);
-          core.info(`Before rules: ${beforeRuleCycles.totalRules || 0} rules, ${beforeRuleCycles.cycles || 0} cycles`);
+          const beforeRuleCycles = await rulePerformanceAnalyzer.analyze(beforeData.formJson);
+          core.info(`Before rules: ${beforeRuleCycles.totalRules || 0} rules, ${beforeRuleCycles.cycles || 0} cycles, ${beforeRuleCycles.slowRuleCount || 0} slow`);
           
-          const afterRuleCycles = await ruleCycleAnalyzer.analyze(afterData.formJson);
-          core.info(`After rules: ${afterRuleCycles.totalRules || 0} rules, ${afterRuleCycles.cycles || 0} cycles`);
+          const afterRuleCycles = await rulePerformanceAnalyzer.analyze(afterData.formJson);
+          core.info(`After rules: ${afterRuleCycles.totalRules || 0} rules, ${afterRuleCycles.cycles || 0} cycles, ${afterRuleCycles.slowRuleCount || 0} slow`);
           
           return { beforeRuleCycles, afterRuleCycles };
         } catch (error) {
@@ -176,7 +176,7 @@ async function run() {
 
     // Compile comparison results
     const hiddenFieldsAnalysis = hiddenFieldsAnalyzer.compare(beforeHiddenFields, afterHiddenFields);
-    const ruleCycleAnalysis = ruleCycleAnalyzer.compare(beforeRuleCycles, afterRuleCycles);
+    const ruleCycleAnalysis = rulePerformanceAnalyzer.compare(beforeRuleCycles, afterRuleCycles);
     const formCSSAnalysis = { after: cssAnalysis, newIssues: cssAnalysis.issues, resolvedIssues: [] };
     const customFunctionAnalysis = customFunctionAnalyzer.compare(beforeCustomFunctions, afterCustomFunctions);
     
@@ -243,7 +243,14 @@ function detectCriticalIssues(results) {
   if (results.ruleCycles?.newCycles && results.ruleCycles.newCycles.length > 0) {
     critical.hasCritical = true;
     critical.count += results.ruleCycles.newCycles.length;
-    critical.issues.push(`${results.ruleCycles.newCycles.length} new circular dependenc${results.ruleCycles.newCycles.length > 1 ? 'ies' : 'y'} (infinite loops)`);
+    critical.issues.push(`${results.ruleCycles.newCycles.length} circular dependenc${results.ruleCycles.newCycles.length > 1 ? 'ies' : 'y'} (infinite loops)`);
+  }
+
+  // 2b. Slow rules (CRITICAL - blocks interactions)
+  if (results.ruleCycles?.slowRuleCount && results.ruleCycles.slowRuleCount > 0) {
+    critical.hasCritical = true;
+    critical.count += results.ruleCycles.slowRuleCount;
+    critical.issues.push(`${results.ruleCycles.slowRuleCount} slow rule(s) detected (> 50ms execution, blocks interactions)`);
   }
 
   // 3. Custom functions with violations (CRITICAL - breaks architecture)
@@ -264,13 +271,23 @@ function detectCriticalIssues(results) {
     }
   }
 
-  // 4. Blocking @import in CSS (CRITICAL - blocks rendering)
+  // 4. CSS issues (CRITICAL - blocks rendering)
   if (results.formCSS?.newIssues) {
-    const blockingImports = results.formCSS.newIssues.filter(i => i.type === 'css-import-blocking');
-    if (blockingImports.length > 0) {
+    const criticalCSS = results.formCSS.newIssues.filter(i => i.severity === 'error');
+    if (criticalCSS.length > 0) {
       critical.hasCritical = true;
-      critical.count += blockingImports.length;
-      critical.issues.push(`${blockingImports.length} @import statement(s) in CSS (blocks rendering)`);
+      critical.count += criticalCSS.length;
+      
+      // Break down by type
+      const blockingImports = criticalCSS.filter(i => i.type === 'css-import-blocking');
+      const backgroundImages = criticalCSS.filter(i => i.type === 'css-background-image');
+      
+      if (blockingImports.length > 0) {
+        critical.issues.push(`${blockingImports.length} @import statement(s) in CSS (blocks rendering)`);
+      }
+      if (backgroundImages.length > 0) {
+        critical.issues.push(`${backgroundImages.length} CSS background-image(s) (cannot be lazy loaded)`);
+      }
     }
   }
 
