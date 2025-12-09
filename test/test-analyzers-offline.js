@@ -14,7 +14,7 @@
 import { FormAnalyzer } from '../src/analyzers/form-analyzer.js';
 import { FormEventsAnalyzer } from '../src/analyzers/form-events-analyzer.js';
 import { HiddenFieldsAnalyzer } from '../src/analyzers/hidden-fields-analyzer.js';
-import { RuleCycleAnalyzer } from '../src/analyzers/rule-cycle-analyzer.js';
+import { RulePerformanceAnalyzer } from '../src/analyzers/rule-performance-analyzer.js';
 import { CustomFunctionAnalyzer } from '../src/analyzers/custom-function-analyzer.js';
 import { FormHTMLAnalyzer } from '../src/analyzers/form-html-analyzer.js';
 import { FormCSSAnalyzer } from '../src/analyzers/form-css-analyzer.js';
@@ -88,7 +88,7 @@ async function runTests() {
     const formAnalyzer = new FormAnalyzer(config);
     const formEventsAnalyzer = new FormEventsAnalyzer(config);
     const hiddenFieldsAnalyzer = new HiddenFieldsAnalyzer(config);
-    const ruleCycleAnalyzer = new RuleCycleAnalyzer(config);
+    const rulePerformanceAnalyzer = new RulePerformanceAnalyzer(config);
     const customFunctionAnalyzer = new CustomFunctionAnalyzer(config);
     const formHTMLAnalyzer = new FormHTMLAnalyzer(config);
     const formCSSAnalyzer = new FormCSSAnalyzer(config);
@@ -145,7 +145,7 @@ async function runTests() {
     console.log('TEST 4: Rule Cycle Detection\n');
     console.log('───────────────────────────────────────────────────────────\n');
     
-    const ruleCycles = await ruleCycleAnalyzer.analyze(mockFormJSON);
+    const ruleCycles = await rulePerformanceAnalyzer.analyze(mockFormJSON);
     console.log('Fields with Rules:', ruleCycles.fieldsWithRules || 0);
     console.log('Total Rules:', ruleCycles.totalRules || 0);
     console.log('Circular Dependencies Found:', ruleCycles.cycles || 0);

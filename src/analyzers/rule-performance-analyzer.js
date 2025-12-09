@@ -123,54 +123,51 @@ export class RulePerformanceAnalyzer {
       // RUNTIME PROFILING: Hook into RuleEngine.execute() to measure actual rule execution times
       const slowRules = [];
       const ruleExecutionCounts = new Map(); // Track how many times each rule executes
+      let originalExecute = null;
+      const that = this; // Capture 'this' for use in callback
       
-      // RuleEngine is not exported from af-core, so we need to get it from a form instance
-      // Create a minimal dummy form to get access to the RuleEngine class
-      const dummyForm = await createFormInstanceSync({ 
-        fieldType: 'form', 
-        id: 'dummy', 
-        title: 'dummy', 
-        ':items': []  // Must be an array, not object
-      }, undefined, 'off');
-      const RuleEngine = dummyForm.ruleEngine.constructor;
-      
-      // Now hook into RuleEngine.prototype.execute to measure rule execution times
-      const originalExecute = RuleEngine.prototype.execute;
-      
-      // Wrap execute to profile
-      RuleEngine.prototype.execute = function(node, data, globals, useValueOf, eString) {
-        const start = performance.now();
-        const result = originalExecute.call(this, node, data, globals, useValueOf, eString);
-        const duration = performance.now() - start;
-        
-        // Track execution
-        const fieldName = globals?.field?.name || 'unknown';
-        const eventType = globals?.$event?.type || 'unknown';
-        const ruleKey = `${fieldName}:${eString}`;
-        
-        // Count executions
-        ruleExecutionCounts.set(ruleKey, (ruleExecutionCounts.get(ruleKey) || 0) + 1);
-        
-        // Flag slow rules (only if they take significant time)
-        if (duration > this.slowRuleThreshold) {
-          slowRules.push({
-            field: fieldName,
-            expression: eString.substring(0, 150), // Truncate long expressions
-            duration: Math.round(duration * 10) / 10, // Round to 1 decimal
-            event: eventType,
-          });
-        }
-        
-        return result;
-      }.bind(this); // Bind this to access slowRuleThreshold
-      
-      // Use createFormInstanceSync which waits for all promises (including rule execution)
+      // Use createFormInstanceSync with callback to hook into RuleEngine BEFORE event queue runs
       // This ensures ExecuteRule event completes and dependencies are tracked
       // After this call returns, all rules have executed and _dependents arrays are populated
       let form;
       try {
         core.info('Creating form instance with af-core (profiling rule execution)...');
-        form = await createFormInstanceSync(formJson, undefined, 'off');
+        
+        // Use callback to access form BEFORE event queue runs
+        form = await createFormInstanceSync(formJson, (f) => {
+          // RuleEngine is not exported from af-core, so we get it from the form instance
+          // The callback runs BEFORE f.getEventQueue().runPendingQueue() is called
+          const RuleEngine = f.ruleEngine.constructor;
+          originalExecute = RuleEngine.prototype.execute;
+          
+          // Hook into RuleEngine.prototype.execute to measure rule execution times
+          RuleEngine.prototype.execute = function(node, data, globals, useValueOf, eString) {
+            const start = performance.now();
+            const result = originalExecute.call(this, node, data, globals, useValueOf, eString);
+            const duration = performance.now() - start;
+            
+            // Track execution
+            const fieldName = globals?.field?.name || 'unknown';
+            const eventType = globals?.$event?.type || 'unknown';
+            const ruleKey = `${fieldName}:${eString}`;
+            
+            // Count executions
+            ruleExecutionCounts.set(ruleKey, (ruleExecutionCounts.get(ruleKey) || 0) + 1);
+            
+            // Flag slow rules (only if they take significant time)
+            if (duration > that.slowRuleThreshold) {
+              slowRules.push({
+                field: fieldName,
+                expression: eString.substring(0, 150), // Truncate long expressions
+                duration: Math.round(duration * 10) / 10, // Round to 1 decimal
+                event: eventType,
+              });
+            }
+            
+            return result;
+          };
+        }, 'off');
+        
         core.info('Form instance created successfully');
       } catch (coreError) {
         // If af-core fails to create the form instance, return gracefully
@@ -205,8 +202,11 @@ export class RulePerformanceAnalyzer {
         core.info(`[CustomFunctions] Note: Errors are expected for functions accessing formData/globals in test context`);
       }
       
-      // Restore original RuleEngine.execute
-      RuleEngine.prototype.execute = originalExecute;
+      // Restore original RuleEngine.execute (if it was hooked)
+      if (originalExecute && form) {
+        const RuleEngine = form.ruleEngine.constructor;
+        RuleEngine.prototype.execute = originalExecute;
+      }
       
       // After createFormInstance returns, the event queue has run and dependencies are tracked
       // Now build the dependency graph from the form instance's internal state
