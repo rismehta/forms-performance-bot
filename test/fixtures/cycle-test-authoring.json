@@ -1,0 +1,52 @@
+{
+  "id": "test-authoring-cycle",
+  "fieldType": "form",
+  "title": "Test AEM Authoring Form with Circular Dependencies",
+  "name": "test-authoring-cycle",
+  "adaptiveform": "0.15.2",
+  "metadata": {
+    "grammar": "json-formula-1.0.0",
+    "version": "1.0.0"
+  },
+  "properties": {
+    "fd:schemaType": "BASIC"
+  },
+  ":itemsOrder": [
+    "emailinput",
+    "telephoneinput",
+    "text"
+  ],
+  ":items": {
+    "emailinput": {
+      "id": "emailinput-7ab59e4124",
+      "fieldType": "email",
+      "name": "emailinput1765267476175",
+      "type": "string",
+      "label": {
+        "value": "Email Input"
+      },
+      "rules": {
+        "value": "if(telephoneinput1765267486835.$value == text1765267502027.$value,'email',$field)"
+      }
+    },
+    "telephoneinput": {
+      "id": "telephoneinput-2198354af0",
+      "fieldType": "text-input",
+      "name": "telephoneinput1765267486835",
+      "type": "string",
+      "label": {
+        "value": "Telephone Input"
+      }
+    },
+    "text": {
+      "id": "text-e498d7b876",
+      "fieldType": "plain-text",
+      "name": "text1765267502027",
+      "richText": false,
+      "rules": {
+        "value": "if(!(emailinput1765267476175.$value),'text',$field)"
+      }
+    }
+  }
+}
+
