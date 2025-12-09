@@ -126,7 +126,12 @@ export class RulePerformanceAnalyzer {
       
       // RuleEngine is not exported from af-core, so we need to get it from a form instance
       // Create a minimal dummy form to get access to the RuleEngine class
-      const dummyForm = await createFormInstanceSync({ fieldType: 'form', id: 'dummy', title: 'dummy', ':items': {} }, undefined, 'off');
+      const dummyForm = await createFormInstanceSync({ 
+        fieldType: 'form', 
+        id: 'dummy', 
+        title: 'dummy', 
+        ':items': []  // Must be an array, not object
+      }, undefined, 'off');
       const RuleEngine = dummyForm.ruleEngine.constructor;
       
       // Now hook into RuleEngine.prototype.execute to measure rule execution times
