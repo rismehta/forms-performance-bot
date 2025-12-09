@@ -102,7 +102,7 @@ export class FormPRReporter {
       return '';
     }
 
-    const lines = ['### 🤖 AI Auto-Fix Suggestions\n'];
+    const lines = ['### AI Auto-Fix Suggestions\n'];
     lines.push(`> **${autoFixData.suggestions.length} automated fix${autoFixData.suggestions.length > 1 ? 'es' : ''} available** — Review and apply to improve performance\n`);
     
     // Group by severity
@@ -110,14 +110,14 @@ export class FormPRReporter {
     const high = autoFixData.suggestions.filter(s => s.severity === 'high');
     
     if (critical.length > 0) {
-      lines.push('#### 🔴 Critical Fixes\n');
+      lines.push('#### Critical Fixes\n');
       critical.forEach((suggestion, index) => {
         lines.push(this.formatAutoFixSuggestion(suggestion, index + 1));
       });
     }
     
     if (high.length > 0) {
-      lines.push('#### 🟠 High Priority Fixes\n');
+      lines.push('#### High Priority Fixes\n');
       high.forEach((suggestion, index) => {
         lines.push(this.formatAutoFixSuggestion(suggestion, critical.length + index + 1));
       });

@@ -397,15 +397,15 @@ ${fieldNames.length > 5 ? `\n...and ${fieldNames.length - 5} more` : ''}
       suggestions.push({
         type: 'custom-function-http-fix',
         severity: 'critical',
-        function: issue.function,
+        function: issue.functionName,
         file: issue.file,
-        title: `Move HTTP request from ${issue.function}() to form-level API call`,
-        description: `Custom function "${issue.function}()" makes direct HTTP requests. This bypasses error handling, loading states, and retry logic.`,
+        title: `Move HTTP request from ${issue.functionName}() to form-level API call`,
+        description: `Custom function "${issue.functionName}()" makes direct HTTP requests. This bypasses error handling, loading states, and retry logic.`,
         guidance: `
 **Current (ANTI-PATTERN):**
 \`\`\`javascript
 // In ${issue.file}:
-export function ${issue.function}(...args) {
+export function ${issue.functionName}(...args) {
   // Direct HTTP call in custom function
   const response = await fetch(...);  // or axios(), etc.
   return response;
@@ -440,7 +440,7 @@ export function ${issue.function}(...args) {
 }
 
 // In custom function - trigger the event instead of calling request():
-export function ${issue.function}(field, globals) {
+export function ${issue.functionName}(field, globals) {
   // Validate/transform data first
   const processedData = transformData(field.$value);
   
@@ -475,15 +475,15 @@ export function ${issue.function}(field, globals) {
       suggestions.push({
         type: 'custom-function-dom-fix',
         severity: 'critical',
-        function: issue.function,
+        function: issue.functionName,
         file: issue.file,
-        title: `Replace DOM access in ${issue.function}() with custom component`,
-        description: `Custom function "${issue.function}()" directly manipulates DOM. This breaks AEM Forms architecture and causes maintenance issues.`,
+        title: `Replace DOM access in ${issue.functionName}() with custom component`,
+        description: `Custom function "${issue.functionName}()" directly manipulates DOM. This breaks AEM Forms architecture and causes maintenance issues.`,
         guidance: `
 **Current (ANTI-PATTERN):**
 \`\`\`javascript
 // In ${issue.file}:
-export function ${issue.function}(...args) {
+export function ${issue.functionName}(...args) {
   // Direct DOM manipulation
   document.querySelector('.field').style.color = 'red';
   // or
@@ -496,7 +496,7 @@ export function ${issue.function}(...args) {
 
 **Step 1: Create custom component**
 \`\`\`javascript
-// In blocks/form/components/${issue.function}/
+// In blocks/form/components/${issue.functionName}/
 class CustomFieldComponent extends HTMLElement {
   connectedCallback() {
     this.render();
@@ -516,14 +516,14 @@ class CustomFieldComponent extends HTMLElement {
   }
 }
 
-customElements.define('custom-field-${issue.function}', CustomFieldComponent);
+customElements.define('custom-field-${issue.functionName}', CustomFieldComponent);
 \`\`\`
 
 **Step 2: Use component in form**
 \`\`\`javascript
 // In form JSON - use custom fieldType:
 {
-  "fieldType": "custom-field-${issue.function}",
+  "fieldType": "custom-field-${issue.functionName}",
   "name": "myCustomField"
 }
 \`\`\`
@@ -531,7 +531,7 @@ customElements.define('custom-field-${issue.function}', CustomFieldComponent);
 **Step 3: Interact via setProperty (not DOM)**
 \`\`\`javascript
 // In custom function - use AEM Forms APIs:
-export function ${issue.function}(field, newState, globals) {
+export function ${issue.functionName}(field, newState, globals) {
   // Update via setProperty (not DOM)
   globals.functions.setProperty(field, { 
     value: newState 
