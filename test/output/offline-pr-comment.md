@@ -2,7 +2,7 @@
 
 > **Automated analysis of Adaptive Form performance**
 
-**Analysis Time:** 2025-12-09T08:12:46.505Z
+**Analysis Time:** 2025-12-09T09:39:04.595Z
 **Before:** `https://main--test-repo.aem.live/`
 **After:** `https://feature--test-repo.aem.live/`
 
@@ -59,9 +59,17 @@
 
 **Total Rules:** 4
 **Fields with Rules:** 4
-**Circular Dependencies:** 0
+**Circular Dependencies:** 1
 
- No circular dependencies detected.
+####  Critical: Circular Dependencies Found
+
+**Cycle 1:** `fieldA → fieldA → fieldB → fieldC`
+- **Fields involved:** fieldA, fieldB, fieldC
+- ** Recommendation:** Break this circular dependency by removing or modifying one of the rules. This can cause infinite loops and severely impact performance.
+
+####  New Circular Dependencies Introduced
+
+- `fieldA → fieldA → fieldB → fieldC`
 
 ###  Form Rendering Performance
 
@@ -127,6 +135,7 @@
 **Performance Impact:** Critical Issues Detected 
 
 ** Critical Issues:**
+- 1 circular dependency introduced - can cause infinite loops
 - 1 @import statement(s) blocking rendering
 - 1 custom function(s) accessing DOM directly
 
@@ -137,6 +146,7 @@
 
 ** Recommendations:**
 - Remove hidden fields that are never shown - use JavaScript variables instead
+- Break circular dependencies immediately - these cause severe performance issues
 - Replace CSS background images with <Image> component for lazy loading and optimization
 - Replace @import with <link> tags or bundle CSS
 - Remove DOM access from custom functions - use form data model instead

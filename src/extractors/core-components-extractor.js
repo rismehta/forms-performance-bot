@@ -201,16 +201,24 @@ export class CoreComponentsExtractor {
   /**
    * Normalize Core Components field type to standard format
    * Based on: https://github.com/adobe/aem-core-forms-components
-   * Resource types: core/fd/components/form/{component}
+   * 
+   * Handles:
+   * 1. Direct fieldType values (e.g., "email", "panel", "text-input")
+   * 2. Resource types (e.g., "core/fd/components/form/textinput")
    */
   normalizeFieldType(type) {
     if (!type) return 'text-input';
     
     const t = type.toLowerCase();
     
-    // Core Components: core/fd/components/form/{component}
-    // Keep original component types to preserve identity
-    const coreComponentsMap = {
+    // Map of all component types to normalized fieldType
+    // Handles both direct fieldType values and resource type component names
+    const typeMap = {
+      // Direct fieldType values that need mapping
+      'email': 'email-input',
+      'text': 'plain-text',
+      
+      // Resource type component names (from path like core/fd/components/form/XXX)
       'textinput': 'text-input',
       'emailinput': 'email-input',
       'telephoneinput': 'telephone-input',
@@ -218,31 +226,56 @@ export class CoreComponentsExtractor {
       'datepicker': 'date-input',
       'dropdown': 'drop-down',
       'checkboxgroup': 'checkbox-group',
-      'checkbox': 'checkbox',
       'radiobutton': 'radio-group',
       'fileinput': 'file-input',
-      'panel': 'panel',
       'container': 'panel',
+      'panelcontainer': 'panel',
+      'formcontainer': 'form',
+      'horizontaltabs': 'tabs',
+      'verticaltabs': 'tabs',
+      'pageheader': 'page-header',
+      // Component names that match their fieldType (for resource type paths)
+      'panel': 'panel',
       'wizard': 'wizard',
       'tabs': 'tabs',
       'accordion': 'accordion',
       'button': 'button',
+      'checkbox': 'checkbox',
       'image': 'image',
-      'text': 'plain-text',
       'title': 'title',
-      'fragment': 'fragment'
+      'fragment': 'fragment',
+      'footer': 'footer',
     };
+    
+    // If already a valid normalized type, return as-is
+    const validTypes = [
+      'text-input', 'email-input', 'telephone-input', 'number-input', 
+      'date-input', 'drop-down', 'checkbox-group', 'radio-group', 
+      'file-input', 'plain-text', 'multiline-input', 'panel', 'form',
+      'button', 'checkbox', 'image', 'wizard', 'tabs', 'accordion',
+      'fragment', 'title', 'page-header', 'footer'
+    ];
+    
+    if (validTypes.includes(t)) {
+      return t;
+    }
+    
+    // Check direct mapping
+    if (typeMap[t]) {
+      return typeMap[t];
+    }
 
-    // Extract component name from path like "core/fd/components/form/textinput"
+    // Extract component name from resource type path
+    // e.g., "core/fd/components/form/textinput" or "mysite/components/adaptiveForm/textinput"
     const parts = t.split('/');
     const componentName = parts[parts.length - 1];
     
-    if (coreComponentsMap[componentName]) {
-      return coreComponentsMap[componentName];
+    if (typeMap[componentName]) {
+      return typeMap[componentName];
     }
 
     // Fallback: check if type contains any known component name
-    for (const [key, value] of Object.entries(coreComponentsMap)) {
+    for (const [key, value] of Object.entries(typeMap)) {
       if (t.includes(key)) return value;
     }
     

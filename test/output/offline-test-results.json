@@ -183,11 +183,86 @@
   "ruleCycles": {
     "totalRules": 4,
     "fieldsWithRules": 4,
-    "dependencies": {},
-    "cycles": 0,
-    "cycleDetails": [],
-    "issues": [],
-    "circularDependencies": []
+    "dependencies": {
+      "fieldA": {
+        "dependents": [
+          "fieldC"
+        ],
+        "dependsOn": [
+          "fieldB"
+        ]
+      },
+      "fieldB": {
+        "dependents": [
+          "fieldA"
+        ],
+        "dependsOn": [
+          "fieldC"
+        ]
+      },
+      "fieldC": {
+        "dependents": [
+          "fieldB"
+        ],
+        "dependsOn": [
+          "fieldA"
+        ]
+      }
+    },
+    "cycles": 1,
+    "cycleDetails": [
+      {
+        "key": "fieldA->fieldA->fieldB->fieldC",
+        "fields": [
+          "fieldA",
+          "fieldA",
+          "fieldB",
+          "fieldC"
+        ],
+        "path": [
+          "fieldA",
+          "fieldB",
+          "fieldC",
+          "fieldA"
+        ]
+      }
+    ],
+    "issues": [
+      {
+        "severity": "error",
+        "type": "rule-cycle",
+        "message": "Circular dependency detected: fieldA → fieldA → fieldB → fieldC",
+        "fields": [
+          "fieldA",
+          "fieldA",
+          "fieldB",
+          "fieldC"
+        ],
+        "path": [
+          "fieldA",
+          "fieldB",
+          "fieldC",
+          "fieldA"
+        ],
+        "recommendation": "Break the circular dependency by removing or modifying one of the rules. Circular dependencies can cause infinite loops and performance issues. Consider using events or consolidating the logic."
+      }
+    ],
+    "circularDependencies": [
+      {
+        "cycle": [
+          "fieldA",
+          "fieldA",
+          "fieldB",
+          "fieldC"
+        ],
+        "fields": [
+          "fieldA",
+          "fieldA",
+          "fieldB",
+          "fieldC"
+        ]
+      }
+    ]
   },
   "customFunctions": {
     "functionsFound": 1,
@@ -502,5 +577,5 @@
       "duplicateSelectors": 0
     }
   },
-  "totalIssues": 23
+  "totalIssues": 24
 }

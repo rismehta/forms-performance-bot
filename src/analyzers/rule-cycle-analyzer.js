@@ -161,8 +161,16 @@ export class RuleCycleAnalyzer {
       // After createFormInstance returns, the event queue has run and dependencies are tracked
       // Now build the dependency graph from the form instance's internal state
       core.info('Building dependency graph from form instance...');
-      const dependencyGraph = this.buildDependencyGraphFromForm(form);
+      let dependencyGraph = this.buildDependencyGraphFromForm(form);
       core.info(`Rule detection: Found ${dependencyGraph.totalRules} rules in ${dependencyGraph.fieldsWithRules} fields`);
+      
+      // Fallback: If af-core didn't detect dependencies, parse rule expressions directly
+      // This handles Core Components syntax like "fieldName.$value" 
+      if (Object.keys(dependencyGraph.dependencies).length === 0 && dependencyGraph.totalRules > 0) {
+        core.info('No dependencies from af-core, using regex fallback for Core Components syntax...');
+        dependencyGraph = this.buildDependencyGraphFromRules(formJson, dependencyGraph);
+        core.info(`Regex fallback found ${Object.keys(dependencyGraph.dependencies).length} fields with dependencies`);
+      }
       
       const cycles = this.detectCycles(dependencyGraph);
       if (cycles.length > 0) {
@@ -401,6 +409,99 @@ export class RuleCycleAnalyzer {
 
     traverse(formJson);
     return Array.from(functionNames);
+  }
+
+  /**
+   * Build dependency graph by parsing rule expressions directly (fallback for Core Components)
+   * Handles syntax like: fieldName.$value, fieldName.$visible, $form.fieldName
+   * @param {Object} formJson - Original form JSON
+   * @param {Object} existingGraph - Existing graph from af-core
+   * @returns {Object} Updated dependency graph
+   */
+  buildDependencyGraphFromRules(formJson, existingGraph) {
+    const graph = { ...existingGraph };
+    const fieldNames = new Set();
+    const fieldRules = new Map(); // Map of fieldName -> rule expressions
+
+    // First pass: collect all field names and their rules
+    const collectFields = (obj, path = '') => {
+      if (!obj || typeof obj !== 'object') return;
+      
+      const name = obj.name || obj.id;
+      if (name) {
+        fieldNames.add(name);
+        
+        // Collect rules
+        if (obj.rules && typeof obj.rules === 'object') {
+          const ruleExpressions = Object.values(obj.rules)
+            .filter(r => typeof r === 'string')
+            .join(' ');
+          if (ruleExpressions) {
+            fieldRules.set(name, ruleExpressions);
+          }
+        }
+      }
+
+      // Recurse into items
+      const items = obj[':items'] || obj.items;
+      if (items) {
+        const entries = Array.isArray(items) ? items : Object.values(items);
+        entries.forEach(item => collectFields(item, `${path}/${name || ''}`));
+      }
+    };
+
+    collectFields(formJson);
+    core.info(`Found ${fieldNames.size} fields, ${fieldRules.size} have rule expressions`);
+
+    // Second pass: parse rule expressions for field references
+    // Patterns: fieldName.$value, fieldName.$visible, $form.fieldName
+    const fieldNamePattern = Array.from(fieldNames)
+      .map(n => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+      .join('|');
+    
+    if (!fieldNamePattern) return graph;
+
+    // Regex to find field references in rules
+    // Matches: fieldName.$value, fieldName.$visible, fieldName.$valid, $form.fieldName
+    const refRegex = new RegExp(
+      `(${fieldNamePattern})\\.\\\$(?:value|visible|valid|enabled)|` +
+      `\\$form\\.(${fieldNamePattern})`,
+      'g'
+    );
+
+    // Build dependencies from rule expressions
+    fieldRules.forEach((ruleExpr, fieldName) => {
+      const dependencies = new Set();
+      let match;
+      
+      while ((match = refRegex.exec(ruleExpr)) !== null) {
+        const referencedField = match[1] || match[2];
+        if (referencedField && referencedField !== fieldName) {
+          dependencies.add(referencedField);
+        }
+      }
+      refRegex.lastIndex = 0; // Reset regex
+
+      if (dependencies.size > 0) {
+        // This field depends on other fields
+        if (!graph.dependencies[fieldName]) {
+          graph.dependencies[fieldName] = { dependents: [], dependsOn: [] };
+        }
+        graph.dependencies[fieldName].dependsOn = Array.from(dependencies);
+
+        // Update reverse dependencies
+        dependencies.forEach(depName => {
+          if (!graph.dependencies[depName]) {
+            graph.dependencies[depName] = { dependents: [], dependsOn: [] };
+          }
+          if (!graph.dependencies[depName].dependents.includes(fieldName)) {
+            graph.dependencies[depName].dependents.push(fieldName);
+          }
+        });
+      }
+    });
+
+    return graph;
   }
 
   /**
