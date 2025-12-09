@@ -268,16 +268,24 @@ export class FormAnalyzer {
     const beforeAnalysis = this.analyze(beforeJson);
     const afterAnalysis = this.analyze(afterJson);
 
+    // Handle cases where analysis failed or returned incomplete data
+    const beforeComponents = beforeAnalysis?.components || {};
+    const afterComponents = afterAnalysis?.components || {};
+    const beforeEvents = beforeAnalysis?.events || {};
+    const afterEvents = afterAnalysis?.events || {};
+    const beforeIssues = beforeAnalysis?.issues || [];
+    const afterIssues = afterAnalysis?.issues || [];
+
     return {
-      before: beforeAnalysis,
-      after: afterAnalysis,
+      before: beforeAnalysis || {},
+      after: afterAnalysis || {},
       delta: {
-        components: afterAnalysis.components.total - beforeAnalysis.components.total,
-        events: afterAnalysis.events.total - beforeAnalysis.events.total,
-        maxDepth: afterAnalysis.components.maxDepth - beforeAnalysis.components.maxDepth,
+        components: (afterComponents.total || 0) - (beforeComponents.total || 0),
+        events: (afterEvents.total || 0) - (beforeEvents.total || 0),
+        maxDepth: (afterComponents.maxDepth || 0) - (beforeComponents.maxDepth || 0),
       },
-      newIssues: this.findNewIssues(beforeAnalysis.issues, afterAnalysis.issues),
-      resolvedIssues: this.findResolvedIssues(beforeAnalysis.issues, afterAnalysis.issues),
+      newIssues: this.findNewIssues(beforeIssues, afterIssues),
+      resolvedIssues: this.findResolvedIssues(beforeIssues, afterIssues),
     };
   }
 

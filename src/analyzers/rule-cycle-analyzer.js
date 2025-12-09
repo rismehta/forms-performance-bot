@@ -568,18 +568,22 @@ export class RuleCycleAnalyzer {
    * Compare before and after analyses
    */
   compare(beforeData, afterData) {
-    const resolvedCycles = (beforeData.cycleDetails || []).filter(beforeCycle =>
-      !(afterData.cycleDetails || []).some(afterCycle => afterCycle.key === beforeCycle.key)
+    // Handle cases where analysis failed or returned incomplete data
+    const beforeCycles = beforeData?.cycleDetails || [];
+    const afterCycles = afterData?.cycleDetails || [];
+
+    const resolvedCycles = beforeCycles.filter(beforeCycle =>
+      !afterCycles.some(afterCycle => afterCycle.key === beforeCycle.key)
     );
 
     return {
-      before: beforeData,
-      after: afterData,
+      before: beforeData || {},
+      after: afterData || {},
       delta: {
-        cycles: (afterData.cycles || 0) - (beforeData.cycles || 0),
-        totalRules: (afterData.totalRules || 0) - (beforeData.totalRules || 0),
+        cycles: (afterData?.cycles || 0) - (beforeData?.cycles || 0),
+        totalRules: (afterData?.totalRules || 0) - (beforeData?.totalRules || 0),
       },
-      newCycles: afterData.cycleDetails || [], // Report ALL cycles in current state
+      newCycles: afterCycles, // Report ALL cycles in current state
       resolvedCycles,
     };
   }

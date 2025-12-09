@@ -317,20 +317,28 @@ export class HiddenFieldsAnalyzer {
    * Compare before and after analyses
    */
   compare(beforeData, afterData) {
-    const resolvedIssues = beforeData.issues.filter(beforeIssue =>
-      !afterData.issues.some(afterIssue =>
-        afterIssue.field === beforeIssue.field && afterIssue.type === afterIssue.type
+    // Handle cases where analysis failed or returned incomplete data
+    const beforeIssues = beforeData?.issues || [];
+    const afterIssues = afterData?.issues || [];
+    const beforeTotal = beforeData?.totalHiddenFields || 0;
+    const afterTotal = afterData?.totalHiddenFields || 0;
+    const beforeUnnecessary = beforeData?.unnecessaryHiddenFields || 0;
+    const afterUnnecessary = afterData?.unnecessaryHiddenFields || 0;
+
+    const resolvedIssues = beforeIssues.filter(beforeIssue =>
+      !afterIssues.some(afterIssue =>
+        afterIssue.field === beforeIssue.field && afterIssue.type === beforeIssue.type
       )
     );
 
     return {
-      before: beforeData,
-      after: afterData,
+      before: beforeData || {},
+      after: afterData || {},
       delta: {
-        hiddenFields: afterData.totalHiddenFields - beforeData.totalHiddenFields,
-        unnecessaryFields: afterData.unnecessaryHiddenFields - beforeData.unnecessaryHiddenFields,
+        hiddenFields: afterTotal - beforeTotal,
+        unnecessaryFields: afterUnnecessary - beforeUnnecessary,
       },
-      newIssues: afterData.issues, // Report ALL issues in current state
+      newIssues: afterIssues, // Report ALL issues in current state
       resolvedIssues,
     };
   }

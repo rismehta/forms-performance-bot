@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sample Core Components Form</title>
+    <link rel="stylesheet" href="/etc.clientlibs/core/fd/components/form/base/clientlibs/styles.css">
+</head>
+<body>
+    <div class="root responsivegrid">
+        <div class="container">
+            <div class="cmp-adaptiveform-container" 
+                 data-cmp-is="adaptiveFormContainer"
+                 data-cmp-adaptiveform-path="/content/dam/formsanddocuments/sample-form"
+                 data-cmp-data-layer='{"formcontainer-123": {"@type": "core/fd/components/form/container", "dc:title": "Sample Core Components Form"}}'>
+                
+                <form id="sample-form" 
+                      class="cmp-adaptiveform-form"
+                      action="/content/forms/af/sample-form.submit.json"
+                      method="POST">
+                    
+                    <!-- Text Input Field -->
+                    <div class="cmp-adaptiveform-textinput" 
+                         data-cmp-is="adaptiveFormTextInput">
+                        <label for="firstName" class="cmp-adaptiveform-textinput__label">
+                            <span>First Name</span>
+                            <span class="cmp-adaptiveform-textinput__required">*</span>
+                        </label>
+                        <input type="text" 
+                               id="firstName" 
+                               name="firstName" 
+                               class="cmp-adaptiveform-textinput__widget"
+                               required
+                               aria-required="true"
+                               placeholder="Enter your first name">
+                    </div>
+
+                    <!-- Email Input Field -->
+                    <div class="cmp-adaptiveform-emailinput"
+                         data-cmp-is="adaptiveFormEmailInput">
+                        <label for="email" class="cmp-adaptiveform-emailinput__label">
+                            <span>Email Address</span>
+                            <span class="cmp-adaptiveform-emailinput__required">*</span>
+                        </label>
+                        <input type="email" 
+                               id="email" 
+                               name="email" 
+                               class="cmp-adaptiveform-emailinput__widget"
+                               required
+                               pattern="[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$"
+                               placeholder="email@example.com">
+                    </div>
+
+                    <!-- Telephone Input Field -->
+                    <div class="cmp-adaptiveform-telephoneinput"
+                         data-cmp-is="adaptiveFormTelephoneInput">
+                        <label for="phone" class="cmp-adaptiveform-telephoneinput__label">
+                            <span>Phone Number</span>
+                        </label>
+                        <input type="tel" 
+                               id="phone" 
+                               name="phone" 
+                               class="cmp-adaptiveform-telephoneinput__widget"
+                               placeholder="+1 (123) 456-7890">
+                    </div>
+
+                    <!-- Number Input Field -->
+                    <div class="cmp-adaptiveform-numberinput"
+                         data-cmp-is="adaptiveFormNumberInput">
+                        <label for="age" class="cmp-adaptiveform-numberinput__label">
+                            <span>Age</span>
+                        </label>
+                        <input type="number" 
+                               id="age" 
+                               name="age" 
+                               class="cmp-adaptiveform-numberinput__widget"
+                               min="18"
+                               max="100">
+                    </div>
+
+                    <!-- Date Picker Field -->
+                    <div class="cmp-adaptiveform-datepicker"
+                         data-cmp-is="adaptiveFormDatePicker">
+                        <label for="dob" class="cmp-adaptiveform-datepicker__label">
+                            <span>Date of Birth</span>
+                        </label>
+                        <input type="date" 
+                               id="dob" 
+                               name="dob" 
+                               class="cmp-adaptiveform-datepicker__widget">
+                    </div>
+
+                    <!-- Hidden Panel -->
+                    <div class="cmp-adaptiveform-panel" 
+                         data-cmp-is="adaptiveFormPanel"
+                         style="display: none;">
+                        <fieldset class="cmp-adaptiveform-panel__content">
+                            <legend class="cmp-adaptiveform-panel__title">Hidden Data</legend>
+                            <input type="hidden" id="userId" name="userId" value="">
+                            <input type="hidden" id="sessionToken" name="sessionToken" value="">
+                        </fieldset>
+                    </div>
+
+                    <!-- Dropdown Field -->
+                    <div class="cmp-adaptiveform-dropdown"
+                         data-cmp-is="adaptiveFormDropDown">
+                        <label for="country" class="cmp-adaptiveform-dropdown__label">
+                            <span>Country</span>
+                        </label>
+                        <select id="country" 
+                                name="country" 
+                                class="cmp-adaptiveform-dropdown__widget">
+                            <option value="">Select a country</option>
+                            <option value="us">United States</option>
+                            <option value="ca">Canada</option>
+                            <option value="uk">United Kingdom</option>
+                            <option value="in">India</option>
+                        </select>
+                    </div>
+
+                    <!-- Checkbox Group -->
+                    <div class="cmp-adaptiveform-checkboxgroup"
+                         data-cmp-is="adaptiveFormCheckBoxGroup">
+                        <fieldset class="cmp-adaptiveform-checkboxgroup__fieldset">
+                            <legend class="cmp-adaptiveform-checkboxgroup__label">Interests</legend>
+                            <div class="cmp-adaptiveform-checkboxgroup__option">
+                                <input type="checkbox" name="interests" value="technology" class="cmp-adaptiveform-checkboxgroup__option-widget">
+                                <label>Technology</label>
+                            </div>
+                            <div class="cmp-adaptiveform-checkboxgroup__option">
+                                <input type="checkbox" name="interests" value="sports" class="cmp-adaptiveform-checkboxgroup__option-widget">
+                                <label>Sports</label>
+                            </div>
+                        </fieldset>
+                    </div>
+
+                    <!-- Radio Button -->
+                    <div class="cmp-adaptiveform-radiobutton"
+                         data-cmp-is="adaptiveFormRadioButton">
+                        <fieldset class="cmp-adaptiveform-radiobutton__fieldset">
+                            <legend class="cmp-adaptiveform-radiobutton__label">Gender</legend>
+                            <div class="cmp-adaptiveform-radiobutton__option">
+                                <input type="radio" name="gender" value="male" class="cmp-adaptiveform-radiobutton__option-widget">
+                                <label>Male</label>
+                            </div>
+                            <div class="cmp-adaptiveform-radiobutton__option">
+                                <input type="radio" name="gender" value="female" class="cmp-adaptiveform-radiobutton__option-widget">
+                                <label>Female</label>
+                            </div>
+                        </fieldset>
+                    </div>
+
+                    <!-- File Input -->
+                    <div class="cmp-adaptiveform-fileinput"
+                         data-cmp-is="adaptiveFormFileInput">
+                        <label for="resume" class="cmp-adaptiveform-fileinput__label">
+                            <span>Upload Resume</span>
+                        </label>
+                        <input type="file" 
+                               id="resume" 
+                               name="resume" 
+                               class="cmp-adaptiveform-fileinput__widget"
+                               accept=".pdf,.doc,.docx">
+                    </div>
+
+                    <!-- Submit Button -->
+                    <div class="cmp-adaptiveform-button"
+                         data-cmp-is="adaptiveFormButton">
+                        <button type="submit" 
+                                class="cmp-adaptiveform-button__widget"
+                                id="submitButton">
+                            Submit Form
+                        </button>
+                    </div>
+
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- AEM Core Components Scripts -->
+    <script src="/etc.clientlibs/core/fd/components/form/base/clientlibs/runtime.js"></script>
+</body>
+</html>

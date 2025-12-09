@@ -1,12 +1,49 @@
 import puppeteer from 'puppeteer-core';
 import { JSONExtractor } from '../extractors/json-extractor.js';
+import { CoreComponentsExtractor } from '../extractors/core-components-extractor.js';
 
 /**
  * Analyzes a URL by rendering it in headless browser and extracting form JSON + metrics
+ * 
+ * Supports:
+ * - EDS/Franklin forms (JSON in div.form pre)
+ * - Core Components forms (model.json or embedded JSON)
  */
 export class URLAnalyzer {
   constructor() {
-    this.jsonExtractor = new JSONExtractor();
+    this.edsExtractor = new JSONExtractor();
+    this.coreComponentsExtractor = new CoreComponentsExtractor();
+  }
+
+  /**
+   * Detect form type from HTML and URL
+   * @param {string} html - Rendered HTML
+   * @param {string} url - Page URL
+   * @returns {string} 'eds' | 'core-components' | 'unknown'
+   */
+  detectFormType(html, url = '') {
+    // Check for EDS form (div.form with pre containing JSON)
+    if (html.includes('<div class="form"') && html.includes('<pre>')) {
+      return 'eds';
+    }
+
+    // Check for Core Components form - HTML markers
+    if (html.includes('data-cmp-is="adaptiveFormContainer"') ||
+        html.includes('data-cmp-is="formcontainer"') ||
+        html.includes('cmp-adaptiveform-container') ||
+        html.includes('cmp-adaptiveform-') ||
+        html.includes('adaptiveform-') ||
+        html.includes('aem-Form')) {
+      return 'core-components';
+    }
+
+    // Check for Core Components form - URL patterns
+    if (url.includes('/content/forms/af/') ||
+        url.includes('/content/dam/formsanddocuments/')) {
+      return 'core-components';
+    }
+
+    return 'unknown';
   }
 
   /**
@@ -63,9 +100,17 @@ export class URLAnalyzer {
         timeout: 30000,
       });
 
-      // Wait for form to actually render (not just the container)
-      // AEM forms render fields dynamically, so wait for first input field
-      await page.waitForSelector('div.form input, div.form button, div.form select', { 
+      // Wait for form to render
+      const formSelectors = [
+        'div.form input',
+        'div.form select',
+        '[data-cmp-is="adaptiveFormContainer"] input',
+        '.cmp-adaptiveform-container input',
+        'form input[type="text"]',
+        'form select'
+      ].join(', ');
+
+      await page.waitForSelector(formSelectors, { 
         timeout: 15000 
       }).catch(() => {
         console.log('Form fields not rendered within timeout');
@@ -88,8 +133,19 @@ export class URLAnalyzer {
       // Get rendered HTML (after JavaScript execution)
       const renderedHTML = await page.content();
 
-      // Extract JSON data from rendered page
-      const jsonData = this.jsonExtractor.extract(renderedHTML);
+      // Detect form type (from HTML markers + URL pattern)
+      const formType = this.detectFormType(renderedHTML, url);
+      console.log(`Detected form type: ${formType}`);
+
+      // Extract JSON using appropriate extractor
+      let jsonData;
+      if (formType === 'core-components') {
+        console.log('Using Core Components extractor...');
+        jsonData = await this.coreComponentsExtractor.extract(renderedHTML, url);
+      } else {
+        console.log('Using EDS extractor...');
+        jsonData = this.edsExtractor.extract(renderedHTML);
+      }
 
       await browser.close();
       browser = null;
@@ -101,6 +157,7 @@ export class URLAnalyzer {
         contentType: 'text/html',
         html: renderedHTML, // Rendered HTML with all components
         formJson: jsonData.formJson,
+        formType,
         jsonErrors: jsonData.errors,
         rawSize: renderedHTML.length,
         performanceMetrics: {
@@ -120,6 +177,4 @@ export class URLAnalyzer {
       throw error;
     }
   }
-
 }
-

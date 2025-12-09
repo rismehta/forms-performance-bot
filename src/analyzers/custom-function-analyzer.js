@@ -346,21 +346,25 @@ export class CustomFunctionAnalyzer {
       return { error: 'Missing analysis for comparison' };
     }
 
-    const resolvedIssues = beforeAnalysis.issues.filter(beforeIssue =>
-      !afterAnalysis.issues.some(afterIssue =>
+    // Handle cases where analysis failed or returned incomplete data
+    const beforeIssues = beforeAnalysis?.issues || [];
+    const afterIssues = afterAnalysis?.issues || [];
+
+    const resolvedIssues = beforeIssues.filter(beforeIssue =>
+      !afterIssues.some(afterIssue =>
         afterIssue.functionName === beforeIssue.functionName &&
         afterIssue.type === beforeIssue.type
       )
     );
 
     return {
-      before: beforeAnalysis,
-      after: afterAnalysis,
+      before: beforeAnalysis || {},
+      after: afterAnalysis || {},
       delta: {
-        functionsAdded: afterAnalysis.functionsFound - beforeAnalysis.functionsFound,
-        violationsAdded: afterAnalysis.violations - beforeAnalysis.violations,
+        functionsAdded: (afterAnalysis?.functionsFound || 0) - (beforeAnalysis?.functionsFound || 0),
+        violationsAdded: (afterAnalysis?.violations || 0) - (beforeAnalysis?.violations || 0),
       },
-      newIssues: afterAnalysis.issues, // Report ALL issues found in current state
+      newIssues: afterIssues, // Report ALL issues found in current state
       resolvedIssues,
     };
   }

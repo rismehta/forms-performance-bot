@@ -1,0 +1,147 @@
+{
+  ":type": "core/wcm/components/page/v3/page",
+  ":path": "/content/sample-site/us/en/sample-form-page",
+  "title": "Sample Form Page",
+  ":items": {
+    "root": {
+      ":type": "core/wcm/components/container/v1/container",
+      ":items": {
+        "formcontainer": {
+          ":type": "core/fd/components/form/container/v2/container",
+          "id": "formcontainer-sample-form",
+          "name": "sample-form",
+          "title": "Sample Registration Form",
+          "action": "/content/sample-site/us/en/sample-form-page/jcr:content/root/formcontainer",
+          "formModelPath": "/content/dam/formsanddocuments/sample-form",
+          ":items": {
+            "personalInfo": {
+              ":type": "core/fd/components/form/panel/v1/panel",
+              "id": "personalInfo",
+              "name": "personalInfo",
+              "title": "Personal Information",
+              "visible": true,
+              ":items": {
+                "firstName": {
+                  ":type": "core/fd/components/form/textinput/v1/textinput",
+                  "id": "firstName",
+                  "name": "firstName",
+                  "title": "First Name",
+                  "visible": true,
+                  "required": true,
+                  "placeholder": "Enter your first name"
+                },
+                "lastName": {
+                  ":type": "core/fd/components/form/textinput/v1/textinput",
+                  "id": "lastName",
+                  "name": "lastName",
+                  "title": "Last Name",
+                  "visible": true,
+                  "required": true,
+                  "placeholder": "Enter your last name"
+                },
+                "email": {
+                  ":type": "core/fd/components/form/emailinput/v1/emailinput",
+                  "id": "email",
+                  "name": "email",
+                  "title": "Email Address",
+                  "visible": true,
+                  "required": true,
+                  "placeholder": "email@example.com"
+                },
+                "phone": {
+                  ":type": "core/fd/components/form/telephoneinput/v1/telephoneinput",
+                  "id": "phone",
+                  "name": "phone",
+                  "title": "Phone Number",
+                  "visible": true,
+                  "required": false,
+                  "placeholder": "+1 (123) 456-7890"
+                }
+              }
+            },
+            "addressInfo": {
+              ":type": "core/fd/components/form/panel/v1/panel",
+              "id": "addressInfo",
+              "name": "addressInfo",
+              "title": "Address Information",
+              "visible": true,
+              ":items": {
+                "street": {
+                  ":type": "core/fd/components/form/textinput/v1/textinput",
+                  "id": "street",
+                  "name": "street",
+                  "title": "Street Address",
+                  "visible": true
+                },
+                "city": {
+                  ":type": "core/fd/components/form/textinput/v1/textinput",
+                  "id": "city",
+                  "name": "city",
+                  "title": "City",
+                  "visible": true
+                },
+                "country": {
+                  ":type": "core/fd/components/form/dropdown/v1/dropdown",
+                  "id": "country",
+                  "name": "country",
+                  "title": "Country",
+                  "visible": true,
+                  "enum": ["us", "ca", "uk", "in", "de", "fr"],
+                  "enumNames": ["United States", "Canada", "United Kingdom", "India", "Germany", "France"]
+                },
+                "state": {
+                  ":type": "core/fd/components/form/dropdown/v1/dropdown",
+                  "id": "state",
+                  "name": "state",
+                  "title": "State/Province",
+                  "visible": true,
+                  "enum": [],
+                  "enumNames": []
+                }
+              }
+            },
+            "hiddenData": {
+              ":type": "core/fd/components/form/panel/v1/panel",
+              "id": "hiddenData",
+              "name": "hiddenData",
+              "title": "Hidden Data",
+              "visible": false,
+              ":items": {
+                "userId": {
+                  ":type": "core/fd/components/form/textinput/v1/textinput",
+                  "id": "userId",
+                  "name": "userId",
+                  "title": "User ID",
+                  "visible": false
+                },
+                "sessionToken": {
+                  ":type": "core/fd/components/form/textinput/v1/textinput",
+                  "id": "sessionToken",
+                  "name": "sessionToken",
+                  "title": "Session Token",
+                  "visible": false
+                }
+              }
+            },
+            "preferences": {
+              ":type": "core/fd/components/form/checkboxgroup/v1/checkboxgroup",
+              "id": "preferences",
+              "name": "preferences",
+              "title": "Communication Preferences",
+              "visible": true,
+              "enum": ["email_updates", "sms_alerts", "newsletter"],
+              "enumNames": ["Email Updates", "SMS Alerts", "Monthly Newsletter"]
+            },
+            "submitButton": {
+              ":type": "core/fd/components/form/button/v1/button",
+              "id": "submitButton",
+              "name": "submitButton",
+              "title": "Submit",
+              "visible": true
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -377,23 +377,29 @@ export class FormCSSAnalyzer {
    * Compare before and after analyses
    */
   compare(beforeData, afterData) {
+    // Handle cases where analysis failed or returned incomplete data
+    const beforeSummary = beforeData?.summary || {};
+    const afterSummary = afterData?.summary || {};
+    const beforeIssues = beforeData?.issues || [];
+    const afterIssues = afterData?.issues || [];
+
     return {
-      before: beforeData,
-      after: afterData,
+      before: beforeData || {},
+      after: afterData || {},
       delta: {
-        backgroundImages: afterData.summary.backgroundImages - beforeData.summary.backgroundImages,
-        importantRules: afterData.summary.importantRules - beforeData.summary.importantRules,
-        inlineDataURIs: afterData.summary.inlineDataURIs - beforeData.summary.inlineDataURIs,
+        backgroundImages: (afterSummary.backgroundImages || 0) - (beforeSummary.backgroundImages || 0),
+        importantRules: (afterSummary.importantRules || 0) - (beforeSummary.importantRules || 0),
+        inlineDataURIs: (afterSummary.inlineDataURIs || 0) - (beforeSummary.inlineDataURIs || 0),
       },
-      newIssues: afterData.issues.filter(afterIssue =>
-        !beforeData.issues.some(beforeIssue =>
+      newIssues: afterIssues.filter(afterIssue =>
+        !beforeIssues.some(beforeIssue =>
           beforeIssue.file === afterIssue.file &&
           beforeIssue.type === afterIssue.type &&
           beforeIssue.line === afterIssue.line
         )
       ),
-      resolvedIssues: beforeData.issues.filter(beforeIssue =>
-        !afterData.issues.some(afterIssue =>
+      resolvedIssues: beforeIssues.filter(beforeIssue =>
+        !afterIssues.some(afterIssue =>
           afterIssue.file === beforeIssue.file &&
           afterIssue.type === beforeIssue.type &&
           afterIssue.line === beforeIssue.line
