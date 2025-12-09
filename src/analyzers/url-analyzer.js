@@ -65,14 +65,26 @@ export class URLAnalyzer {
 
       // Wait for form to actually render (not just the container)
       // AEM forms render fields dynamically, so wait for first input field
-      await page.waitForSelector('div.form input, div.form button, div.form select', { 
-        timeout: 15000 
-      }).catch(() => {
-        console.log('Form fields not rendered within timeout');
-      });
+      const FORM_TIMEOUT_MS = 15000;
+      let formRendered = false;
+      
+      try {
+        await page.waitForSelector('div.form input, div.form button, div.form select', { 
+          timeout: FORM_TIMEOUT_MS
+        });
+        formRendered = true;
+        console.log('Form fields rendered successfully');
+      } catch (e) {
+        console.log('Form fields not rendered within timeout - form failed to load');
+      }
 
       const loadTime = Date.now() - startTime;
-      console.log(`Form loaded in ${loadTime}ms`);
+      
+      if (formRendered) {
+        console.log(`Form loaded in ${loadTime}ms`);
+      } else {
+        console.log(`Form FAILED to load (timeout after ${loadTime}ms)`);
+      }
 
       // Get performance metrics
       const metrics = await page.metrics();
@@ -105,6 +117,7 @@ export class URLAnalyzer {
         rawSize: renderedHTML.length,
         performanceMetrics: {
           loadTime, // Total time to load and render (ms)
+          formRendered, // Whether form actually loaded or timed out
           domContentLoaded: performanceTimings.domContentLoaded || 0,
           loadComplete: performanceTimings.loadComplete || 0,
           domInteractive: performanceTimings.domInteractive || 0,

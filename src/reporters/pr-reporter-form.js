@@ -104,9 +104,19 @@ export class FormPRReporter {
       const loadTimeDelta = after.loadTime - before.loadTime;
       const loadTimeChange = loadTimeDelta !== 0 ? `${loadTimeDelta > 0 ? '+' : ''}${loadTimeDelta}ms` : '0ms';
       
-      // Determine status based on load time
+      // Determine status based on whether form rendered and load time
       let status = '';
-      if (after.loadTime < 2000) {
+      let beforeStatus = '';
+      let afterStatus = '';
+      
+      // Check if forms actually loaded
+      if (before.formRendered === false) {
+        beforeStatus = ' (Failed)';
+      }
+      if (after.formRendered === false) {
+        afterStatus = ' (Failed)';
+        status = 'Failed';
+      } else if (after.loadTime < 2000) {
         status = 'Fast';
       } else if (after.loadTime < 3000) {
         status = loadTimeDelta > 0 ? 'Slower' : 'Good';
@@ -114,7 +124,7 @@ export class FormPRReporter {
         status = 'Slow';
       }
       
-      lines.push(`| **Form Render Time** | ${before.loadTime}ms | ${after.loadTime}ms | ${loadTimeChange} | ${status} |`);
+      lines.push(`| **Form Render Time** | ${before.loadTime}ms${beforeStatus} | ${after.loadTime}ms${afterStatus} | ${loadTimeChange} | ${status} |`);
       
       if (before.Nodes && after.Nodes) {
         const nodesDelta = after.Nodes - before.Nodes;
@@ -133,8 +143,27 @@ export class FormPRReporter {
     lines.push('');
     lines.push('** Form Render Time:** Time from navigation until first form field appears (measured in headless browser)');
     lines.push('- **Fast:** < 2 seconds');
-    lines.push('- **Good:** 2-3 seconds  ');
-    lines.push('- **Slow:** > 3 seconds (investigate API calls in initialize, hidden fields, rule cycles)\n');
+    lines.push('- **Good:** 2-3 seconds');
+    lines.push('- **Slow:** > 3 seconds');
+    lines.push('- **Failed:** Form did not render within 15 seconds (timeout)');
+    lines.push('');
+    
+    // If form failed to load, add investigation steps
+    if (afterData?.performanceMetrics?.formRendered === false) {
+      lines.push('** Form Failed to Load - Investigation Steps:**');
+      lines.push('1. Check for JavaScript errors in browser console');
+      lines.push('2. Check API calls in initialize events (see Form Events section above)');
+      lines.push('3. Check for circular rule dependencies (see Rule Cycles section above)');
+      lines.push('4. Verify all custom functions are defined and not throwing errors');
+      lines.push('5. Check network tab for failed API requests or slow responses\n');
+    } else if (afterData?.performanceMetrics?.loadTime > 3000) {
+      lines.push('** Form is Slow - Consider:**');
+      lines.push('- Moving API calls out of initialize events');
+      lines.push('- Removing unnecessary hidden fields');
+      lines.push('- Breaking circular rule dependencies\n');
+    }
+    
+    lines.push('');
     
     return lines.join('\n');
   }
@@ -184,26 +213,24 @@ export class FormPRReporter {
 
     const { newIssues, resolvedIssues, after } = formEvents;
 
-    if (after && after.apiCallsInInitialize && after.apiCallsInInitialize.length > 0) {
-      lines.push(`**API Calls in Initialize Events:** ${after.apiCallsInInitialize.length}\n`);
-      
-      after.apiCallsInInitialize.forEach(apiCall => {
-        lines.push(`-  **Field:** \`${apiCall.field}\``);
-        lines.push(`  - **Path:** \`${apiCall.path}\``);
-        lines.push(`  - **Type:** ${apiCall.apiCallType}`);
-        lines.push(`  - **Expression:** \`${apiCall.expression.substring(0, 100)}${apiCall.expression.length > 100 ? '...' : ''}\``);
-        lines.push('');
-      });
-    }
-
-    // New issues
+    // New issues - show concisely
     if (newIssues && newIssues.length > 0) {
       lines.push('####  Critical: API Calls in Initialize Events\n');
-      newIssues.forEach(issue => {
-        lines.push(`**Field: \`${issue.field}\`**`);
-        lines.push(`- **Issue:** ${issue.message}`);
-        lines.push(`- ** Recommendation:** ${issue.recommendation}\n`);
+      lines.push(`**${newIssues.length} field(s) making API calls in initialize - this blocks form rendering:**\n`);
+      
+      // Group unique fields
+      const uniqueFields = [...new Set(newIssues.map(i => i.field))];
+      
+      uniqueFields.forEach(field => {
+        const apiCall = after.apiCallsInInitialize.find(a => a.field === field);
+        if (apiCall) {
+          lines.push(`- **\`${field}\`** (\`${apiCall.path}\`) - ${apiCall.apiCallType}`);
+          lines.push(`  Expression: \`${apiCall.expression.substring(0, 80)}...\``);
+        }
       });
+      
+      lines.push('');
+      lines.push('** Recommendation:** Move API calls to custom events triggered **after** render, or use lazy loading. Initialize should only set up initial state, not fetch data.\n');
     }
 
     // Resolved issues
@@ -246,23 +273,31 @@ export class FormPRReporter {
       }
     }
 
-    // New issues
+    // New issues - show concisely
     if (newIssues && newIssues.length > 0) {
-      lines.push('####  Unnecessary Hidden Fields Detected\n');
-      newIssues.forEach(issue => {
-        lines.push(`**Field: \`${issue.field}\`**`);
-        lines.push(`- **Issue:** ${issue.message}`);
-        lines.push(`- ** Recommendation:** ${issue.recommendation}\n`);
-      });
+      lines.push('####  Unnecessary Hidden Fields\n');
+      
+      // Show first 10 field names inline
+      const visibleCount = Math.min(10, newIssues.length);
+      const fieldNames = newIssues.slice(0, visibleCount).map(i => `\`${i.field}\``).join(', ');
+      
+      lines.push(`**${newIssues.length} field(s) are always hidden and never made visible:**\n`);
+      lines.push(fieldNames + (newIssues.length > visibleCount ? ', ...' : '') + '\n');
+      
+      // Put remaining fields in collapsible section
+      if (newIssues.length > visibleCount) {
+        lines.push(`<details>\n<summary>Show all ${newIssues.length} fields</summary>\n`);
+        const allFields = newIssues.map(i => `- \`${i.field}\``).join('\n');
+        lines.push(allFields);
+        lines.push('\n</details>\n');
+      }
+      
+      lines.push('** Recommendation:** Remove these fields from the form JSON and store as JavaScript variables instead. Hidden fields that are never shown bloat the DOM (each adds ~50-100 bytes) and slow down rendering.\n');
     }
 
     // Resolved issues
     if (resolvedIssues && resolvedIssues.length > 0) {
-      lines.push('####  Removed Unnecessary Hidden Fields\n');
-      resolvedIssues.forEach(issue => {
-        lines.push(`- Field \`${issue.field}\` removed or made properly visible`);
-      });
-      lines.push('');
+      lines.push(` **Fixed:** ${resolvedIssues.length} unnecessary hidden field(s) removed\n`);
     }
 
     if (!after || after.unnecessaryHiddenFields === 0) {
