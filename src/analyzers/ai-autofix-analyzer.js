@@ -317,6 +317,15 @@ Generate a JSON response with:
       return null;
     }
 
+    // SAFETY: Never create auto-fix PRs targeting main/master branches
+    const protectedBranches = ['main', 'master'];
+    if (protectedBranches.includes(baseBranch.toLowerCase())) {
+      core.warning(`⚠️ Skipping auto-fix PR: Cannot target protected branch '${baseBranch}'`);
+      core.warning('   Auto-fix PRs can only target feature branches, not main/master');
+      core.warning('   AI suggestions will still be shown in PR comment for manual review');
+      return null;
+    }
+
     // Filter for trivial, auto-fixable issues (CSS + JS annotations)
     const trivialFixes = suggestions.filter(s => 
       s.type === 'css-import-fix' || 
