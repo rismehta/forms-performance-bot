@@ -29,11 +29,13 @@ export class AIAutoFixAnalyzer {
     }
 
     try {
+      // Extract function code and enhanced context
       const functionCode = this.extractFunctionCode(issue);
+      const enhancedContext = this.buildEnhancedContext(issue);
       
       const prompt = issueType === 'http' 
-        ? this.buildHTTPRefactorPrompt(issue, functionCode)
-        : this.buildDOMRefactorPrompt(issue, functionCode);
+        ? this.buildHTTPRefactorPrompt(issue, functionCode, enhancedContext)
+        : this.buildDOMRefactorPrompt(issue, functionCode, enhancedContext);
 
       const completion = await this.openai.chat.completions.create({
         model: this.aiModel,
@@ -136,18 +138,69 @@ Respond ONLY with valid JSON matching this schema:
   }
 
   /**
+   * Build minimal essential context for AI refactoring
+   * Keeps only what's necessary for acceptable results
+   */
+  buildEnhancedContext = (issue) => {
+    const context = {
+      relatedFunctions: [],
+      imports: [],
+      moduleType: 'ESM'  // Default assumption
+    };
+
+    try {
+      const filePath = resolve(this.workspaceRoot, issue.file);
+      if (!existsSync(filePath)) {
+        return context;
+      }
+
+      const content = readFileSync(filePath, 'utf-8');
+      
+      // ESSENTIAL: Extract imports (AI needs to know available utilities)
+      const importMatches = content.match(/^import .+ from .+$/gm) || [];
+      const requireMatches = content.match(/const .+ = require\(.+\)/g) || [];
+      context.imports = [...importMatches, ...requireMatches].slice(0, 5); // Top 5
+      
+      // ESSENTIAL: Extract function names (AI can reference existing helpers)
+      const functionMatches = content.matchAll(/(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\(|const\s+(\w+)\s*=\s*(?:async\s*)?\(|(\w+)\s*:\s*(?:async\s+)?function/g);
+      for (const match of functionMatches) {
+        const fname = match[1] || match[2] || match[3];
+        if (fname && fname !== issue.functionName) {
+          context.relatedFunctions.push(fname);
+        }
+      }
+      context.relatedFunctions = context.relatedFunctions.slice(0, 5); // Top 5
+      
+      // ESSENTIAL: Module type (for correct syntax)
+      context.moduleType = content.includes('export') ? 'ESM' : 'CommonJS';
+      
+    } catch (error) {
+      core.info(`Could not build context: ${error.message}`);
+    }
+
+    return context;
+  }
+
+  /**
    * Build prompt for HTTP refactoring
    */
-  buildHTTPRefactorPrompt = (issue, functionCode) => {
+  buildHTTPRefactorPrompt = (issue, functionCode, enhancedContext) => {
+    const contextSection = enhancedContext ? `
+
+**Context:**
+- File: ${issue.file}
+- Module: ${enhancedContext.moduleType}
+${enhancedContext.relatedFunctions?.length ? `- Available functions: ${enhancedContext.relatedFunctions.join(', ')}` : ''}
+${enhancedContext.imports?.length ? `- Available imports:\n${enhancedContext.imports.map(i => `  ${i}`).join('\n')}` : ''}
+` : '';
+
     return `Refactor this AEM Forms custom function that makes direct HTTP requests:
 
 **Current Code:**
 \`\`\`javascript
 ${functionCode}
 \`\`\`
-
-**File:** ${issue.file}
-
+${contextSection}
 **Problem:** Direct HTTP calls bypass form's error handling, loading states, and retry logic.
 
 **Requirements:**
@@ -155,10 +208,12 @@ ${functionCode}
 2. Provide the form JSON event configuration that uses request()
 3. Preserve the original function's logic and parameters
 4. Use AEM Forms conventions: globals.functions.dispatchEvent()
-5. Include testing steps
+5. Maintain the same function signature and return type
+6. Keep imports and dependencies if needed
+7. Include testing steps
 
 Generate a JSON response with:
-- jsCode: The refactored JavaScript function
+- jsCode: The refactored JavaScript function (complete, ready to use)
 - formJsonSnippet: The form JSON event configuration
 - testingSteps: How to test the refactored code`;
   }
@@ -166,27 +221,36 @@ Generate a JSON response with:
   /**
    * Build prompt for DOM refactoring
    */
-  buildDOMRefactorPrompt = (issue, functionCode) => {
+  buildDOMRefactorPrompt = (issue, functionCode, enhancedContext) => {
+    const contextSection = enhancedContext ? `
+
+**Context:**
+- File: ${issue.file}
+- Module: ${enhancedContext.moduleType}
+${enhancedContext.relatedFunctions?.length ? `- Available functions: ${enhancedContext.relatedFunctions.join(', ')}` : ''}
+${enhancedContext.imports?.length ? `- Available imports:\n${enhancedContext.imports.map(i => `  ${i}`).join('\n')}` : ''}
+` : '';
+
     return `Refactor this AEM Forms custom function that directly manipulates DOM:
 
 **Current Code:**
 \`\`\`javascript
 ${functionCode}
 \`\`\`
-
-**File:** ${issue.file}
-
+${contextSection}
 **Problem:** Direct DOM manipulation bypasses form state management and breaks reactivity.
 
 **Requirements:**
 1. Refactor to use globals.functions.setProperty() instead of DOM manipulation
 2. If complex UI changes are needed, provide a custom component example
-3. Preserve the original function's intent
+3. Preserve the original function's intent and logic
 4. Use AEM Forms conventions
-5. Include testing steps
+5. Maintain the same function signature
+6. Keep imports and dependencies if needed
+7. Include testing steps
 
 Generate a JSON response with:
-- jsCode: The refactored JavaScript function
+- jsCode: The refactored JavaScript function (complete, ready to use)
 - componentExample: Custom component code (if needed)
 - testingSteps: How to test the refactored code`;
   }
@@ -401,16 +465,18 @@ Generate a JSON response with:
         return null;
       }
 
-      // Create commit
-      const commitMessage = `fix(perf): Auto-fix ${filesChanged.length} performance issue(s)
+      // Create commit with AI attribution
+      const hasAIRefactoring = filesChanged.some(f => f.description.includes('AI-generated'));
+      
+      const commitMessage = `fix(perf): ${hasAIRefactoring ? '⚠️  AI-GENERATED ' : ''}Auto-fix ${filesChanged.length} performance issue(s)
 
-Performance fixes for PR #${prNumber}:
+${hasAIRefactoring ? '⚠️  WARNING: This commit contains AI-generated code refactoring\n⚠️  REQUIRED: Thorough testing and code review before merging\n⚠️  AI Model: Azure OpenAI GPT-4.1\n\n' : ''}Performance fixes for PR #${prNumber}:
 ${filesChanged.map((f, i) => `${i + 1}. ${f.description}`).join('\n')}
 
 Impact:
 ${filesChanged.map(f => `- ${f.impact}`).join('\n')}
 
-Auto-generated by AEM Forms Performance Analyzer`;
+${hasAIRefactoring ? '\n🔍 REVIEW CHECKLIST:\n- [ ] Test all affected functions\n- [ ] Verify form behavior unchanged\n- [ ] Check error handling\n- [ ] Validate performance improvement\n\n' : ''}Auto-generated by AEM Forms Performance Analyzer`;
 
       git.commit(commitMessage);
 
@@ -458,10 +524,15 @@ Auto-generated by AEM Forms Performance Analyzer`;
           
           const prBody = this.generateAutoFixPRDescription(filesChanged, prNumber, baseBranch, false);
           
+          const hasAIRefactoring = filesChanged.some(f => f.description.includes('AI-generated'));
+          const title = hasAIRefactoring 
+            ? `⚠️  AI-GENERATED: Performance fixes for PR #${prNumber}` 
+            : `🤖 Performance fixes for PR #${prNumber}`;
+          
           const { data: newPR } = await octokit.rest.pulls.create({
             owner,
             repo,
-            title: `🤖 Performance fixes for PR #${prNumber}`,
+            title,
             head: fixBranchName,
             base: baseBranch,  // Target user's feature branch
             body: prBody
@@ -540,55 +611,133 @@ Auto-generated by AEM Forms Performance Analyzer`;
       }
       
     } else if (fix.type === 'custom-function-http-fix') {
-      // Annotate function with performance warning for HTTP requests
+      // Apply AI-generated refactored code for HTTP requests
       const lines = content.split('\n');
       const functionName = fix.functionName || 'unknown';
       
-      // Find the function definition line
+      // Find the function definition
       const functionPattern = new RegExp(`(export\\s+)?(async\\s+)?function\\s+${functionName}\\s*\\(|const\\s+${functionName}\\s*=|${functionName}\\s*:\\s*(async\\s+)?function`);
       const functionLineIndex = lines.findIndex(line => functionPattern.test(line));
       
       if (functionLineIndex !== -1) {
-        // Add warning comment above function
+        // Find the end of the function (closing brace)
+        let braceCount = 0;
+        let inFunction = false;
+        let functionEndIndex = functionLineIndex;
+        
+        for (let i = functionLineIndex; i < lines.length; i++) {
+          const line = lines[i];
+          for (const char of line) {
+            if (char === '{') {
+              braceCount++;
+              inFunction = true;
+            } else if (char === '}') {
+              braceCount--;
+              if (inFunction && braceCount === 0) {
+                functionEndIndex = i;
+                break;
+              }
+            }
+          }
+          if (inFunction && braceCount === 0) break;
+        }
+        
+        // Add AI-generated code with clear attribution
         const indent = lines[functionLineIndex].match(/^(\s*)/)[1];
-        const warningComment = [
-          `${indent}// ⚠️ PERFORMANCE WARNING: This function makes HTTP requests`,
-          `${indent}// ISSUE: Direct HTTP calls in custom functions block form interactions`,
-          `${indent}// FIX: Move HTTP logic to form-level request() via custom events`,
-          `${indent}// See Performance Bot PR comment for detailed migration guide`,
+        const aiHeader = [
+          `${indent}// ============================================================`,
+          `${indent}// ⚠️  AI-GENERATED REFACTORING (Azure OpenAI GPT-4.1)`,
+          `${indent}// Original: Direct HTTP call in custom function`,
+          `${indent}// Refactored: Trigger via custom event for better performance`,
+          `${indent}// REVIEW REQUIRED: Test thoroughly before merging`,
+          `${indent}// ============================================================`,
+          ''
         ];
         
-        lines.splice(functionLineIndex, 0, ...warningComment);
-        content = lines.join('\n');
-        description = `Annotate ${functionName}() with HTTP request warning`;
-        impact = 'Flags blocking HTTP calls for refactoring';
+        // Replace function with AI-generated code
+        if (fix.refactoredCode) {
+          lines.splice(functionLineIndex, functionEndIndex - functionLineIndex + 1, ...aiHeader, fix.refactoredCode);
+          content = lines.join('\n');
+          description = `Refactor ${functionName}() to use form-level request() (AI-generated)`;
+          impact = 'Eliminates blocking HTTP calls, enables request queueing and error handling';
+        } else {
+          // Fallback: add warning comment if no AI code available
+          const warningComment = [
+            `${indent}// ⚠️ PERFORMANCE WARNING: This function makes HTTP requests`,
+            `${indent}// ISSUE: Direct HTTP calls block form interactions`,
+            `${indent}// FIX: Move to form-level request() via custom events`,
+          ];
+          lines.splice(functionLineIndex, 0, ...warningComment);
+          content = lines.join('\n');
+          description = `Annotate ${functionName}() with HTTP request warning`;
+          impact = 'Flags blocking HTTP calls for manual refactoring';
+        }
       } else {
         throw new Error(`Could not find function definition for ${functionName}`);
       }
       
     } else if (fix.type === 'custom-function-dom-fix') {
-      // Annotate function with performance warning for DOM access
+      // Apply AI-generated refactored code for DOM access
       const lines = content.split('\n');
       const functionName = fix.functionName || 'unknown';
       
-      // Find the function definition line
+      // Find the function definition
       const functionPattern = new RegExp(`(export\\s+)?(async\\s+)?function\\s+${functionName}\\s*\\(|const\\s+${functionName}\\s*=|${functionName}\\s*:\\s*(async\\s+)?function`);
       const functionLineIndex = lines.findIndex(line => functionPattern.test(line));
       
       if (functionLineIndex !== -1) {
-        // Add warning comment above function
+        // Find the end of the function (closing brace)
+        let braceCount = 0;
+        let inFunction = false;
+        let functionEndIndex = functionLineIndex;
+        
+        for (let i = functionLineIndex; i < lines.length; i++) {
+          const line = lines[i];
+          for (const char of line) {
+            if (char === '{') {
+              braceCount++;
+              inFunction = true;
+            } else if (char === '}') {
+              braceCount--;
+              if (inFunction && braceCount === 0) {
+                functionEndIndex = i;
+                break;
+              }
+            }
+          }
+          if (inFunction && braceCount === 0) break;
+        }
+        
+        // Add AI-generated code with clear attribution
         const indent = lines[functionLineIndex].match(/^(\s*)/)[1];
-        const warningComment = [
-          `${indent}// ⚠️ PERFORMANCE WARNING: This function accesses DOM directly`,
-          `${indent}// ISSUE: Direct DOM manipulation in custom functions bypasses form state management`,
-          `${indent}// FIX: Create custom component and use setProperty() to interact`,
-          `${indent}// See Performance Bot PR comment for detailed migration guide`,
+        const aiHeader = [
+          `${indent}// ============================================================`,
+          `${indent}// ⚠️  AI-GENERATED REFACTORING (Azure OpenAI GPT-4.1)`,
+          `${indent}// Original: Direct DOM manipulation in custom function`,
+          `${indent}// Refactored: Use setProperty() for state management`,
+          `${indent}// REVIEW REQUIRED: Test thoroughly before merging`,
+          `${indent}// ============================================================`,
+          ''
         ];
         
-        lines.splice(functionLineIndex, 0, ...warningComment);
-        content = lines.join('\n');
-        description = `Annotate ${functionName}() with DOM access warning`;
-        impact = 'Flags direct DOM manipulation for refactoring';
+        // Replace function with AI-generated code
+        if (fix.refactoredCode) {
+          lines.splice(functionLineIndex, functionEndIndex - functionLineIndex + 1, ...aiHeader, fix.refactoredCode);
+          content = lines.join('\n');
+          description = `Refactor ${functionName}() to use setProperty() instead of DOM (AI-generated)`;
+          impact = 'Eliminates direct DOM access, uses form state management';
+        } else {
+          // Fallback: add warning comment if no AI code available
+          const warningComment = [
+            `${indent}// ⚠️ PERFORMANCE WARNING: This function accesses DOM directly`,
+            `${indent}// ISSUE: Bypasses form state management`,
+            `${indent}// FIX: Use setProperty() instead of direct DOM manipulation`,
+          ];
+          lines.splice(functionLineIndex, 0, ...warningComment);
+          content = lines.join('\n');
+          description = `Annotate ${functionName}() with DOM access warning`;
+          impact = 'Flags direct DOM manipulation for manual refactoring';
+        }
       } else {
         throw new Error(`Could not find function definition for ${functionName}`);
       }
@@ -613,7 +762,17 @@ Auto-generated by AEM Forms Performance Analyzer`;
   generateAutoFixPRDescription = (filesChanged, originalPRNumber, targetBranch, isUpdate = false) => {
     const lines = [];
     
-    lines.push('## 🤖 Automated Performance Fixes\n');
+    const hasAIRefactoring = filesChanged.some(f => f.description.includes('AI-generated'));
+    
+    if (hasAIRefactoring) {
+      lines.push('## ⚠️  AI-GENERATED CODE - REVIEW REQUIRED\n');
+      lines.push('> **WARNING:** This PR contains AI-generated code refactoring using Azure OpenAI GPT-4.1');
+      lines.push('> **REQUIRED:** Thorough testing and code review before merging');
+      lines.push('> **DO NOT** merge blindly - AI-generated code may have bugs or incorrect assumptions\n');
+    } else {
+      lines.push('## 🤖 Automated Performance Fixes\n');
+    }
+    
     lines.push(`This PR contains automated performance fixes for **PR #${originalPRNumber}**.\n`);
     lines.push(`**Target Branch:** \`${targetBranch}\` (your feature branch)\n`);
     
@@ -623,32 +782,68 @@ Auto-generated by AEM Forms Performance Analyzer`;
     
     lines.push('---\n');
     
+    if (hasAIRefactoring) {
+      lines.push('### 🧪 Testing Required\n');
+      lines.push('Before merging, verify:');
+      lines.push('- [ ] **Unit tests pass** for all modified functions');
+      lines.push('- [ ] **Form behavior** unchanged (no regressions)');
+      lines.push('- [ ] **Error handling** works correctly');
+      lines.push('- [ ] **Performance** actually improved (measure!)');
+      lines.push('- [ ] **Form JSON events** added (if applicable)');
+      lines.push('- [ ] **Manual testing** in browser completed\n');
+      lines.push('---\n');
+    }
+    
     lines.push('### Fixes Applied\n');
     filesChanged.forEach((change, i) => {
-      lines.push(`${i + 1}. **${change.description}**`);
+      const isAI = change.description.includes('AI-generated');
+      lines.push(`${i + 1}. ${isAI ? '⚠️  **[AI]** ' : ''}**${change.description}**`);
       lines.push(`   - Impact: ${change.impact}`);
       lines.push(`   - File: \`${change.filePath}\``);
+      if (isAI) {
+        lines.push(`   - **WARNING:** AI-generated refactoring - test thoroughly`);
+      }
       lines.push('');
     });
     
     lines.push('### How to Use\n');
+    
+    if (hasAIRefactoring) {
+      lines.push('⚠️  **IMPORTANT: For AI-generated refactoring**\n');
+      lines.push('1. **Review the code changes carefully** in "Files changed" tab');
+      lines.push('2. **Test the functions** in your local environment');
+      lines.push('3. **Add form JSON events** if needed (check PR comment for snippets)');
+      lines.push('4. **Run your test suite** to catch regressions');
+      lines.push('5. **Manual browser testing** to verify behavior');
+      lines.push('6. Only merge after all tests pass\n');
+    }
+    
     lines.push('**Option 1: Merge via GitHub UI (Recommended)**');
-    lines.push('1. Review the changes in the "Files changed" tab');
-    lines.push('2. Click "Merge pull request" to apply fixes to your branch');
-    lines.push('3. Your original PR will automatically include these fixes\n');
+    lines.push('1. Complete testing checklist above');
+    lines.push('2. Review changes in "Files changed" tab');
+    lines.push('3. Click "Merge pull request" to apply fixes');
+    lines.push('4. Your original PR will include these fixes\n');
     
     lines.push('**Option 2: Merge via command line**');
     lines.push('```bash');
     lines.push(`git checkout ${targetBranch}`);
     lines.push(`git merge perf-bot/auto-fixes-pr-${originalPRNumber}`);
+    lines.push('# Run tests here!');
     lines.push('git push');
     lines.push('```\n');
     
     lines.push('### Notes\n');
-    lines.push('- These are **non-functional changes** (comments only)');
-    lines.push('- Original code is preserved in comments for reference');
-    lines.push('- Full implementation guidance is in the main PR comment');
-    lines.push('- You can safely close this PR if fixes are not needed\n');
+    if (hasAIRefactoring) {
+      lines.push('- **AI Model:** Azure OpenAI GPT-4.1');
+      lines.push('- **AI Context:** Project patterns, related files, full codebase');
+      lines.push('- **Human Review:** REQUIRED before merge');
+      lines.push('- **Original code:** Replaced (check git diff)');
+    } else {
+      lines.push('- **Safe changes:** Comments and annotations only');
+      lines.push('- **Original code:** Preserved');
+    }
+    lines.push('- Full implementation guidance in main PR comment');
+    lines.push('- Close this PR if fixes not needed\n');
     
     lines.push('---');
     lines.push('*Auto-generated by [AEM Forms Performance Analyzer](https://github.com/rismehta/forms-performance-bot)*');
