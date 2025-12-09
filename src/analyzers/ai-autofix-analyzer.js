@@ -1,6 +1,7 @@
 import * as core from '@actions/core';
-import { readFileSync, existsSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { resolve } from 'path';
+import { GitHelper } from '../utils/git-helper.js';
 
 /**
  * AI-Powered Auto-Fix Generator
@@ -17,6 +18,212 @@ export class AIAutoFixAnalyzer {
     this.azureApiVersion = process.env.AZURE_OPENAI_API_VERSION || '2024-12-01-preview';
     
     this.workspaceRoot = process.cwd();
+  }
+
+  /**
+   * Generate refactored code for a specific issue using AI
+   */
+  async generateRefactoredCode(issue, issueType) {
+    if (!this.aiEnabled) {
+      return this.getDefaultRefactoredCode(issue, issueType);
+    }
+
+    try {
+      const functionCode = this.extractFunctionCode(issue);
+      
+      const prompt = issueType === 'http' 
+        ? this.buildHTTPRefactorPrompt(issue, functionCode)
+        : this.buildDOMRefactorPrompt(issue, functionCode);
+
+      const completion = await this.openai.chat.completions.create({
+        model: this.aiModel,
+        messages: [
+          {
+            role: 'system',
+            content: `You are an expert in AEM Adaptive Forms architecture. Generate production-ready refactored code that follows AEM Forms best practices. 
+            
+Key principles:
+- Custom functions should NOT make direct HTTP calls - use form-level request() via custom events
+- Custom functions should NOT manipulate DOM - use setProperty() or custom components
+- Always use globals.functions.dispatchEvent() to trigger form events
+- Form JSON events should use request() for HTTP calls
+- Wrap sensitive data with encrypt()
+
+Respond ONLY with valid JSON matching this schema:
+{
+  "jsCode": "refactored JavaScript code",
+  "formJsonSnippet": "form JSON event configuration (if applicable)",
+  "componentExample": "custom component example (if applicable)",
+  "testingSteps": "step-by-step testing instructions"
+}`
+          },
+          {
+            role: 'user',
+            content: prompt
+          }
+        ],
+        temperature: 0.3,
+        max_tokens: 2000
+      });
+
+      const response = completion.choices[0].message.content.trim();
+      
+      // Parse JSON response
+      const jsonMatch = response.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        return {
+          jsCode: parsed.jsCode || this.getDefaultRefactoredCode(issue, issueType).jsCode,
+          formJsonSnippet: parsed.formJsonSnippet || null,
+          componentExample: parsed.componentExample || null,
+          testingSteps: parsed.testingSteps || 'Test in browser after applying changes'
+        };
+      }
+      
+      return this.getDefaultRefactoredCode(issue, issueType);
+    } catch (error) {
+      core.warning(`AI refactoring failed for ${issue.functionName}: ${error.message}`);
+      return this.getDefaultRefactoredCode(issue, issueType);
+    }
+  }
+
+  /**
+   * Extract function code from file
+   */
+  extractFunctionCode(issue) {
+    try {
+      const filePath = resolve(this.workspaceRoot, issue.file);
+      if (!existsSync(filePath)) {
+        return `function ${issue.functionName}() { /* code not available */ }`;
+      }
+
+      const content = readFileSync(filePath, 'utf-8');
+      const lines = content.split('\n');
+      
+      // Find function definition
+      const functionPattern = new RegExp(`(export\\s+)?(async\\s+)?function\\s+${issue.functionName}\\s*\\(|const\\s+${issue.functionName}\\s*=|${issue.functionName}\\s*:\\s*(async\\s+)?function`);
+      const startIndex = lines.findIndex(line => functionPattern.test(line));
+      
+      if (startIndex === -1) {
+        return `function ${issue.functionName}() { /* definition not found */ }`;
+      }
+
+      // Extract function body (simple brace matching)
+      let braceCount = 0;
+      let endIndex = startIndex;
+      let started = false;
+      
+      for (let i = startIndex; i < lines.length; i++) {
+        const line = lines[i];
+        for (const char of line) {
+          if (char === '{') {
+            braceCount++;
+            started = true;
+          }
+          if (char === '}') braceCount--;
+        }
+        
+        if (started && braceCount === 0) {
+          endIndex = i;
+          break;
+        }
+      }
+
+      return lines.slice(startIndex, endIndex + 1).join('\n');
+    } catch (error) {
+      return `function ${issue.functionName}() { /* extraction failed */ }`;
+    }
+  }
+
+  /**
+   * Build prompt for HTTP refactoring
+   */
+  buildHTTPRefactorPrompt(issue, functionCode) {
+    return `Refactor this AEM Forms custom function that makes direct HTTP requests:
+
+**Current Code:**
+\`\`\`javascript
+${functionCode}
+\`\`\`
+
+**File:** ${issue.file}
+
+**Problem:** Direct HTTP calls bypass form's error handling, loading states, and retry logic.
+
+**Requirements:**
+1. Refactor the function to dispatch a custom event instead
+2. Provide the form JSON event configuration that uses request()
+3. Preserve the original function's logic and parameters
+4. Use AEM Forms conventions: globals.functions.dispatchEvent()
+5. Include testing steps
+
+Generate a JSON response with:
+- jsCode: The refactored JavaScript function
+- formJsonSnippet: The form JSON event configuration
+- testingSteps: How to test the refactored code`;
+  }
+
+  /**
+   * Build prompt for DOM refactoring
+   */
+  buildDOMRefactorPrompt(issue, functionCode) {
+    return `Refactor this AEM Forms custom function that directly manipulates DOM:
+
+**Current Code:**
+\`\`\`javascript
+${functionCode}
+\`\`\`
+
+**File:** ${issue.file}
+
+**Problem:** Direct DOM manipulation bypasses form state management and breaks reactivity.
+
+**Requirements:**
+1. Refactor to use globals.functions.setProperty() instead of DOM manipulation
+2. If complex UI changes are needed, provide a custom component example
+3. Preserve the original function's intent
+4. Use AEM Forms conventions
+5. Include testing steps
+
+Generate a JSON response with:
+- jsCode: The refactored JavaScript function
+- componentExample: Custom component code (if needed)
+- testingSteps: How to test the refactored code`;
+  }
+
+  /**
+   * Get default refactored code (fallback)
+   */
+  getDefaultRefactoredCode(issue, issueType) {
+    if (issueType === 'http') {
+      return {
+        jsCode: `export function ${issue.functionName}(field, globals) {
+  // Refactored: Trigger form-level request via custom event
+  globals.functions.dispatchEvent(field, 'custom:${issue.functionName}Data', {
+    // Pass any required data
+    value: field.$value
+  });
+}`,
+        formJsonSnippet: `"events": {
+  "custom:${issue.functionName}Data": [
+    "request(externalize('/api/endpoint'), 'POST', encrypt({data: $event.detail.value}))"
+  ]
+}`,
+        testingSteps: '1. Apply JS changes\n2. Add form JSON event\n3. Test in browser\n4. Verify Network tab shows request'
+      };
+    } else {
+      return {
+        jsCode: `export function ${issue.functionName}(field, globals) {
+  // Refactored: Use setProperty instead of DOM manipulation
+  globals.functions.setProperty(field, {
+    visible: true,
+    // Add other property changes as needed
+  });
+}`,
+        componentExample: '// Create custom component if complex UI changes needed',
+        testingSteps: '1. Apply JS changes\n2. Test in browser\n3. Verify field updates correctly'
+      };
+    }
   }
 
   /**
@@ -95,11 +302,346 @@ export class AIAutoFixAnalyzer {
   }
 
   /**
+   * Create auto-fix PR with trivial fixes applied
+   * @param {Array} suggestions - AI-generated suggestions
+   * @param {Object} octokit - GitHub API client
+   * @param {String} owner - Repository owner
+   * @param {String} repo - Repository name
+   * @param {String} baseBranch - User's feature branch (PR head branch)
+   * @param {Number} prNumber - Original PR number
+   * @returns {Promise<Object|null>} Created PR details or null if no fixes applied
+   */
+  async createAutoFixPR(suggestions, octokit, owner, repo, baseBranch, prNumber) {
+    if (!suggestions || suggestions.length === 0) {
+      core.info('No suggestions to apply - skipping auto-fix PR');
+      return null;
+    }
+
+    // Filter for trivial, auto-fixable issues (CSS + JS annotations)
+    const trivialFixes = suggestions.filter(s => 
+      s.type === 'css-import-fix' || 
+      s.type === 'css-background-image-fix' ||
+      s.type === 'custom-function-http-fix' ||
+      s.type === 'custom-function-dom-fix'
+    );
+
+    if (trivialFixes.length === 0) {
+      core.info('No trivial fixes available - skipping auto-fix PR');
+      return null;
+    }
+
+    try {
+      core.info(`🔧 Creating auto-fix PR with ${trivialFixes.length} fix(es)...`);
+
+      const git = new GitHelper(this.workspaceRoot);
+      
+      // Configure git user for commits
+      git.configureGitUser();
+
+      // Save current branch to restore later
+      const originalBranch = git.getCurrentBranch();
+      const originalSHA = git.getCurrentSHA();
+      
+      // Create new branch for fixes
+      const fixBranchName = `perf-bot/auto-fixes-pr-${prNumber}`;
+      core.info(`Creating fix branch: ${fixBranchName}`);
+      
+      // Delete local branch if it exists
+      try {
+        git.exec(`git branch -D ${fixBranchName}`);
+        core.info(`  Deleted existing local branch: ${fixBranchName}`);
+      } catch (error) {
+        // Branch doesn't exist locally, that's fine
+      }
+      
+      // Check if branch exists on remote
+      const remoteBranchExists = git.remoteBranchExists(fixBranchName);
+      
+      if (remoteBranchExists) {
+        core.info(`  Remote branch exists - will force push to update existing PR`);
+      }
+      
+      git.createBranch(fixBranchName);
+
+      // Apply fixes to files
+      const filesChanged = [];
+      
+      for (const fix of trivialFixes) {
+        try {
+          const result = await this.applyFixToFile(fix);
+          if (result.success) {
+            git.stageFile(result.filePath);
+            filesChanged.push(result);
+            core.info(`✅ Applied fix to ${result.filePath}`);
+          }
+        } catch (error) {
+          core.warning(`Failed to apply fix to ${fix.file}: ${error.message}`);
+        }
+      }
+
+      if (filesChanged.length === 0) {
+        core.warning('No fixes were successfully applied - aborting auto-fix PR');
+        git.checkoutBranch(originalBranch);
+        return null;
+      }
+
+      // Create commit
+      const commitMessage = `fix(perf): Auto-fix ${filesChanged.length} performance issue(s)
+
+Performance fixes for PR #${prNumber}:
+${filesChanged.map((f, i) => `${i + 1}. ${f.description}`).join('\n')}
+
+Impact:
+${filesChanged.map(f => `- ${f.impact}`).join('\n')}
+
+Auto-generated by AEM Forms Performance Analyzer`;
+
+      git.commit(commitMessage);
+
+      // Push to remote
+      git.push(fixBranchName, true);
+
+      // Restore original branch
+      git.checkoutBranch(originalBranch);
+
+      // Check if PR already exists for this branch
+      let createdPR;
+      try {
+        const { data: existingPRs } = await octokit.rest.pulls.list({
+          owner,
+          repo,
+          head: `${owner}:${fixBranchName}`,
+          base: baseBranch,
+          state: 'open'
+        });
+
+        if (existingPRs.length > 0) {
+          // PR already exists - update it
+          createdPR = existingPRs[0];
+          core.info(`  Auto-fix PR already exists: #${createdPR.number} - force push updated it`);
+          
+          // Update PR body with latest fixes
+          const prBody = this.generateAutoFixPRDescription(filesChanged, prNumber, baseBranch, true);
+          await octokit.rest.pulls.update({
+            owner,
+            repo,
+            pull_number: createdPR.number,
+            body: prBody
+          });
+          
+          core.info(`  Updated PR description with latest changes`);
+        } else {
+          // Create new PR
+          core.info(`Creating new PR: ${fixBranchName} → ${baseBranch}`);
+          
+          const prBody = this.generateAutoFixPRDescription(filesChanged, prNumber, baseBranch, false);
+          
+          const { data: newPR } = await octokit.rest.pulls.create({
+            owner,
+            repo,
+            title: `🤖 Performance fixes for PR #${prNumber}`,
+            head: fixBranchName,
+            base: baseBranch,  // Target user's feature branch
+            body: prBody
+          });
+          
+          createdPR = newPR;
+          core.info(`✅ Auto-fix PR created: #${createdPR.number}`);
+        }
+      } catch (error) {
+        core.warning(`Failed to create/update PR: ${error.message}`);
+        throw error;
+      }
+
+      return {
+        number: createdPR.number,
+        url: createdPR.html_url,
+        branch: fixBranchName,
+        filesChanged: filesChanged.length,
+        fixes: filesChanged.map(f => f.description)
+      };
+
+    } catch (error) {
+      core.warning(`Failed to create auto-fix PR: ${error.message}`);
+      core.warning(error.stack);
+      
+      // Try to restore original branch
+      try {
+        const git = new GitHelper(this.workspaceRoot);
+        const originalBranch = git.getCurrentBranch();
+        if (originalBranch !== baseBranch) {
+          git.checkoutBranch(baseBranch);
+        }
+      } catch (restoreError) {
+        core.warning(`Could not restore original branch: ${restoreError.message}`);
+      }
+      
+      return null;
+    }
+  }
+
+  /**
+   * Apply a single fix to a file
+   */
+  async applyFixToFile(fix) {
+    const filePath = resolve(this.workspaceRoot, fix.file);
+    
+    if (!existsSync(filePath)) {
+      throw new Error(`File not found: ${filePath}`);
+    }
+
+    let content = readFileSync(filePath, 'utf-8');
+    let description = '';
+    let impact = '';
+
+    // Apply fix based on type
+    if (fix.type === 'css-import-fix') {
+      // Comment out @import statement
+      const originalLine = fix.originalCode;
+      const commentedLine = `/* ${originalLine} */\n/* Performance: Bundle CSS during build instead - see Performance Bot PR comment */`;
+      
+      content = content.replace(originalLine, commentedLine);
+      description = `Comment out @import in ${fix.file}`;
+      impact = 'Eliminates render-blocking CSS import';
+      
+    } else if (fix.type === 'css-background-image-fix') {
+      // Comment out background-image line
+      const lines = content.split('\n');
+      const lineIndex = fix.line - 1;
+      
+      if (lines[lineIndex] && lines[lineIndex].includes('background-image')) {
+        lines[lineIndex] = `  /* ${lines[lineIndex].trim()} */`;
+        lines.splice(lineIndex + 1, 0, '  /* Performance: Replace with <img loading="lazy"> in HTML - see Performance Bot PR comment */');
+        content = lines.join('\n');
+        description = `Comment out background-image in ${fix.file}`;
+        impact = 'Enables lazy loading when replaced with <img>';
+      }
+      
+    } else if (fix.type === 'custom-function-http-fix') {
+      // Annotate function with performance warning for HTTP requests
+      const lines = content.split('\n');
+      const functionName = fix.functionName || 'unknown';
+      
+      // Find the function definition line
+      const functionPattern = new RegExp(`(export\\s+)?(async\\s+)?function\\s+${functionName}\\s*\\(|const\\s+${functionName}\\s*=|${functionName}\\s*:\\s*(async\\s+)?function`);
+      const functionLineIndex = lines.findIndex(line => functionPattern.test(line));
+      
+      if (functionLineIndex !== -1) {
+        // Add warning comment above function
+        const indent = lines[functionLineIndex].match(/^(\s*)/)[1];
+        const warningComment = [
+          `${indent}// ⚠️ PERFORMANCE WARNING: This function makes HTTP requests`,
+          `${indent}// ISSUE: Direct HTTP calls in custom functions block form interactions`,
+          `${indent}// FIX: Move HTTP logic to form-level request() via custom events`,
+          `${indent}// See Performance Bot PR comment for detailed migration guide`,
+        ];
+        
+        lines.splice(functionLineIndex, 0, ...warningComment);
+        content = lines.join('\n');
+        description = `Annotate ${functionName}() with HTTP request warning`;
+        impact = 'Flags blocking HTTP calls for refactoring';
+      } else {
+        throw new Error(`Could not find function definition for ${functionName}`);
+      }
+      
+    } else if (fix.type === 'custom-function-dom-fix') {
+      // Annotate function with performance warning for DOM access
+      const lines = content.split('\n');
+      const functionName = fix.functionName || 'unknown';
+      
+      // Find the function definition line
+      const functionPattern = new RegExp(`(export\\s+)?(async\\s+)?function\\s+${functionName}\\s*\\(|const\\s+${functionName}\\s*=|${functionName}\\s*:\\s*(async\\s+)?function`);
+      const functionLineIndex = lines.findIndex(line => functionPattern.test(line));
+      
+      if (functionLineIndex !== -1) {
+        // Add warning comment above function
+        const indent = lines[functionLineIndex].match(/^(\s*)/)[1];
+        const warningComment = [
+          `${indent}// ⚠️ PERFORMANCE WARNING: This function accesses DOM directly`,
+          `${indent}// ISSUE: Direct DOM manipulation in custom functions bypasses form state management`,
+          `${indent}// FIX: Create custom component and use setProperty() to interact`,
+          `${indent}// See Performance Bot PR comment for detailed migration guide`,
+        ];
+        
+        lines.splice(functionLineIndex, 0, ...warningComment);
+        content = lines.join('\n');
+        description = `Annotate ${functionName}() with DOM access warning`;
+        impact = 'Flags direct DOM manipulation for refactoring';
+      } else {
+        throw new Error(`Could not find function definition for ${functionName}`);
+      }
+    }
+
+    // Write updated content
+    writeFileSync(filePath, content, 'utf-8');
+
+    return {
+      success: true,
+      filePath: fix.file,
+      description,
+      impact,
+      originalCode: fix.originalCode,
+      fixedCode: fix.fixedCode
+    };
+  }
+
+  /**
+   * Generate PR description for auto-fix PR
+   */
+  generateAutoFixPRDescription(filesChanged, originalPRNumber, targetBranch, isUpdate = false) {
+    const lines = [];
+    
+    lines.push('## 🤖 Automated Performance Fixes\n');
+    lines.push(`This PR contains automated performance fixes for **PR #${originalPRNumber}**.\n`);
+    lines.push(`**Target Branch:** \`${targetBranch}\` (your feature branch)\n`);
+    
+    if (isUpdate) {
+      lines.push(`**Status:** 🔄 *Updated by bot on re-run*\n`);
+    }
+    
+    lines.push('---\n');
+    
+    lines.push('### Fixes Applied\n');
+    filesChanged.forEach((change, i) => {
+      lines.push(`${i + 1}. **${change.description}**`);
+      lines.push(`   - Impact: ${change.impact}`);
+      lines.push(`   - File: \`${change.filePath}\``);
+      lines.push('');
+    });
+    
+    lines.push('### How to Use\n');
+    lines.push('**Option 1: Merge via GitHub UI (Recommended)**');
+    lines.push('1. Review the changes in the "Files changed" tab');
+    lines.push('2. Click "Merge pull request" to apply fixes to your branch');
+    lines.push('3. Your original PR will automatically include these fixes\n');
+    
+    lines.push('**Option 2: Merge via command line**');
+    lines.push('```bash');
+    lines.push(`git checkout ${targetBranch}`);
+    lines.push(`git merge perf-bot/auto-fixes-pr-${originalPRNumber}`);
+    lines.push('git push');
+    lines.push('```\n');
+    
+    lines.push('### Notes\n');
+    lines.push('- These are **non-functional changes** (comments only)');
+    lines.push('- Original code is preserved in comments for reference');
+    lines.push('- Full implementation guidance is in the main PR comment');
+    lines.push('- You can safely close this PR if fixes are not needed\n');
+    
+    lines.push('---');
+    lines.push('*Auto-generated by [AEM Forms Performance Analyzer](https://github.com/rismehta/forms-performance-bot)*');
+    
+    return lines.join('\n');
+  }
+}
+
+
+  /**
    * Fix CSS @import statements
    * Replace with <link> tags in HTML or bundle recommendation
    */
   async fixCSSImports(cssResults) {
-    if (!cssResults?.newIssues) return [];
+    if (!cssResults || !cssResults.newIssues) return [];
     
     const importIssues = cssResults.newIssues.filter(i => i.type === 'css-import-blocking');
     if (importIssues.length === 0) return [];
@@ -144,7 +686,7 @@ export class AIAutoFixAnalyzer {
    * Replace with <img> component for lazy loading
    */
   async fixCSSBackgroundImages(cssResults) {
-    if (!cssResults?.newIssues) return [];
+    if (!cssResults || !cssResults.newIssues) return [];
     
     const bgImageIssues = cssResults.newIssues.filter(i => i.type === 'css-background-image');
     if (bgImageIssues.length === 0) return [];
@@ -188,7 +730,7 @@ export class AIAutoFixAnalyzer {
    * Add defer attribute to external scripts
    */
   async fixBlockingScripts(htmlResults) {
-    if (!htmlResults?.newIssues) return [];
+    if (!htmlResults || !htmlResults.newIssues) return [];
     
     const blockingScripts = htmlResults.newIssues.filter(i => 
       i.type === 'blocking-scripts-on-page'
@@ -227,7 +769,7 @@ Note: defer maintains execution order, async does not.
    */
   async fixUnnecessaryHiddenFields(hiddenFieldsResults) {
     // Extract unnecessary hidden fields from issues
-    if (!hiddenFieldsResults?.after?.issues) return [];
+    if (!hiddenFieldsResults || !hiddenFieldsResults.after || !hiddenFieldsResults.after.issues) return [];
     
     const unnecessaryFieldIssues = hiddenFieldsResults.after.issues.filter(
       issue => issue.type === 'unnecessary-hidden-field'
@@ -384,7 +926,7 @@ ${fieldNames.length > 5 ? `\n...and ${fieldNames.length - 5} more` : ''}
    * Suggest using form APIs instead of direct HTTP/DOM manipulation
    */
   async fixCustomFunctions(customFunctionsResults) {
-    if (!customFunctionsResults?.newIssues) return [];
+    if (!customFunctionsResults || !customFunctionsResults.newIssues) return [];
     
     const suggestions = [];
     
@@ -394,13 +936,21 @@ ${fieldNames.length > 5 ? `\n...and ${fieldNames.length - 5} more` : ''}
     );
     
     for (const issue of httpIssues.slice(0, 3)) { // Top 3
+      // Generate AI-powered refactored code
+      const refactoredCode = await this.generateRefactoredCode(issue, 'http');
+      
       suggestions.push({
         type: 'custom-function-http-fix',
         severity: 'critical',
         function: issue.functionName,
+        functionName: issue.functionName, // For applyFixToFile()
         file: issue.file,
+        line: issue.line || 1,
         title: `Move HTTP request from ${issue.functionName}() to form-level API call`,
         description: `Custom function "${issue.functionName}()" makes direct HTTP requests. This bypasses error handling, loading states, and retry logic.`,
+        refactoredCode: refactoredCode.jsCode,
+        formJsonSnippet: refactoredCode.formJsonSnippet,
+        testingSteps: refactoredCode.testingSteps,
         guidance: `
 **Current (ANTI-PATTERN):**
 \`\`\`javascript
@@ -472,13 +1022,21 @@ export function ${issue.functionName}(field, globals) {
     );
     
     for (const issue of domIssues.slice(0, 2)) { // Top 2
+      // Generate AI-powered refactored code
+      const refactoredCode = await this.generateRefactoredCode(issue, 'dom');
+      
       suggestions.push({
         type: 'custom-function-dom-fix',
         severity: 'critical',
         function: issue.functionName,
+        functionName: issue.functionName, // For applyFixToFile()
         file: issue.file,
+        line: issue.line || 1,
         title: `Replace DOM access in ${issue.functionName}() with custom component`,
         description: `Custom function "${issue.functionName}()" directly manipulates DOM. This breaks AEM Forms architecture and causes maintenance issues.`,
+        refactoredCode: refactoredCode.jsCode,
+        componentExample: refactoredCode.componentExample,
+        testingSteps: refactoredCode.testingSteps,
         guidance: `
 **Current (ANTI-PATTERN):**
 \`\`\`javascript
@@ -566,7 +1124,7 @@ export function ${issue.functionName}(field, newState, globals) {
    * Suggest moving to custom:formViewInitialized event
    */
   async fixAPICallsInInitialize(formEventsResults) {
-    if (!formEventsResults?.newIssues?.length) return [];
+    if (!formEventsResults || !formEventsResults.newIssues || !formEventsResults.newIssues.length) return [];
     
     const suggestions = [];
     
@@ -582,7 +1140,7 @@ export function ${issue.functionName}(field, newState, globals) {
 \`\`\`json
 "events": {
   "initialize": [
-    "${issue.expression?.substring(0, 60)}..."
+    "${issue.expression ? issue.expression.substring(0, 60) : 'API call'}..."
   ]
 }
 \`\`\`
@@ -591,7 +1149,7 @@ export function ${issue.functionName}(field, newState, globals) {
 \`\`\`json
 "events": {
   "custom:formViewInitialized": [
-    "${issue.expression?.substring(0, 60)}..."
+    "${issue.expression ? issue.expression.substring(0, 60) : 'API call'}..."
   ]
 }
 \`\`\`

@@ -11,7 +11,7 @@ A GitHub Action that analyzes Adaptive Form performance by comparing before/afte
 - ⚙️ **Custom Function Validation**: Detects DOM access and HTTP requests in custom functions
 - 🎨 **Form HTML Analysis**: Checks lazy loading, image dimensions, blocking scripts
 - 📝 **CSS Analysis**: Detects architectural issues like background-image, @import, deep selectors
-- 🤖 **AI Auto-Fix Suggestions**: Generates one-click fixable code suggestions for critical issues (Azure OpenAI GPT-4.1)
+- 🤖 **AI Auto-Fix PR**: Automatically creates a PR with fixes for CSS issues, ready to merge into your branch (Azure OpenAI GPT-4.1)
 - 📊 **CWV-Optimized Reports**: Actionable insights with Core Web Vitals impact
 - ⚙️ **Configurable Thresholds**: Smart defaults, fully customizable
 
@@ -79,6 +79,10 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
 
+permissions:
+  contents: write  # Required for auto-fix PR creation
+  pull-requests: write
+
 jobs:
   performance-analysis:
     runs-on: ubuntu-latest
@@ -118,13 +122,65 @@ To enable AI-powered auto-fix suggestions, add Azure OpenAI credentials to your 
 | `AZURE_OPENAI_API_VERSION` | Azure API version | `2024-12-01-preview` |
 
 **What AI Auto-Fix Does:**
-- 🔧 Generates code suggestions for CSS @import → bundling
-- 🔧 Converts CSS background-image → lazy-loaded Image components
-- 🔧 Adds defer attributes to blocking scripts
-- 🔧 Suggests removal of unnecessary hidden fields
-- 🔧 Refactors API calls from initialize → custom events
+- 🤖 **Creates Auto-Fix PR** with fixes and annotations applied
+- 🔧 **CSS Fixes:**
+  - Comments out @import statements (with bundling guidance)
+  - Comments out background-image (with lazy-load guidance)
+- 🔧 **JS Fixes with GitHub Suggestions:**
+  - Generates refactored code for HTTP requests → custom events
+  - Generates refactored code for DOM access → setProperty()
+  - **One-click "Apply suggestion" button** in PR comment
+  - AI-powered code generation using Azure OpenAI GPT-4.1
+- 🔧 **JS Annotations in Auto-Fix PR:**
+  - Flags problematic functions with warning comments
+- 💡 **Detailed Suggestions** for complex issues:
+  - Hidden fields → setVariable() migration
+  - API calls from initialize → custom events
 
-All suggestions are **reviewed by you** before applying — the bot never commits code automatically.
+**How Auto-Fix PR Works:**
+1. Bot analyzes your PR and detects fixable issues (CSS + JS annotations)
+2. Bot creates a **separate PR** targeting your feature branch
+3. You review the auto-fix PR and merge if acceptable
+4. Your original PR automatically includes the fixes
+
+**GitHub Suggestions (One-Click Fix):**
+
+The bot generates AI-powered refactored code and posts it as **GitHub suggestions** in the PR comment:
+
+```markdown
+### Custom Function: fetchMergedBranchDetails()
+
+**File:** `blocks/form/functions.js:123`
+
+**Issue:** Makes direct HTTP request, bypassing form's error handling
+
+**One-Click Fix:** Apply the suggestion below
+
+```suggestion
+export function fetchMergedBranchDetails(field, globals) {
+  globals.functions.dispatchEvent(field, 'custom:fetchBranchData', {
+    branchId: field.$value
+  });
+}
+```
+
+**Step 2: Add to Form JSON**
+```json
+"events": {
+  "custom:fetchBranchData": [
+    "request(externalize('/api/branches/' & $event.detail.branchId), 'GET')"
+  ]
+}
+```
+
+Click **"Apply suggestion"** → Code is automatically updated in your PR!
+
+**Re-runs:**
+- If you edit your original PR (adding URLs, etc.), the bot runs again
+- The bot **updates the existing auto-fix PR** (force push) with latest changes
+- No duplicate PRs are created
+
+All changes are **non-destructive** (comments/annotations only) and **fully reversible** — you control what gets merged.
 
 ```
 

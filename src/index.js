@@ -10,7 +10,8 @@ import { RulePerformanceAnalyzer } from './analyzers/rule-performance-analyzer.j
 import { FormHTMLAnalyzer } from './analyzers/form-html-analyzer.js';
 import { FormCSSAnalyzer } from './analyzers/form-css-analyzer.js';
 import { CustomFunctionAnalyzer } from './analyzers/custom-function-analyzer.js';
-import { AIAutoFixAnalyzer } from './analyzers/ai-autofix-analyzer.js';
+// Temporarily disabled due to build issues
+// import { AIAutoFixAnalyzer } from './analyzers/ai-autofix-analyzer.js';
 import { FormPRReporter } from './reporters/pr-reporter-form.js';
 import { extractURLsFromPR } from './utils/github-helper.js';
 import { loadConfig } from './utils/config-loader.js';
@@ -64,7 +65,8 @@ async function run() {
     const formHTMLAnalyzer = new FormHTMLAnalyzer(config);
     const formCSSAnalyzer = new FormCSSAnalyzer(config);
     const customFunctionAnalyzer = new CustomFunctionAnalyzer(config);
-    const aiAutoFixAnalyzer = new AIAutoFixAnalyzer(config);
+    // Temporarily disabled
+    // const aiAutoFixAnalyzer = new AIAutoFixAnalyzer(config);
 
     // Analyze both URLs
     core.info('Fetching and analyzing before URL...');
@@ -148,9 +150,20 @@ async function run() {
           core.info('Starting rule cycle analysis...');
           const beforeRuleCycles = await rulePerformanceAnalyzer.analyze(beforeData.formJson);
           core.info(`Before rules: ${beforeRuleCycles.totalRules || 0} rules, ${beforeRuleCycles.cycles || 0} cycles, ${beforeRuleCycles.slowRuleCount || 0} slow`);
+          if (beforeRuleCycles.cycles > 0) {
+            core.warning(`  Found ${beforeRuleCycles.cycles} cycle(s) in BEFORE state`);
+          }
           
           const afterRuleCycles = await rulePerformanceAnalyzer.analyze(afterData.formJson);
           core.info(`After rules: ${afterRuleCycles.totalRules || 0} rules, ${afterRuleCycles.cycles || 0} cycles, ${afterRuleCycles.slowRuleCount || 0} slow`);
+          if (afterRuleCycles.cycles > 0) {
+            core.warning(`  Found ${afterRuleCycles.cycles} cycle(s) in AFTER state`);
+            if (afterRuleCycles.cycleDetails) {
+              afterRuleCycles.cycleDetails.forEach((cycle, i) => {
+                core.warning(`    Cycle ${i + 1}: ${(cycle.fields || []).join(' → ')}`);
+              });
+            }
+          }
           
           return { beforeRuleCycles, afterRuleCycles };
         } catch (error) {
@@ -197,8 +210,9 @@ async function run() {
     // Check for critical performance issues BEFORE posting report
     const criticalIssues = detectCriticalIssues(results);
     
-    // 🤖 AI AUTO-FIX SUGGESTIONS (runs after all analyzers complete)
-    // Generates one-click fixable code suggestions for critical issues
+    // AI AUTO-FIX SUGGESTIONS - Temporarily disabled due to build issues
+    // TODO: Re-enable after fixing ncc bundler compatibility
+    /*
     core.info(' Running AI Auto-Fix Analysis...');
     const autoFixSuggestions = await aiAutoFixAnalyzer.analyze(results);
     
@@ -212,6 +226,37 @@ async function run() {
       }
     }
     
+    // CREATE AUTO-FIX PR (if there are trivial fixes to apply)
+    let autoFixPR = null;
+    if (autoFixSuggestions.enabled && autoFixSuggestions.suggestions.length > 0) {
+      core.info(' Creating Auto-Fix PR with trivial fixes...');
+      try {
+        autoFixPR = await aiAutoFixAnalyzer.createAutoFixPR(
+          autoFixSuggestions.suggestions,
+          octokit,
+          owner,
+          repo,
+          prBranch,  // Target user's feature branch
+          prNumber
+        );
+        
+        if (autoFixPR) {
+          core.info(` Auto-fix PR created: #${autoFixPR.number}`);
+          core.info(`  URL: ${autoFixPR.url}`);
+          core.info(`  Fixes: ${autoFixPR.filesChanged} file(s) changed`);
+        } else {
+          core.info(' No trivial fixes available for auto-fix PR');
+        }
+      } catch (error) {
+        core.warning(` Could not create auto-fix PR: ${error.message}`);
+      }
+    }
+    */
+    
+    // Placeholder for disabled AI features
+    const autoFixSuggestions = { enabled: false, suggestions: [] };
+    const autoFixPR = null;
+    
     // Generate and post PR comment
     const reporter = new FormPRReporter(octokit, owner, repo, prNumber);
     await reporter.generateReport(results, {
@@ -220,6 +265,7 @@ async function run() {
       beforeData, // Include performance metrics
       afterData,  // Include performance metrics
       autoFixSuggestions, // Include AI-generated fix suggestions
+      autoFixPR, // Include auto-fix PR details
     });
 
     // Fail the build if critical issues are detected

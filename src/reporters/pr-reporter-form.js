@@ -41,7 +41,7 @@ export class FormPRReporter {
 
     // AI AUTO-FIX SUGGESTIONS (shows first for maximum visibility and actionability)
     if (urls.autoFixSuggestions?.enabled && urls.autoFixSuggestions.suggestions.length > 0) {
-      sections.push(this.buildAutoFixSuggestionsSection(urls.autoFixSuggestions));
+      sections.push(this.buildAutoFixSuggestionsSection(urls.autoFixSuggestions, urls.autoFixPR));
       sections.push('---\n');
     }
 
@@ -97,13 +97,30 @@ export class FormPRReporter {
   /**
    * Build AI Auto-Fix Suggestions section
    */
-  buildAutoFixSuggestionsSection(autoFixData) {
+  buildAutoFixSuggestionsSection(autoFixData, autoFixPR) {
     if (!autoFixData || !autoFixData.enabled || autoFixData.suggestions.length === 0) {
       return '';
     }
 
     const lines = ['### AI Auto-Fix Suggestions\n'];
-    lines.push(`> **${autoFixData.suggestions.length} automated fix${autoFixData.suggestions.length > 1 ? 'es' : ''} available** — Review and apply to improve performance\n`);
+    
+    // AUTO-FIX PR LINK (show prominently at top if available)
+    if (autoFixPR) {
+      lines.push(`> ### Auto-Fix PR Created: [#${autoFixPR.number}](${autoFixPR.url})\n`);
+      lines.push(`> **${autoFixPR.filesChanged} file(s) automatically fixed** — Ready to merge into your branch\n`);
+      lines.push('**Fixes applied in PR:**');
+      autoFixPR.fixes.forEach((fix, i) => {
+        lines.push(`${i + 1}. ${fix}`);
+      });
+      lines.push('');
+      lines.push('**How to apply:**');
+      lines.push('1. Review the changes in [Auto-Fix PR #' + autoFixPR.number + '](' + autoFixPR.url + ')');
+      lines.push('2. Merge the PR to apply fixes to your feature branch');
+      lines.push('3. This PR will automatically include those fixes\n');
+      lines.push('---\n');
+    } else {
+      lines.push(`> **${autoFixData.suggestions.length} automated fix${autoFixData.suggestions.length > 1 ? 'es' : ''} available** — Review and apply to improve performance\n`);
+    }
     
     // Group by severity
     const critical = autoFixData.suggestions.filter(s => s.severity === 'critical');
@@ -143,8 +160,41 @@ export class FormPRReporter {
       lines.push(`**Impact:** ${suggestion.estimatedImpact}\n`);
     }
     
-    // File-specific fixes with code
-    if (suggestion.file && suggestion.originalCode && suggestion.fixedCode) {
+    // JS Refactored Code (HTTP/DOM fixes) - USE GITHUB SUGGESTION SYNTAX
+    if (suggestion.refactoredCode) {
+      lines.push(`**File:** \`${suggestion.file}:${suggestion.line || 1}\`\n`);
+      lines.push(`**One-Click Fix:** Apply the suggestion below\n`);
+      
+      // GitHub suggestion syntax for one-click apply
+      lines.push('```suggestion');
+      lines.push(suggestion.refactoredCode);
+      lines.push('```\n');
+      
+      // Add form JSON if applicable (HTTP fixes)
+      if (suggestion.formJsonSnippet) {
+        lines.push(`**Step 2: Add to Form JSON (Form Editor or JSON)**\n`);
+        lines.push('```json');
+        lines.push(suggestion.formJsonSnippet);
+        lines.push('```\n');
+      }
+      
+      // Add component example if applicable (DOM fixes)
+      if (suggestion.componentExample) {
+        lines.push(`**Custom Component (if needed):**\n`);
+        lines.push('```javascript');
+        lines.push(suggestion.componentExample);
+        lines.push('```\n');
+      }
+      
+      // Add testing steps
+      if (suggestion.testingSteps) {
+        lines.push(`**Testing:**\n`);
+        lines.push(suggestion.testingSteps);
+        lines.push('\n');
+      }
+    }
+    // CSS Fixes with code
+    else if (suggestion.file && suggestion.originalCode && suggestion.fixedCode) {
       lines.push(`**File:** \`${suggestion.file}:${suggestion.line}\`\n`);
       
       lines.push(`**Current Code:**`);
@@ -168,9 +218,8 @@ export class FormPRReporter {
         lines.push(`**Alternative:** ${suggestion.alternativeFix}\n`);
       }
     }
-    
     // Guidance-only fixes (for complex issues)
-    if (suggestion.guidance) {
+    else if (suggestion.guidance) {
       lines.push(`**How to Fix:**`);
       lines.push(suggestion.guidance);
       lines.push('');
@@ -390,7 +439,14 @@ export class FormPRReporter {
 
     const { newCycles, resolvedCycles, after, slowRules, slowRuleCount } = ruleCycles;
 
-    if (after && !after.error) {
+    // Handle error case first
+    if (after && after.error) {
+      lines.push(` Error analyzing rule cycles: ${after.error}\n`);
+      return lines.join('\n');
+    }
+
+    // Show summary stats (always show if we have data)
+    if (after) {
       lines.push(`**Total Rules:** ${after.totalRules || 0}`);
       lines.push(`**Fields with Rules:** ${after.fieldsWithRules || 0}`);
       lines.push(`**Circular Dependencies:** ${after.cycles || 0}`);
@@ -399,50 +455,43 @@ export class FormPRReporter {
       } else {
         lines.push('');
       }
-
-      // Show slow rules first (these impact every interaction)
-      if (slowRules && slowRules.length > 0) {
-        lines.push('####  Slow Rule Execution\n');
-        lines.push(`**${slowRuleCount} rule(s) take > 50ms to execute** - these slow down form interactions.\n`);
-        
-        // Show top 5 slowest
-        const top5 = slowRules.slice(0, 5);
-        top5.forEach(rule => {
-          lines.push(`- **\`${rule.field}\`** - ${rule.duration}ms`);
-          lines.push(`  Event: ${rule.event}, Expression: \`${rule.expression.substring(0, 60)}...\``);
-        });
-        
-        if (slowRuleCount > 5) {
-          lines.push(`\n*... and ${slowRuleCount - 5} more slow rule(s)*`);
-        }
-        
-        lines.push('');
-        lines.push('** Recommendation:** Optimize these rules by reducing complex computations, caching results, or moving expensive operations to custom events.\n');
-      }
-
-      // Show cycle details
-      if (after.cycleDetails && after.cycleDetails.length > 0) {
-        lines.push('####  Critical: Circular Dependencies Found\n');
-        
-        after.cycleDetails.forEach((cycle, index) => {
-          lines.push(`**Cycle ${index + 1}:** \`${cycle.fields.join(' → ')}\``);
-        });
-        lines.push('');
-        lines.push('** Recommendation:** Break circular dependencies immediately - these cause infinite loops and severely impact performance.\n');
-      }
     }
 
-    if (after && after.error) {
-      lines.push(` Error analyzing rule cycles: ${after.error}\n`);
+    // Show slow rules first (these impact every interaction)
+    if (slowRules && slowRules.length > 0) {
+      lines.push('####  Slow Rule Execution\n');
+      lines.push(`**${slowRuleCount} rule(s) take > 50ms to execute** - these slow down form interactions.\n`);
+      
+      // Show top 5 slowest
+      const top5 = slowRules.slice(0, 5);
+      top5.forEach(rule => {
+        lines.push(`- **\`${rule.field}\`** - ${rule.duration}ms`);
+        lines.push(`  Event: ${rule.event}, Expression: \`${rule.expression.substring(0, 60)}...\``);
+      });
+      
+      if (slowRuleCount > 5) {
+        lines.push(`\n*... and ${slowRuleCount - 5} more slow rule(s)*`);
+      }
+      
+      lines.push('');
+      lines.push('** Recommendation:** Optimize these rules by reducing complex computations, caching results, or moving expensive operations to custom events.\n');
     }
 
-    // New cycles
+    // Show ALL cycles (from newCycles which contains after.cycleDetails)
     if (newCycles && newCycles.length > 0) {
-      lines.push('####  New Circular Dependencies Introduced\n');
-      newCycles.forEach(cycle => {
-        lines.push(`- \`${cycle.fields.join(' → ')}\``);
+      lines.push('####  Critical: Circular Dependencies Detected\n');
+      
+      newCycles.forEach((cycle, index) => {
+        const cycleFields = cycle.fields || cycle.path || ['unknown'];
+        lines.push(`**Cycle ${index + 1}:** \`${cycleFields.join(' → ')}\``);
       });
       lines.push('');
+      lines.push('** Recommendation:** Break circular dependencies immediately - these cause infinite loops and severely impact performance.\n');
+    }
+
+    // If no cycles detected, show success message
+    if (!newCycles || newCycles.length === 0) {
+      lines.push('No circular dependencies detected.\n');
     }
 
     // Resolved cycles
