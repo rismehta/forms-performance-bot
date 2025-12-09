@@ -66,7 +66,7 @@ export class FormPRReporter {
 
     // Form HTML Analysis
     if (results.formHTML && !results.formHTML.error) {
-      sections.push(this.buildFormHTMLSection(results.formHTML));
+      sections.push(this.buildFormHTMLSection(results.formHTML, urls));
     }
 
     // Form CSS Analysis
@@ -139,31 +139,6 @@ export class FormPRReporter {
         lines.push(`| **JS Heap Size** | ${heapBefore}MB | ${heapAfter}MB | ${heapDelta > 0 ? '+' : ''}${heapDelta}MB | - |`);
       }
     }
-    
-    lines.push('');
-    lines.push('** Form Render Time:** Time from navigation until first form field appears (measured in headless browser)');
-    lines.push('- **Fast:** < 2 seconds');
-    lines.push('- **Good:** 2-3 seconds');
-    lines.push('- **Slow:** > 3 seconds');
-    lines.push('- **Failed:** Form did not render within 15 seconds (timeout)');
-    lines.push('');
-    
-    // If form failed to load, add investigation steps
-    if (afterData?.performanceMetrics?.formRendered === false) {
-      lines.push('** Form Failed to Load - Investigation Steps:**');
-      lines.push('1. Check for JavaScript errors in browser console');
-      lines.push('2. Check API calls in initialize events (see Form Events section above)');
-      lines.push('3. Check for circular rule dependencies (see Rule Cycles section above)');
-      lines.push('4. Verify all custom functions are defined and not throwing errors');
-      lines.push('5. Check network tab for failed API requests or slow responses\n');
-    } else if (afterData?.performanceMetrics?.loadTime > 3000) {
-      lines.push('** Form is Slow - Consider:**');
-      lines.push('- Moving API calls out of initialize events');
-      lines.push('- Removing unnecessary hidden fields');
-      lines.push('- Breaking circular rule dependencies\n');
-    }
-    
-    lines.push('');
     
     return lines.join('\n');
   }
@@ -292,7 +267,7 @@ export class FormPRReporter {
         lines.push('\n</details>\n');
       }
       
-      lines.push('** Recommendation:** Remove these fields from the form JSON and store as JavaScript variables instead. Hidden fields that are never shown bloat the DOM (each adds ~50-100 bytes) and slow down rendering.\n');
+      lines.push('** Recommendation:** Remove these fields from the form JSON and store as Form variables instead. Hidden fields that are never shown bloat the DOM (each adds ~50-100 bytes) and slow down rendering.\n');
     }
 
     // Resolved issues
@@ -364,10 +339,20 @@ export class FormPRReporter {
   /**
    * Build form HTML section
    */
-  buildFormHTMLSection(formHTML) {
+  buildFormHTMLSection(formHTML, urls) {
     const lines = ['###  Form Rendering Performance\n'];
 
     const { newIssues, resolvedIssues, after, delta } = formHTML;
+    
+    // Check if form actually rendered
+    const formRendered = urls?.afterData?.performanceMetrics?.formRendered !== false;
+
+    if (!formRendered) {
+      lines.push('** Form failed to render - HTML analysis unavailable**\n');
+      lines.push('The form did not load within 15 seconds, so we cannot analyze the rendered HTML.');
+      lines.push('See "Form Load Performance" section above for investigation steps.\n');
+      return lines.join('\n');
+    }
 
     if (after && after.rendering) {
       lines.push('**Rendered Form Analysis:**');
@@ -440,74 +425,31 @@ export class FormPRReporter {
     const { after, newIssues } = formCSS;
 
     if (after) {
-      lines.push(`**Files Analyzed:** ${after.filesAnalyzed}`);
-      
-      if (after.summary) {
-        const { backgroundImages, importantRules, inlineDataURIs, deepSelectors, duplicateSelectors } = after.summary;
-        
-        if (backgroundImages > 0 || importantRules > 0 || inlineDataURIs > 0 || deepSelectors > 0 || duplicateSelectors > 0) {
-          lines.push('\n**Issues Found:**');
-          if (backgroundImages > 0) {
-            lines.push(`- CSS background-image: ${backgroundImages} (should use Image component)`);
-          }
-          if (inlineDataURIs > 0) {
-            lines.push(`- Inline data URIs: ${inlineDataURIs}`);
-          }
-          if (importantRules > 0) {
-            lines.push(`- !important usage: ${importantRules} times`);
-          }
-          if (deepSelectors > 0) {
-            lines.push(`- Deep selectors: ${deepSelectors}`);
-          }
-          if (duplicateSelectors > 0) {
-            lines.push(`- Duplicate selectors: ${duplicateSelectors}`);
-          }
-          lines.push('');
-        }
-      }
+      lines.push(`**Files Analyzed:** ${after.filesAnalyzed}\n`);
     }
 
-    // Show issues - only critical and top warnings, skip info
+    // Show only critical issues in detail, summarize warnings
     if (newIssues && newIssues.length > 0) {
-      lines.push('#### CSS Issues Detected\n');
+      const criticalIssues = newIssues.filter(i => i.severity === 'error');
+      const warningIssues = newIssues.filter(i => i.severity === 'warning');
       
-      // Group by severity - only show critical and warnings
-      const criticalIssues = newIssues.filter(i => i.severity === 'error').slice(0, 3);
-      const warnings = newIssues.filter(i => i.severity === 'warning').slice(0, 3);
-      const totalIssues = newIssues.length;
-
+      // Critical issues - show details
       if (criticalIssues.length > 0) {
-        lines.push('**Critical:**\n');
+        lines.push('** Critical Issues:**\n');
         criticalIssues.forEach(issue => {
-          lines.push(`**[ERROR] ${issue.file}:${issue.line || '?'}** - ${issue.type}`);
-          lines.push(`- ${issue.message}`);
-          if (issue.recommendation) {
-            lines.push(`- Recommendation: ${issue.recommendation}`);
-          }
-          lines.push('');
+          lines.push(`- **${issue.file}** - ${issue.type}`);
         });
+        lines.push('');
       }
 
-      if (warnings.length > 0) {
-        lines.push('**Warnings:**\n');
-        warnings.forEach(issue => {
-          lines.push(`**[WARN] ${issue.file}:${issue.line || '?'}** - ${issue.type}`);
-          lines.push(`- ${issue.message.substring(0, 150)}${issue.message.length > 150 ? '...' : ''}`);
-          if (issue.imageUrl) {
-            lines.push(`- Image: \`${issue.imageUrl}\``);
-          }
-          if (issue.recommendation) {
-            lines.push(`- Recommendation: ${issue.recommendation}`);
-          }
-          lines.push('');
-        });
-      }
-
-      // Show remaining count (includes info-level issues)
-      const shownCount = criticalIssues.length + warnings.length;
-      const remaining = totalIssues - shownCount;
-      if (remaining > 0) {
-        lines.push(`\n*Note: ${remaining} additional CSS issue(s) not shown (mostly informational). Check CSS files for full details.*\n`);
+      // Warnings - just count by type
+      if (warningIssues.length > 0) {
+        lines.push('** Warnings:**');
+        const bgImages = warningIssues.filter(i => i.type === 'css-background-image').length;
+        if (bgImages > 0) {
+          lines.push(`- ${bgImages} CSS background-image(s) (use Image component instead)`);
+        }
+        lines.push(`- ${warningIssues.length} total warning(s)\n`);
       }
     }
 
@@ -526,10 +468,8 @@ export class FormPRReporter {
 
     const { before, after, newIssues, resolvedIssues } = customFunctions;
 
-    if (after) {
-      lines.push(`**Functions Found:** ${after.functionsFound}`);
-      lines.push(`**Functions Analyzed:** ${after.functionsAnalyzed}`);
-      lines.push('');
+    if (after && after.functionsAnalyzed > 0) {
+      lines.push(`**Custom Functions Analyzed:** ${after.functionsAnalyzed}\n`);
     }
 
     // Show all violations in current state

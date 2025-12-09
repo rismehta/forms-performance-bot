@@ -106,13 +106,13 @@ export class FormCSSAnalyzer {
       const lineNumber = this.getLineNumber(content, match.index);
 
       issues.push({
-        severity: 'warning',
+        severity: 'error',
         type: 'css-background-image',
         file: filename,
         line: lineNumber,
-        message: `CSS background-image detected: "${imageUrl}". Consider using Image component instead.`,
+        message: `CSS background-image detected: "${imageUrl}". Must use Image component instead.`,
         imageUrl,
-        recommendation: 'Replace with <Image> component for better lazy loading, responsive images, and automatic optimization. Background images cannot be lazy loaded and impact form rendering performance.',
+        recommendation: 'Replace with <Image> component for better lazy loading, responsive images, and automatic optimization. Background images cannot be lazy loaded and block form rendering.',
       });
     }
 
