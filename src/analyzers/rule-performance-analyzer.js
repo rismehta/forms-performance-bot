@@ -576,11 +576,12 @@ export class RulePerformanceAnalyzer {
         cycle.push(fieldName); // Complete the cycle
         
         // Check if this cycle is already recorded (avoid duplicates)
-        const cycleKey = cycle.sort().join('->');
+        // Create a sorted copy for the key (don't mutate the original cycle array)
+        const cycleKey = [...cycle].sort().join('->');
         if (!cycles.some(c => c.key === cycleKey)) {
           cycles.push({
             key: cycleKey,
-            fields: cycle,
+            fields: cycle,  // Keep original order for display
             path: [...path, fieldName],
           });
         }

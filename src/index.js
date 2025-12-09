@@ -10,8 +10,7 @@ import { RulePerformanceAnalyzer } from './analyzers/rule-performance-analyzer.j
 import { FormHTMLAnalyzer } from './analyzers/form-html-analyzer.js';
 import { FormCSSAnalyzer } from './analyzers/form-css-analyzer.js';
 import { CustomFunctionAnalyzer } from './analyzers/custom-function-analyzer.js';
-// Temporarily disabled due to build issues
-// import { AIAutoFixAnalyzer } from './analyzers/ai-autofix-analyzer.js';
+import { AIAutoFixAnalyzer } from './analyzers/ai-autofix-analyzer.js';
 import { FormPRReporter } from './reporters/pr-reporter-form.js';
 import { extractURLsFromPR } from './utils/github-helper.js';
 import { loadConfig } from './utils/config-loader.js';
@@ -65,8 +64,7 @@ async function run() {
     const formHTMLAnalyzer = new FormHTMLAnalyzer(config);
     const formCSSAnalyzer = new FormCSSAnalyzer(config);
     const customFunctionAnalyzer = new CustomFunctionAnalyzer(config);
-    // Temporarily disabled
-    // const aiAutoFixAnalyzer = new AIAutoFixAnalyzer(config);
+    const aiAutoFixAnalyzer = new AIAutoFixAnalyzer(config);
 
     // Analyze both URLs
     core.info('Fetching and analyzing before URL...');
@@ -210,9 +208,8 @@ async function run() {
     // Check for critical performance issues BEFORE posting report
     const criticalIssues = detectCriticalIssues(results);
     
-    // AI AUTO-FIX SUGGESTIONS - Temporarily disabled due to build issues
-    // TODO: Re-enable after fixing ncc bundler compatibility
-    /*
+    // AI AUTO-FIX SUGGESTIONS (runs after all analyzers complete)
+    // Generates one-click fixable code suggestions for critical issues
     core.info(' Running AI Auto-Fix Analysis...');
     const autoFixSuggestions = await aiAutoFixAnalyzer.analyze(results);
     
@@ -251,11 +248,6 @@ async function run() {
         core.warning(` Could not create auto-fix PR: ${error.message}`);
       }
     }
-    */
-    
-    // Placeholder for disabled AI features
-    const autoFixSuggestions = { enabled: false, suggestions: [] };
-    const autoFixPR = null;
     
     // Generate and post PR comment
     const reporter = new FormPRReporter(octokit, owner, repo, prNumber);
