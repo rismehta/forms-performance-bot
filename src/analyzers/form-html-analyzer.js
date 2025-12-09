@@ -327,6 +327,30 @@ export class FormHTMLAnalyzer {
       });
     }
 
+    // Large DOM size (impacts INP, TBT, and overall responsiveness)
+    // Google recommendation: < 1,500 nodes, warn at 800, error at 1,500
+    const domThresholds = this.config?.thresholds?.html?.maxDomNodes || { warning: 800, critical: 1500 };
+    
+    if (analysis.rendering.totalElements > domThresholds.critical) {
+      issues.push({
+        severity: 'error',
+        type: 'excessive-dom-size',
+        message: `${analysis.rendering.totalElements} DOM nodes in rendered form (threshold: ${domThresholds.critical}). Large DOM severely impacts INP (Interaction to Next Paint) and form responsiveness.`,
+        count: analysis.rendering.totalElements,
+        threshold: domThresholds.critical,
+        recommendation: 'Reduce DOM complexity: Remove unnecessary hidden fields, simplify nested structures, use lazy rendering for large lists, consolidate panels. Each interaction must traverse all ${analysis.rendering.totalElements} nodes, causing slow responses.',
+      });
+    } else if (analysis.rendering.totalElements > domThresholds.warning) {
+      issues.push({
+        severity: 'warning',
+        type: 'large-dom-size',
+        message: `${analysis.rendering.totalElements} DOM nodes in rendered form (warning threshold: ${domThresholds.warning}). This impacts INP and can slow down interactions.`,
+        count: analysis.rendering.totalElements,
+        threshold: domThresholds.warning,
+        recommendation: 'Consider reducing DOM size. Target < 800 nodes for optimal INP. Focus on: removing unnecessary hidden fields (see Hidden Fields section), simplifying component structure, lazy loading content.',
+      });
+    }
+
     return issues;
   }
 

@@ -313,6 +313,14 @@ function detectCriticalIssues(results) {
         critical.issues.push(`${syncScripts[0].count} synchronous script(s) without defer (${breakdown.head || 0} in <head>, ${breakdown.body || 0} in <body>) - block parsing`);
       }
     }
+    
+    // Excessive DOM size (CRITICAL - impacts INP and responsiveness)
+    const excessiveDOM = results.formHTML.newIssues.filter(i => i.type === 'excessive-dom-size');
+    if (excessiveDOM.length > 0 && excessiveDOM[0].count) {
+      critical.hasCritical = true;
+      critical.count += excessiveDOM.length;
+      critical.issues.push(`${excessiveDOM[0].count} DOM nodes (threshold: ${excessiveDOM[0].threshold}) - severely impacts INP`);
+    }
   }
 
   return critical;
