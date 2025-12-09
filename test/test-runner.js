@@ -2,7 +2,7 @@ import { URLAnalyzer } from '../src/analyzers/url-analyzer.js';
 import { FormAnalyzer } from '../src/analyzers/form-analyzer.js';
 import { FormEventsAnalyzer } from '../src/analyzers/form-events-analyzer.js';
 import { HiddenFieldsAnalyzer } from '../src/analyzers/hidden-fields-analyzer.js';
-import { RuleCycleAnalyzer } from '../src/analyzers/rule-cycle-analyzer.js';
+import { RulePerformanceAnalyzer } from '../src/analyzers/rule-performance-analyzer.js';
 import { FormHTMLAnalyzer } from '../src/analyzers/form-html-analyzer.js';
 import { FormCSSAnalyzer } from '../src/analyzers/form-css-analyzer.js';
 import { CustomFunctionAnalyzer } from '../src/analyzers/custom-function-analyzer.js';
@@ -47,7 +47,7 @@ class TestRunner {
       const formAnalyzer = new FormAnalyzer(config);
       const formEventsAnalyzer = new FormEventsAnalyzer(config);
       const hiddenFieldsAnalyzer = new HiddenFieldsAnalyzer(config);
-      const ruleCycleAnalyzer = new RuleCycleAnalyzer(config);
+      const rulePerformanceAnalyzer = new RulePerformanceAnalyzer(config);
       const formHTMLAnalyzer = new FormHTMLAnalyzer(config);
       const formCSSAnalyzer = new FormCSSAnalyzer(config);
       const customFunctionAnalyzer = new CustomFunctionAnalyzer(config);
@@ -87,8 +87,8 @@ class TestRunner {
           afterHiddenFields: hiddenFieldsAnalyzer.analyze(afterData.formJson, jsFiles)
         }),
         Promise.all([
-          ruleCycleAnalyzer.analyze(beforeData.formJson),
-          ruleCycleAnalyzer.analyze(afterData.formJson)
+          rulePerformanceAnalyzer.analyze(beforeData.formJson),
+          rulePerformanceAnalyzer.analyze(afterData.formJson)
         ]).then(([beforeRuleCycles, afterRuleCycles]) => ({ beforeRuleCycles, afterRuleCycles })),
         Promise.resolve(formHTMLAnalyzer.compare(beforeData.html, afterData.html)),
         Promise.resolve(formCSSAnalyzer.analyze(cssFiles)),
@@ -100,7 +100,7 @@ class TestRunner {
 
       // Compile comparison results
       const hiddenFieldsAnalysis = hiddenFieldsAnalyzer.compare(beforeHiddenFields, afterHiddenFields);
-      const ruleCycleAnalysis = ruleCycleAnalyzer.compare(beforeRuleCycles, afterRuleCycles);
+      const ruleCycleAnalysis = rulePerformanceAnalyzer.compare(beforeRuleCycles, afterRuleCycles);
       const formCSSAnalysis = { after: cssAnalysis, newIssues: cssAnalysis.issues, resolvedIssues: [] };
       const customFunctionAnalysis = customFunctionAnalyzer.compare(beforeCustomFunctions, afterCustomFunctions);
       

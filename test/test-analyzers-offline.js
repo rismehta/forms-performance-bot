@@ -14,7 +14,7 @@
 import { FormAnalyzer } from '../src/analyzers/form-analyzer.js';
 import { FormEventsAnalyzer } from '../src/analyzers/form-events-analyzer.js';
 import { HiddenFieldsAnalyzer } from '../src/analyzers/hidden-fields-analyzer.js';
-import { RuleCycleAnalyzer } from '../src/analyzers/rule-cycle-analyzer.js';
+import { RulePerformanceAnalyzer } from '../src/analyzers/rule-performance-analyzer.js';
 import { CustomFunctionAnalyzer } from '../src/analyzers/custom-function-analyzer.js';
 import { FormHTMLAnalyzer } from '../src/analyzers/form-html-analyzer.js';
 import { FormCSSAnalyzer } from '../src/analyzers/form-css-analyzer.js';
@@ -88,7 +88,7 @@ async function runTests() {
     const formAnalyzer = new FormAnalyzer(config);
     const formEventsAnalyzer = new FormEventsAnalyzer(config);
     const hiddenFieldsAnalyzer = new HiddenFieldsAnalyzer(config);
-    const ruleCycleAnalyzer = new RuleCycleAnalyzer(config);
+    const rulePerformanceAnalyzer = new RulePerformanceAnalyzer(config);
     const customFunctionAnalyzer = new CustomFunctionAnalyzer(config);
     const formHTMLAnalyzer = new FormHTMLAnalyzer(config);
     const formCSSAnalyzer = new FormCSSAnalyzer(config);
@@ -145,7 +145,7 @@ async function runTests() {
     console.log('TEST 4: Rule Cycle Detection\n');
     console.log('───────────────────────────────────────────────────────────\n');
     
-    const ruleCycles = await ruleCycleAnalyzer.analyze(mockFormJSON);
+    const ruleCycles = await rulePerformanceAnalyzer.analyze(mockFormJSON);
     console.log('Fields with Rules:', ruleCycles.fieldsWithRules || 0);
     console.log('Total Rules:', ruleCycles.totalRules || 0);
     console.log('Circular Dependencies Found:', ruleCycles.cycles || 0);
@@ -235,9 +235,10 @@ async function runTests() {
     console.log('  - ✅ 6 unnecessary hidden fields (hiddenPanel, unusedField, dataStorage, userId, sessionId, email)');
     console.log('  - ✅ 1 circular rule dependency (fieldA → fieldB → fieldC → fieldA)');
     console.log('  - ✅ 1 custom function violation (validateUserName: DOM access)');
-    console.log('  - ✅ 2 background-images in CSS');
+    console.log('  - ✅ 2 background-images in CSS (CRITICAL)');
+    console.log('  - ✅ 1 @import statement in CSS (CRITICAL - blocks rendering)');
     console.log('  - ✅ 13+ deep selectors in CSS');
-    console.log('  - ✅ Additional CSS issues (@import, hardcoded colors, duplicate selectors)');
+    console.log('  - ✅ Additional CSS issues (hardcoded colors, duplicate selectors, !important)');
     console.log('\n📝 Notes:');
     console.log('  - Form Events Analyzer: 0 detected (API calls removed to prevent runtime crashes in offline tests)');
     console.log('  - For API call detection testing, use live URLs with test-local-with-files.sh');

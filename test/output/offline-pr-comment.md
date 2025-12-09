@@ -2,7 +2,7 @@
 
 > **Automated analysis of Adaptive Form performance**
 
-**Analysis Time:** 2025-12-09T09:39:04.595Z
+**Analysis Time:** 2025-12-09T08:31:54.148Z
 **Before:** `https://main--test-repo.aem.live/`
 **After:** `https://feature--test-repo.aem.live/`
 
@@ -29,33 +29,15 @@
 - Hidden fields: undefined 
 - Unnecessary fields: undefined 
 
-####  Unnecessary Hidden Fields Detected
+####  Unnecessary Hidden Fields
 
-**Field: `hiddenPanel`**
-- **Issue:** Field "hiddenPanel" is always hidden and increases DOM size unnecessarily.
-- ** Recommendation:** Consider removing this field from the form and storing this as form variable. Hidden fields that are never shown bloat the DOM and impact performance.
+**6 field(s) are always hidden and never made visible:**
 
-**Field: `unusedField`**
-- **Issue:** Field "unusedField" is always hidden and increases DOM size unnecessarily.
-- ** Recommendation:** Consider removing this field from the form and storing this as form variable. Hidden fields that are never shown bloat the DOM and impact performance.
+`hiddenPanel`, `unusedField`, `dataStorage`, `userId`, `sessionId`, `email`
 
-**Field: `dataStorage`**
-- **Issue:** Field "dataStorage" is always hidden and increases DOM size unnecessarily.
-- ** Recommendation:** Consider removing this field from the form and storing this as form variable. Hidden fields that are never shown bloat the DOM and impact performance.
+** Recommendation:** Remove these fields from the form JSON and store as Form variables instead. Hidden fields that are never shown bloat the DOM (each adds ~50-100 bytes) and slow down rendering.
 
-**Field: `userId`**
-- **Issue:** Field "userId" is always hidden and increases DOM size unnecessarily.
-- ** Recommendation:** Consider removing this field from the form and storing this as form variable. Hidden fields that are never shown bloat the DOM and impact performance.
-
-**Field: `sessionId`**
-- **Issue:** Field "sessionId" is always hidden and increases DOM size unnecessarily.
-- ** Recommendation:** Consider removing this field from the form and storing this as form variable. Hidden fields that are never shown bloat the DOM and impact performance.
-
-**Field: `email`**
-- **Issue:** Field "email" is always hidden and increases DOM size unnecessarily.
-- ** Recommendation:** Consider removing this field from the form and storing this as form variable. Hidden fields that are never shown bloat the DOM and impact performance.
-
-###  Rule Dependency Cycles
+###  Rule Performance Analysis
 
 **Total Rules:** 4
 **Fields with Rules:** 4
@@ -64,8 +46,8 @@
 ####  Critical: Circular Dependencies Found
 
 **Cycle 1:** `fieldA → fieldA → fieldB → fieldC`
-- **Fields involved:** fieldA, fieldB, fieldC
-- ** Recommendation:** Break this circular dependency by removing or modifying one of the rules. This can cause infinite loops and severely impact performance.
+
+** Recommendation:** Break circular dependencies immediately - these cause infinite loops and severely impact performance.
 
 ####  New Circular Dependencies Introduced
 
@@ -77,7 +59,7 @@
 - Total DOM Elements: 27
 - Hidden Elements: 0
 - Images: 3 (1 without lazy loading)
-- Blocking Scripts: 0
+- Blocking Scripts: 1
 
 **Changes:**
 - Images: undefined 
@@ -91,35 +73,15 @@
 
 **Files Analyzed:** 1
 
-**Issues Found:**
-- CSS background-image: 2 (should use Image component)
-- Deep selectors: 13
+** Critical Issues:**
 
-#### CSS Issues Detected
-
-**Warnings:**
-
-**[WARN] sample-form.css:5** - css-background-image
-- CSS background-image detected: "images/hero.jpg". Consider using Image component instead.
-- Image: `images/hero.jpg`
-- Recommendation: Replace with <Image> component for better lazy loading, responsive images, and automatic optimization. Background images cannot be lazy loaded and impact form rendering performance.
-
-**[WARN] sample-form.css:12** - css-background-image
-- CSS background-image detected: "/assets/card-bg.png". Consider using Image component instead.
-- Image: `/assets/card-bg.png`
-- Recommendation: Replace with <Image> component for better lazy loading, responsive images, and automatic optimization. Background images cannot be lazy loaded and impact form rendering performance.
-
-**[WARN] sample-form.css:22** - css-import-blocking
-- @import blocks rendering: "theme.css"
-- Recommendation: Replace @import with <link> tags or bundle CSS files. @import forces sequential loading and delays form rendering.
-
-
-*Note: 13 additional CSS issue(s) not shown (mostly informational). Check CSS files for full details.*
+- **sample-form.css** - css-background-image
+- **sample-form.css** - css-background-image
+- **sample-form.css** - css-import-blocking
 
 ###  Custom Functions Analysis
 
-**Functions Found:** 1
-**Functions Analyzed:** 1
+**Custom Functions Analyzed:** 1
 
 ####  Violations Detected
 
@@ -135,17 +97,17 @@
 **Performance Impact:** Critical Issues Detected 
 
 ** Critical Issues:**
-- 1 circular dependency introduced - can cause infinite loops
+- 1 circular dependency - can cause infinite loops
+- 3 critical CSS issue(s)
 - 1 @import statement(s) blocking rendering
 - 1 custom function(s) accessing DOM directly
 
 ** Warnings:**
 - 6 unnecessary hidden field(s) bloating DOM
-- 3 CSS warning(s)
 - 2 CSS background-image(s) should use Image component
 
 ** Recommendations:**
-- Remove hidden fields that are never shown - use JavaScript variables instead
+- Remove hidden fields that are never shown - use Form variables instead
 - Break circular dependencies immediately - these cause severe performance issues
 - Replace CSS background images with <Image> component for lazy loading and optimization
 - Replace @import with <link> tags or bundle CSS

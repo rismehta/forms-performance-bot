@@ -30,7 +30,7 @@ export class FormHTMLAnalyzer {
 
     return {
       images: this.analyzeFormImages($, formContainer),
-      scripts: this.analyzeFormScripts($, formContainer),
+      scripts: this.analyzePageScripts($), // Analyze ALL scripts on page (not just in form)
       resources: this.analyzeFormResources($, formContainer),
       rendering: this.analyzeRenderingPerformance($, formContainer),
       issues: [],
@@ -69,23 +69,28 @@ export class FormHTMLAnalyzer {
   }
 
   /**
-   * Analyze scripts within form (inline scripts that may block rendering)
+   * Analyze ALL scripts on the page (not just within form)
+   * Scripts anywhere on the page can block form rendering
    */
-  analyzeFormScripts($, container) {
-    const inlineScripts = container.find('script:not([src])').map((i, script) => {
+  analyzePageScripts($) {
+    // Analyze ALL scripts on the entire page
+    const inlineScripts = $('script:not([src])').map((i, script) => {
       const content = $(script).html();
+      const $script = $(script);
       return {
         size: content.length,
         hasContent: content.length > 0,
+        location: this.getScriptLocation($, $script),
       };
     }).get();
 
-    const externalScripts = container.find('script[src]').map((i, script) => {
+    const externalScripts = $('script[src]').map((i, script) => {
       const $script = $(script);
       return {
         src: $script.attr('src'),
         async: $script.attr('async') !== undefined,
         defer: $script.attr('defer') !== undefined,
+        location: this.getScriptLocation($, $script),
       };
     }).get();
 
@@ -99,6 +104,15 @@ export class FormHTMLAnalyzer {
         external: externalScripts,
       },
     };
+  }
+
+  /**
+   * Determine script location on page (head, body, etc.)
+   */
+  getScriptLocation($, $script) {
+    if ($script.closest('head').length) return 'head';
+    if ($script.closest('body').length) return 'body';
+    return 'unknown';
   }
 
   /**
@@ -225,25 +239,36 @@ export class FormHTMLAnalyzer {
       });
     }
 
-    // Inline scripts in form (blocking)
-    if (analysis.scripts.inline > 0 && analysis.scripts.inlineSize > 5000) {
+    // Inline scripts on page (ALWAYS blocking - they execute synchronously)
+    if (analysis.scripts.inline > 0) {
+      const inHead = analysis.scripts.scripts.inline.filter(s => s.location === 'head').length;
+      const inBody = analysis.scripts.scripts.inline.filter(s => s.location === 'body').length;
+      
       issues.push({
-        severity: 'warning',
-        type: 'large-inline-scripts',
-        message: `${analysis.scripts.inline} inline script(s) in form (${(analysis.scripts.inlineSize / 1024).toFixed(2)} KB). This blocks form rendering.`,
+        severity: 'error',
+        type: 'inline-scripts-on-page',
+        message: `${analysis.scripts.inline} inline script(s) on page (${(analysis.scripts.inlineSize / 1024).toFixed(2)} KB) - ${inHead} in <head>, ${inBody} in <body>. Inline scripts ALWAYS block form rendering.`,
         size: analysis.scripts.inlineSize,
-        recommendation: 'Move inline scripts to external files or execute after form renders.',
+        count: analysis.scripts.inline,
+        breakdown: { head: inHead, body: inBody },
+        recommendation: 'All JavaScript should be in external files with defer attribute. Move inline scripts to external files loaded with defer. Scripts in <head> especially delay form rendering.',
       });
     }
 
-    // Blocking external scripts
+    // Blocking external scripts (without async/defer)
     if (analysis.scripts.blocking > 0) {
+      const blockingScripts = analysis.scripts.scripts.external.filter(s => !s.async && !s.defer);
+      const inHead = blockingScripts.filter(s => s.location === 'head').length;
+      const inBody = blockingScripts.filter(s => s.location === 'body').length;
+      
       issues.push({
         severity: 'error',
-        type: 'blocking-scripts-in-form',
-        message: `${analysis.scripts.blocking} blocking script(s) in form. These delay form interactivity.`,
+        type: 'blocking-scripts-on-page',
+        message: `${analysis.scripts.blocking} synchronous script(s) on page without async/defer - ${inHead} in <head>, ${inBody} in <body>. These block parsing and delay form rendering.`,
         count: analysis.scripts.blocking,
-        recommendation: 'Add async or defer attributes to scripts, or load them after form renders.',
+        breakdown: { head: inHead, body: inBody },
+        scripts: blockingScripts,
+        recommendation: 'All JavaScript should use defer attribute. Add defer to all script tags to prevent blocking. Use defer (not async) for forms to maintain execution order. Scripts in <head> are especially critical.',
       });
     }
 
@@ -299,6 +324,30 @@ export class FormHTMLAnalyzer {
         message: `${analysis.rendering.inlineStyleElements} elements with inline styles. This prevents style reuse and increases HTML size.`,
         count: analysis.rendering.inlineStyleElements,
         recommendation: 'Use CSS classes instead of inline styles.',
+      });
+    }
+
+    // Large DOM size (impacts INP, TBT, and overall responsiveness)
+    // Google recommendation: < 1,500 nodes, warn at 800, error at 1,500
+    const domThresholds = this.config?.thresholds?.html?.maxDomNodes || { warning: 800, critical: 1500 };
+    
+    if (analysis.rendering.totalElements > domThresholds.critical) {
+      issues.push({
+        severity: 'error',
+        type: 'excessive-dom-size',
+        message: `${analysis.rendering.totalElements} DOM nodes in rendered form (threshold: ${domThresholds.critical}). Large DOM severely impacts INP (Interaction to Next Paint) and form responsiveness.`,
+        count: analysis.rendering.totalElements,
+        threshold: domThresholds.critical,
+        recommendation: 'Reduce DOM complexity: Remove unnecessary hidden fields, simplify nested structures, use lazy rendering for large lists, consolidate panels. Each interaction must traverse all ${analysis.rendering.totalElements} nodes, causing slow responses.',
+      });
+    } else if (analysis.rendering.totalElements > domThresholds.warning) {
+      issues.push({
+        severity: 'warning',
+        type: 'large-dom-size',
+        message: `${analysis.rendering.totalElements} DOM nodes in rendered form (warning threshold: ${domThresholds.warning}). This impacts INP and can slow down interactions.`,
+        count: analysis.rendering.totalElements,
+        threshold: domThresholds.warning,
+        recommendation: 'Consider reducing DOM size. Target < 800 nodes for optimal INP. Focus on: removing unnecessary hidden fields (see Hidden Fields section), simplifying component structure, lazy loading content.',
       });
     }
 

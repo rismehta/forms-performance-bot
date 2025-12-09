@@ -227,6 +227,8 @@
         ]
       }
     ],
+    "slowRules": [],
+    "slowRuleCount": 0,
     "issues": [
       {
         "severity": "error",
@@ -363,20 +365,28 @@
     "scripts": {
       "inline": 1,
       "inlineSize": 190,
-      "external": 1,
-      "blocking": 0,
+      "external": 2,
+      "blocking": 1,
       "scripts": {
         "inline": [
           {
             "size": 190,
-            "hasContent": true
+            "hasContent": true,
+            "location": "body"
           }
         ],
         "external": [
           {
+            "src": "/scripts/blocking-analytics.js",
+            "async": false,
+            "defer": false,
+            "location": "head"
+          },
+          {
             "src": "/scripts/form-validation.js",
             "async": true,
-            "defer": false
+            "defer": false,
+            "location": "body"
           }
         ]
       }
@@ -411,22 +421,22 @@
     "filesAnalyzed": 1,
     "issues": [
       {
-        "severity": "warning",
+        "severity": "error",
         "type": "css-background-image",
         "file": "sample-form.css",
         "line": 5,
-        "message": "CSS background-image detected: \"images/hero.jpg\". Consider using Image component instead.",
+        "message": "CSS background-image detected: \"images/hero.jpg\". Must use Image component instead.",
         "imageUrl": "images/hero.jpg",
-        "recommendation": "Replace with <Image> component for better lazy loading, responsive images, and automatic optimization. Background images cannot be lazy loaded and impact form rendering performance."
+        "recommendation": "Replace with <Image> component for better lazy loading, responsive images, and automatic optimization. Background images cannot be lazy loaded and block form rendering."
       },
       {
-        "severity": "warning",
+        "severity": "error",
         "type": "css-background-image",
         "file": "sample-form.css",
         "line": 12,
-        "message": "CSS background-image detected: \"/assets/card-bg.png\". Consider using Image component instead.",
+        "message": "CSS background-image detected: \"/assets/card-bg.png\". Must use Image component instead.",
         "imageUrl": "/assets/card-bg.png",
-        "recommendation": "Replace with <Image> component for better lazy loading, responsive images, and automatic optimization. Background images cannot be lazy loaded and impact form rendering performance."
+        "recommendation": "Replace with <Image> component for better lazy loading, responsive images, and automatic optimization. Background images cannot be lazy loaded and block form rendering."
       },
       {
         "severity": "info",
@@ -559,7 +569,7 @@
         "recommendation": "Use BEM or utility classes to reduce selector depth. Deep selectors slow down CSS matching in forms with many elements."
       },
       {
-        "severity": "warning",
+        "severity": "error",
         "type": "css-import-blocking",
         "file": "sample-form.css",
         "line": 22,

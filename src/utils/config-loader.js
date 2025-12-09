@@ -14,10 +14,15 @@ const DEFAULT_CONFIG = {
       maxHiddenFields: 20,
       maxRulesPerField: 5,
       maxTotalRules: 50,
-      maxNestedPanels: 15
+      maxNestedPanels: 15,
+      slowRuleThreshold: 50 // ms - flag rules taking longer than this
     },
     html: {
       maxDOMSize: 800,
+      maxDomNodes: {     // Progressive DOM size thresholds (impacts INP)
+        warning: 800,    // Warn at 800 nodes - performance starts degrading
+        critical: 1500   // Fail at 1500 nodes - Google recommendation for INP
+      },
       maxDOMDepth: 12,
       maxInlineStyles: 20,
       maxHiddenElements: 50,
