@@ -71,6 +71,12 @@ export class AIAutoFixAnalyzer {
       core.info(`API call fixes generated: ${initializeFixes.length}`);
       fixableSuggestions.push(...initializeFixes);
       
+      // 6. Custom functions with HTTP requests or DOM access (CRITICAL)
+      core.info('Generating custom function fixes...');
+      const customFunctionFixes = await this.fixCustomFunctions(results.customFunctions);
+      core.info(`Custom function fixes generated: ${customFunctionFixes.length}`);
+      fixableSuggestions.push(...customFunctionFixes);
+      
       core.info(`✅ AI Auto-Fix completed: ${fixableSuggestions.length} suggestion(s) generated`);
       
       return {
@@ -369,6 +375,188 @@ ${fieldNames.length > 5 ? `\n...and ${fieldNames.length - 5} more` : ''}
 `,
       estimatedImpact: `Reduces DOM by ${fieldNames.length} nodes, improves INP by ~${Math.min(fieldNames.length * 2, 50)}ms`
     });
+    
+    return suggestions;
+  }
+
+  /**
+   * Fix custom functions with HTTP requests or DOM access
+   * Suggest using form APIs instead of direct HTTP/DOM manipulation
+   */
+  async fixCustomFunctions(customFunctionsResults) {
+    if (!customFunctionsResults?.newIssues) return [];
+    
+    const suggestions = [];
+    
+    // HTTP requests in custom functions
+    const httpIssues = customFunctionsResults.newIssues.filter(
+      issue => issue.type === 'http-request-in-custom-function'
+    );
+    
+    for (const issue of httpIssues.slice(0, 3)) { // Top 3
+      suggestions.push({
+        type: 'custom-function-http-fix',
+        severity: 'critical',
+        function: issue.function,
+        file: issue.file,
+        title: `Move HTTP request from ${issue.function}() to form-level API call`,
+        description: `Custom function "${issue.function}()" makes direct HTTP requests. This bypasses error handling, loading states, and retry logic.`,
+        guidance: `
+**Current (ANTI-PATTERN):**
+\`\`\`javascript
+// In ${issue.file}:
+export function ${issue.function}(...args) {
+  // Direct HTTP call in custom function
+  const response = await fetch(...);  // or axios(), etc.
+  return response;
+}
+\`\`\`
+
+**Recommended Fix: Use Form-Level Request API**
+
+**Option A: Move to event support via Visual Rule Editor (Recommended)**
+\`\`\`javascript
+// In form JSON - field events (set via Visual Rule Editor):
+"events": {
+  "change": [
+    "request(externalize('/api/endpoint'), 'POST', {data: $field.$value})"
+  ]
+}
+\`\`\`
+
+**How to set in Visual Rule Editor:**
+1. Select field in form editor
+2. Add Rule → When "Value Changes"
+3. Then "Invoke Service" → Configure request()
+4. Service returns data and updates form automatically
+
+**Option B: Trigger via custom event (For complex logic)**
+\`\`\`javascript
+// In form JSON - define custom event with request():
+"events": {
+  "custom:fetchData": [
+    "request(externalize('/api/endpoint'), 'POST', encrypt({data: $field.$value}))"
+  ]
+}
+
+// In custom function - trigger the event instead of calling request():
+export function ${issue.function}(field, globals) {
+  // Validate/transform data first
+  const processedData = transformData(field.$value);
+  
+  // Trigger form's request handler (don't call request() directly)
+  field.dispatch(new CustomEvent('custom:fetchData', { 
+    detail: processedData 
+  }));
+}
+\`\`\`
+
+**Why form-level request() is better:**
+- Handles loading states automatically (spinner shown to user)
+- Built-in retry logic
+- Proper encryption via encrypt() helper
+- Better debugging and monitoring
+
+**Anti-pattern risks (direct HTTP in custom functions):**
+- No retry on network failure
+- Breaks form's request queue (race conditions)
+- Security: Bypasses encrypt() wrapper
+`,
+        estimatedImpact: 'Improves error handling, adds loading states, enables request queueing'
+      });
+    }
+    
+    // DOM access in custom functions
+    const domIssues = customFunctionsResults.newIssues.filter(
+      issue => issue.type === 'dom-access-in-custom-function'
+    );
+    
+    for (const issue of domIssues.slice(0, 2)) { // Top 2
+      suggestions.push({
+        type: 'custom-function-dom-fix',
+        severity: 'critical',
+        function: issue.function,
+        file: issue.file,
+        title: `Replace DOM access in ${issue.function}() with custom component`,
+        description: `Custom function "${issue.function}()" directly manipulates DOM. This breaks AEM Forms architecture and causes maintenance issues.`,
+        guidance: `
+**Current (ANTI-PATTERN):**
+\`\`\`javascript
+// In ${issue.file}:
+export function ${issue.function}(...args) {
+  // Direct DOM manipulation
+  document.querySelector('.field').style.color = 'red';
+  // or
+  const element = document.getElementById('someId');
+  element.innerHTML = 'Updated';
+}
+\`\`\`
+
+**Recommended Fix: Create Custom Component**
+
+**Step 1: Create custom component**
+\`\`\`javascript
+// In blocks/form/components/${issue.function}/
+class CustomFieldComponent extends HTMLElement {
+  connectedCallback() {
+    this.render();
+  }
+  
+  render() {
+    this.innerHTML = \`
+      <div class="custom-field">
+        <!-- Your custom UI here -->
+      </div>
+    \`;
+  }
+  
+  updateState(newState) {
+    // Component manages its own DOM
+    this.querySelector('.custom-field').textContent = newState;
+  }
+}
+
+customElements.define('custom-field-${issue.function}', CustomFieldComponent);
+\`\`\`
+
+**Step 2: Use component in form**
+\`\`\`javascript
+// In form JSON - use custom fieldType:
+{
+  "fieldType": "custom-field-${issue.function}",
+  "name": "myCustomField"
+}
+\`\`\`
+
+**Step 3: Interact via setProperty (not DOM)**
+\`\`\`javascript
+// In custom function - use AEM Forms APIs:
+export function ${issue.function}(field, newState, globals) {
+  // Update via setProperty (not DOM)
+  globals.functions.setProperty(field, { 
+    value: newState 
+  });
+  
+  // Component automatically re-renders
+}
+\`\`\`
+
+**Why this matters:**
+- ✅ Components are self-contained and reusable
+- ✅ Proper lifecycle management
+- ✅ Works with form validation/rules
+- ✅ Easier to test and maintain
+- ✅ Follows AEM Forms architecture
+
+**Anti-pattern risks:**
+- ❌ DOM changes bypass form's state management
+- ❌ Breaks rules/validation that depend on field
+- ❌ Hard to debug when things break
+- ❌ Doesn't work with form serialization
+`,
+        estimatedImpact: 'Improves maintainability, enables proper state management, reduces bugs'
+      });
+    }
     
     return suggestions;
   }
