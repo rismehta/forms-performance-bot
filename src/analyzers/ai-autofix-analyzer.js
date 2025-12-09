@@ -1,5 +1,5 @@
 import * as core from '@actions/core';
-import { readFileSync } from 'fs';
+import { readFileSync, existsSync } from 'fs';
 import { resolve } from 'path';
 
 /**
@@ -42,23 +42,33 @@ export class AIAutoFixAnalyzer {
       const fixableSuggestions = [];
       
       // 1. CSS @import → <link> tags (CRITICAL)
+      core.info('Generating CSS @import fixes...');
       const importFixes = await this.fixCSSImports(results.formCSS);
+      core.info(`CSS @import fixes generated: ${importFixes.length}`);
       fixableSuggestions.push(...importFixes);
       
       // 2. CSS background-image → <img> component (CRITICAL)
+      core.info('Generating CSS background-image fixes...');
       const backgroundImageFixes = await this.fixCSSBackgroundImages(results.formCSS);
+      core.info(`CSS background-image fixes generated: ${backgroundImageFixes.length}`);
       fixableSuggestions.push(...backgroundImageFixes);
       
       // 3. Blocking scripts → defer (CRITICAL)
+      core.info('Generating blocking scripts fixes...');
       const scriptFixes = await this.fixBlockingScripts(results.formHTML);
+      core.info(`Blocking scripts fixes generated: ${scriptFixes.length}`);
       fixableSuggestions.push(...scriptFixes);
       
       // 4. Remove unnecessary hidden fields (HIGH)
+      core.info('Generating hidden fields fixes...');
       const hiddenFieldFixes = await this.fixUnnecessaryHiddenFields(results.hiddenFields);
+      core.info(`Hidden fields fixes generated: ${hiddenFieldFixes.length}`);
       fixableSuggestions.push(...hiddenFieldFixes);
       
       // 5. API calls in initialize → custom events (CRITICAL but complex)
+      core.info('Generating API call in initialize fixes...');
       const initializeFixes = await this.fixAPICallsInInitialize(results.formEvents);
+      core.info(`API call fixes generated: ${initializeFixes.length}`);
       fixableSuggestions.push(...initializeFixes);
       
       core.info(`✅ AI Auto-Fix completed: ${fixableSuggestions.length} suggestion(s) generated`);
@@ -94,16 +104,12 @@ export class AIAutoFixAnalyzer {
       try {
         const filePath = resolve(this.workspaceRoot, issue.file);
         const fileContent = readFileSync(filePath, 'utf-8');
-        const lines = fileContent.split('\n');
         
-        // Get context around the @import line
-        const lineIndex = issue.line - 1;
-        const contextStart = Math.max(0, lineIndex - 2);
-        const contextEnd = Math.min(lines.length, lineIndex + 3);
-        const context = lines.slice(contextStart, contextEnd).join('\n');
+        // PHASE 1 ENHANCEMENT: Send full file + related files for better context
+        const enhancedContext = this.buildEnhancedContext(issue.file, fileContent);
         
-        // Generate fix using AI
-        const fix = await this.generateImportFix(issue, context, lines[lineIndex]);
+        // Generate fix using AI with enhanced context
+        const fix = await this.generateImportFix(issue, enhancedContext, fileContent);
         
         if (fix) {
           suggestions.push({
@@ -113,7 +119,7 @@ export class AIAutoFixAnalyzer {
             line: issue.line,
             title: `Replace @import with bundled CSS`,
             description: `CSS @import blocks rendering. ${fix.explanation}`,
-            originalCode: lines[lineIndex],
+            originalCode: fix.originalCode || `@import url('${issue.importUrl}');`,
             fixedCode: fix.fixedCode,
             alternativeFix: fix.alternativeFix,
             estimatedImpact: 'Eliminates render-blocking @import, improves FCP by 100-300ms'
@@ -143,14 +149,11 @@ export class AIAutoFixAnalyzer {
       try {
         const filePath = resolve(this.workspaceRoot, issue.file);
         const fileContent = readFileSync(filePath, 'utf-8');
-        const lines = fileContent.split('\n');
         
-        const lineIndex = issue.line - 1;
-        const contextStart = Math.max(0, lineIndex - 5);
-        const contextEnd = Math.min(lines.length, lineIndex + 5);
-        const context = lines.slice(contextStart, contextEnd).join('\n');
+        // PHASE 1 ENHANCEMENT: Send full file + related files
+        const enhancedContext = this.buildEnhancedContext(issue.file, fileContent);
         
-        const fix = await this.generateBackgroundImageFix(issue, context);
+        const fix = await this.generateBackgroundImageFix(issue, enhancedContext, fileContent);
         
         if (fix) {
           suggestions.push({
@@ -214,43 +217,157 @@ Note: defer maintains execution order, async does not.
 
   /**
    * Fix unnecessary hidden fields
-   * Suggest removal or conversion to form variables
+   * Suggest removal or conversion to form variables, or proper visibility controls
    */
   async fixUnnecessaryHiddenFields(hiddenFieldsResults) {
-    if (!hiddenFieldsResults?.after?.unnecessaryFields?.length) return [];
+    // Extract unnecessary hidden fields from issues
+    if (!hiddenFieldsResults?.after?.issues) return [];
     
-    const fields = hiddenFieldsResults.after.unnecessaryFields;
-    if (fields.length === 0) return [];
+    const unnecessaryFieldIssues = hiddenFieldsResults.after.issues.filter(
+      issue => issue.type === 'unnecessary-hidden-field'
+    );
+    
+    if (unnecessaryFieldIssues.length === 0) return [];
     
     const suggestions = [];
     
-    // Group by common patterns for batch fixes
-    const top5Fields = fields.slice(0, 5);
+    // Extract field names and paths from issues
+    const fieldNames = unnecessaryFieldIssues.map(issue => issue.field);
+    const top5Fields = fieldNames.slice(0, 5);
+    const top5Paths = unnecessaryFieldIssues.slice(0, 5).map(issue => issue.path);
     
     suggestions.push({
       type: 'hidden-fields-fix',
       severity: 'high',
-      title: `Remove ${fields.length} unnecessary hidden field(s)`,
-      description: `These fields are never made visible and bloat the DOM by ${fields.length} elements.`,
+      title: `Replace ${fieldNames.length} hidden field(s) used for state storage with setVariable`,
+      description: `These fields are never made visible and are likely used for data storage. They create ${fieldNames.length} unnecessary DOM elements. Use setVariable() instead for zero-DOM state management.`,
       fieldsToRemove: top5Fields,
       guidance: `
-**Option 1: Remove from form JSON** (Recommended if not needed)
+**Option 1: Remove from form JSON** (If field is completely unused)
 1. Remove field definitions from form JSON
 2. Remove any references in rules/validations
 
-**Option 2: Convert to form variables** (If data storage is needed)
+**Option 2: Use \`setVariable\` for state storage** (Recommended for data storage)
+
+Hidden fields are commonly misused for storing state. Use \`setVariable\` instead:
+
 \`\`\`javascript
-// Instead of hidden field, use:
-const formData = {
-  ${top5Fields.slice(0, 3).map(f => `${f}: null`).join(',\n  ')}
-};
+// ❌ BAD: Using hidden field for state storage (creates DOM element)
+// Field in JSON: { "name": "${top5Fields[0]}", "visible": false }
+// Accessing: $form.${top5Paths[0]}.$value
+
+// ✅ GOOD: Use setVariable (no DOM element created)
+// Store state:
+setVariable('${top5Fields[0]}', value, $form)
+
+// Retrieve state:
+getVariable('${top5Fields[0]}', $form)
+\`\`\`
+
+**Example: Replace hidden field with setVariable**
+
+**Before (creates DOM):**
+\`\`\`javascript
+// Form JSON has hidden field:
+{
+  "name": "${top5Fields[0]}",
+  "fieldType": "text-input",
+  "visible": false
+}
+
+// Setting value in custom function:
+$form.${top5Paths[0]}.$value = "some data";
+
+// Reading value:
+const data = $form.${top5Paths[0]}.$value;
+\`\`\`
+
+**After (no DOM):**
+\`\`\`javascript
+// Remove field from form JSON entirely
+
+// Setting value in Rule Editor:
+"events": {
+  "change": [
+    "setVariable('${top5Fields[0]}', 'some data', $form)"
+  ]
+}
+
+// Setting value in custom function (functions.js):
+export function storeData(key, value, globals) {
+  const target = globals.form;
+  const existingProperties = target.$properties || {};
+  const updatedProperties = { 
+    ...existingProperties, 
+    [key]: value 
+  };
+  globals.functions.setProperty(target, { 
+    properties: updatedProperties 
+  });
+}
+// Usage: storeData('${top5Fields[0]}', someValue, $)
+
+// Reading value in Rule Editor:
+const data = getVariable('${top5Fields[0]}', $form);
+
+// Reading value in visible/enable expressions:
+"visible": "getVariable('${top5Fields[0]}', $form) !== null"
+\`\`\`
+
+**Option 3: Keep as hidden field ONLY if conditionally visible**
+
+Only keep the hidden field if it will be shown based on user input:
+
+\`\`\`javascript
+// In form JSON - field definition:
+{
+  "name": "${top5Fields[0]}",
+  "visible": false,
+  "events": {
+    "custom:showField": [
+      "setProperty(${top5Paths[0]}, {visible: true})"
+    ]
+  }
+}
+
+// Trigger visibility from another field:
+"events": {
+  "change": [
+    "dispatch(${top5Paths[0]}, 'custom:showField')"
+  ]
+}
+
+// Or use condition-based visibility:
+"visible": "someOtherField.$value === 'showIt'"
 \`\`\`
 
 **Fields to review:**
-${top5Fields.map(f => `- ${f}`).join('\n')}
-${fields.length > 5 ? `\n...and ${fields.length - 5} more` : ''}
+${top5Fields.map((f, i) => `- \`${f}\` (path: \`${top5Paths[i]}\`)`).join('\n')}
+${fieldNames.length > 5 ? `\n...and ${fieldNames.length - 5} more` : ''}
+
+**Best Practices for AEM Adaptive Forms:**
+
+✅ **Use hidden fields for:**
+- Conditional UI elements (shown via rules/events based on user input)
+- Progressive disclosure (wizard steps, conditional sections)
+- Dynamic form structure changes
+
+❌ **Don't use hidden fields for:**
+- Pure data storage (use \`setVariable\` instead)
+- Session/temporary data (use form properties via \`setProperty\`)
+- Static data that never becomes visible
+
+**Why it matters:**
+- Hidden fields create DOM elements (impact: INP, TBT)
+- Each hidden field adds ~2-5ms to interaction latency
+- ${fieldNames.length} unnecessary fields = ~${Math.min(fieldNames.length * 3, 100)}ms slower interactions
+
+**AEM Forms APIs:**
+- \`setProperty(target, {visible: true})\` - Show/hide fields
+- \`setVariable(name, value, $form)\` - Store data without DOM
+- \`getVariable(name, $form)\` - Retrieve stored data
 `,
-      estimatedImpact: `Reduces DOM by ${fields.length} nodes, improves INP by ~${Math.min(fields.length * 2, 50)}ms`
+      estimatedImpact: `Reduces DOM by ${fieldNames.length} nodes, improves INP by ~${Math.min(fieldNames.length * 2, 50)}ms`
     });
     
     return suggestions;
@@ -305,29 +422,93 @@ ${fields.length > 5 ? `\n...and ${fields.length - 5} more` : ''}
   }
 
   /**
-   * Generate @import fix using AI
+   * Build enhanced context for AI with full file + related files + patterns
+   * PHASE 1 ENHANCEMENT: Much richer context for better suggestions
    */
-  async generateImportFix(issue, context, importLine) {
-    const prompt = `Fix this CSS @import that blocks rendering:
+  buildEnhancedContext(targetFile, fileContent) {
+    const context = {
+      targetFile,
+      fullContent: fileContent,
+      relatedFiles: {},
+      projectPatterns: {},
+      fileStats: {
+        lines: fileContent.split('\n').length,
+        size: `${(fileContent.length / 1024).toFixed(1)}KB`
+      }
+    };
 
-File: ${issue.file}
-Line: ${issue.line}
-Code: ${importLine}
-Import URL: ${issue.importUrl}
+    try {
+      // Find related files (same base name, different extensions)
+      const baseName = targetFile.replace(/\.[^.]+$/, ''); // Remove extension
+      const extensions = ['.js', '.html', '.json', '.css'];
+      
+      for (const ext of extensions) {
+        const relatedPath = baseName + ext;
+        try {
+          const fullPath = resolve(this.workspaceRoot, relatedPath);
+          if (existsSync(fullPath)) {
+            const content = readFileSync(fullPath, 'utf-8');
+            // Limit related files to reasonable size
+            if (content.length < 50000) { // 50KB limit
+              context.relatedFiles[relatedPath] = content;
+            }
+          }
+        } catch (err) {
+          // Skip files we can't read
+        }
+      }
 
-Context:
+      // Detect project patterns (simplified for now)
+      context.projectPatterns = {
+        hasRollupConfig: existsSync(resolve(this.workspaceRoot, 'rollup.config.js')),
+        hasWebpackConfig: existsSync(resolve(this.workspaceRoot, 'webpack.config.js')),
+        packageManager: existsSync(resolve(this.workspaceRoot, 'package.json')) ? 'npm/yarn' : 'unknown'
+      };
+    } catch (error) {
+      core.warning(`Could not build enhanced context: ${error.message}`);
+    }
+
+    return context;
+  }
+
+  /**
+   * Generate @import fix using AI with enhanced context
+   */
+  async generateImportFix(issue, enhancedContext, fullFileContent) {
+    const relatedFilesInfo = Object.keys(enhancedContext.relatedFiles).length > 0
+      ? `\n\nRelated files found: ${Object.keys(enhancedContext.relatedFiles).join(', ')}`
+      : '';
+
+    const buildToolInfo = enhancedContext.projectPatterns.hasRollupConfig
+      ? '\nNote: Project uses Rollup - can bundle CSS during build'
+      : enhancedContext.projectPatterns.hasWebpackConfig
+      ? '\nNote: Project uses Webpack - can bundle CSS during build'
+      : '';
+
+    const prompt = `Fix this CSS @import that blocks rendering.
+
+**File:** ${issue.file}
+**Line:** ${issue.line}
+**Import URL:** ${issue.importUrl}
+**File Size:** ${enhancedContext.fileStats.size} (${enhancedContext.fileStats.lines} lines)${relatedFilesInfo}${buildToolInfo}
+
+**Full CSS File:**
 \`\`\`css
-${context}
+${fullFileContent}
 \`\`\`
 
-Provide TWO solutions as JSON:
+**Task:** Provide practical fix as JSON:
 {
-  "fixedCode": "/* Comment suggesting removal and bundling */",
-  "alternativeFix": "How to add <link> in HTML instead",
-  "explanation": "Why this fix improves performance (1 sentence)"
+  "originalCode": "The @import line to replace",
+  "fixedCode": "Replacement code or comment with clear instructions",
+  "alternativeFix": "Alternative approach (bundling vs <link> tag)",
+  "explanation": "Why this fix improves FCP/LCP (1 sentence)"
 }
 
-Keep fixedCode brief (single line comment suggesting bundling).`;
+**Requirements:**
+- If bundler detected, suggest bundling during build
+- Otherwise, suggest <link> tag in HTML
+- Keep explanation concise and performance-focused`;
 
     try {
       const response = await this.callAI(prompt, 'Fix CSS @import');
@@ -339,29 +520,47 @@ Keep fixedCode brief (single line comment suggesting bundling).`;
   }
 
   /**
-   * Generate background-image fix using AI
+   * Generate background-image fix using AI with enhanced context
    */
-  async generateBackgroundImageFix(issue, context) {
-    const prompt = `Replace this CSS background-image with an HTML Image component:
+  async generateBackgroundImageFix(issue, enhancedContext, fullFileContent) {
+    const relatedFilesInfo = Object.keys(enhancedContext.relatedFiles).length > 0
+      ? `\n\nRelated files available:\n${Object.keys(enhancedContext.relatedFiles).map(f => `- ${f}`).join('\n')}`
+      : '';
 
-File: ${issue.file}
-Line: ${issue.line}
-Image URL: ${issue.image}
+    // Include related HTML/JS if available for better component suggestions
+    const relatedHTML = enhancedContext.relatedFiles[issue.file.replace('.css', '.html')] || '';
+    const relatedJS = enhancedContext.relatedFiles[issue.file.replace('.css', '.js')] || '';
 
-CSS Context:
+    const prompt = `Replace this CSS background-image with a lazy-loaded Image component.
+
+**File:** ${issue.file}
+**Line:** ${issue.line}
+**Image URL:** ${issue.image}
+**File Size:** ${enhancedContext.fileStats.size} (${enhancedContext.fileStats.lines} lines)${relatedFilesInfo}
+
+**Full CSS File:**
 \`\`\`css
-${context}
+${fullFileContent}
 \`\`\`
 
-Provide a fix as JSON:
+${relatedHTML ? `**Related HTML (${issue.file.replace('.css', '.html')}):**
+\`\`\`html
+${relatedHTML.substring(0, 2000)}${relatedHTML.length > 2000 ? '\n... (truncated)' : ''}
+\`\`\`\n` : ''}
+
+**Task:** Provide practical fix as JSON:
 {
-  "originalCode": "The CSS rule to remove/comment",
-  "fixedCode": "CSS comment or empty rule",
-  "htmlSuggestion": "<img> tag to add in HTML",
-  "explanation": "Why this enables lazy loading (1 sentence)"
+  "originalCode": "The CSS background-image rule to replace/remove",
+  "fixedCode": "Updated CSS (remove bg-image, keep other styles)",
+  "htmlSuggestion": "Complete <img> tag with loading='lazy', width, height",
+  "explanation": "Why this improves LCP and enables lazy loading (1 sentence)"
 }
 
-The HTML should use loading="lazy" and include width/height for CLS prevention.`;
+**Requirements:**
+- Use loading="lazy" for off-screen images
+- Include width/height attributes to prevent CLS
+- Maintain visual appearance with CSS (object-fit, positioning)
+- Consider responsive images if applicable`;
 
     try {
       const response = await this.callAI(prompt, 'Fix CSS background-image');
