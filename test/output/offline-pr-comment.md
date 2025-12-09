@@ -2,7 +2,7 @@
 
 > **Automated analysis of Adaptive Form performance**
 
-**Analysis Time:** 2025-12-09T07:10:46.010Z
+**Analysis Time:** 2025-12-09T08:31:54.148Z
 **Before:** `https://main--test-repo.aem.live/`
 **After:** `https://feature--test-repo.aem.live/`
 
@@ -59,7 +59,7 @@
 - Total DOM Elements: 27
 - Hidden Elements: 0
 - Images: 3 (1 without lazy loading)
-- Blocking Scripts: 0
+- Blocking Scripts: 1
 
 **Changes:**
 - Images: undefined 
@@ -77,9 +77,7 @@
 
 - **sample-form.css** - css-background-image
 - **sample-form.css** - css-background-image
-
-** Warnings:**
-- 1 total warning(s)
+- **sample-form.css** - css-import-blocking
 
 ###  Custom Functions Analysis
 
@@ -100,13 +98,12 @@
 
 ** Critical Issues:**
 - 1 circular dependency - can cause infinite loops
-- 2 critical CSS issue(s)
+- 3 critical CSS issue(s)
 - 1 @import statement(s) blocking rendering
 - 1 custom function(s) accessing DOM directly
 
 ** Warnings:**
 - 6 unnecessary hidden field(s) bloating DOM
-- 1 CSS warning(s)
 - 2 CSS background-image(s) should use Image component
 
 ** Recommendations:**

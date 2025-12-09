@@ -274,7 +274,7 @@ export class FormCSSAnalyzer {
       const lineNumber = this.getLineNumber(content, match.index);
 
       issues.push({
-        severity: 'warning',
+        severity: 'error',
         type: 'css-import-blocking',
         file: filename,
         line: lineNumber,

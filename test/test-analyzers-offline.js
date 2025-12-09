@@ -235,9 +235,10 @@ async function runTests() {
     console.log('  - ✅ 6 unnecessary hidden fields (hiddenPanel, unusedField, dataStorage, userId, sessionId, email)');
     console.log('  - ✅ 1 circular rule dependency (fieldA → fieldB → fieldC → fieldA)');
     console.log('  - ✅ 1 custom function violation (validateUserName: DOM access)');
-    console.log('  - ✅ 2 background-images in CSS');
+    console.log('  - ✅ 2 background-images in CSS (CRITICAL)');
+    console.log('  - ✅ 1 @import statement in CSS (CRITICAL - blocks rendering)');
     console.log('  - ✅ 13+ deep selectors in CSS');
-    console.log('  - ✅ Additional CSS issues (@import, hardcoded colors, duplicate selectors)');
+    console.log('  - ✅ Additional CSS issues (hardcoded colors, duplicate selectors, !important)');
     console.log('\n📝 Notes:');
     console.log('  - Form Events Analyzer: 0 detected (API calls removed to prevent runtime crashes in offline tests)');
     console.log('  - For API call detection testing, use live URLs with test-local-with-files.sh');
