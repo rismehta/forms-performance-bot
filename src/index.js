@@ -38,6 +38,7 @@ async function run() {
     }
 
     const prNumber = context.payload.pull_request.number;
+    const prBranch = context.payload.pull_request.head.ref; // Feature branch name
     const { owner, repo } = context.repo;
 
     core.info(`Analyzing PR #${prNumber} in ${owner}/${repo}`);

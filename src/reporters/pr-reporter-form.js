@@ -107,34 +107,35 @@ export class FormPRReporter {
     // AUTO-FIX PR LINK (show prominently at top if available)
     if (autoFixPR) {
       lines.push(`> ### Auto-Fix PR Created: [#${autoFixPR.number}](${autoFixPR.url})\n`);
-      lines.push(`> **${autoFixPR.filesChanged} file(s) automatically fixed** — Ready to merge into your branch\n`);
-      lines.push('**Fixes applied in PR:**');
+      lines.push(`> **${autoFixPR.filesChanged} file(s) automatically annotated** — Comments and warnings added to flag issues\n`);
+      lines.push('**Auto-applied annotations:**');
       autoFixPR.fixes.forEach((fix, i) => {
         lines.push(`${i + 1}. ${fix}`);
       });
       lines.push('');
-      lines.push('**How to apply:**');
-      lines.push('1. Review the changes in [Auto-Fix PR #' + autoFixPR.number + '](' + autoFixPR.url + ')');
-      lines.push('2. Merge the PR to apply fixes to your feature branch');
-      lines.push('3. This PR will automatically include those fixes\n');
+      lines.push('**How to use:**');
+      lines.push('1. Review the annotations in [Auto-Fix PR #' + autoFixPR.number + '](' + autoFixPR.url + ')');
+      lines.push('2. Merge the PR to add warning comments to your code');
+      lines.push('3. Follow the detailed refactoring guides below for each issue\n');
       lines.push('---\n');
     } else {
-      lines.push(`> **${autoFixData.suggestions.length} automated fix${autoFixData.suggestions.length > 1 ? 'es' : ''} available** — Review and apply to improve performance\n`);
+      lines.push(`> **${autoFixData.suggestions.length} performance improvement${autoFixData.suggestions.length > 1 ? 's' : ''} identified** — Review and apply to optimize your form\n`);
     }
     
-    // Group by severity
+    // Group by severity and fix type
     const critical = autoFixData.suggestions.filter(s => s.severity === 'critical');
     const high = autoFixData.suggestions.filter(s => s.severity === 'high');
     
     if (critical.length > 0) {
-      lines.push('#### Critical Fixes\n');
+      lines.push('#### Critical Issues (Manual Refactoring Required)\n');
+      lines.push('> These require code changes beyond simple comments. Follow the refactoring guides below.\n');
       critical.forEach((suggestion, index) => {
         lines.push(this.formatAutoFixSuggestion(suggestion, index + 1));
       });
     }
     
     if (high.length > 0) {
-      lines.push('#### High Priority Fixes\n');
+      lines.push('#### High Priority Issues\n');
       high.forEach((suggestion, index) => {
         lines.push(this.formatAutoFixSuggestion(suggestion, critical.length + index + 1));
       });
@@ -160,13 +161,13 @@ export class FormPRReporter {
       lines.push(`**Impact:** ${suggestion.estimatedImpact}\n`);
     }
     
-    // JS Refactored Code (HTTP/DOM fixes) - USE GITHUB SUGGESTION SYNTAX
+    // JS Refactored Code (HTTP/DOM fixes) - MANUAL APPLICATION REQUIRED
     if (suggestion.refactoredCode) {
       lines.push(`**File:** \`${suggestion.file}:${suggestion.line || 1}\`\n`);
-      lines.push(`**One-Click Fix:** Apply the suggestion below\n`);
+      lines.push(`**Suggested Refactor** (requires manual review):\n`);
       
-      // GitHub suggestion syntax for one-click apply
-      lines.push('```suggestion');
+      // Show refactored code (manual application required)
+      lines.push('```javascript');
       lines.push(suggestion.refactoredCode);
       lines.push('```\n');
       
