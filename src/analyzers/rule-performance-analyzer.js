@@ -1,4 +1,4 @@
-import { createFormInstance } from '@aemforms/af-core';
+import { createFormInstance, createFormInstanceSync, RuleEngine, FunctionRuntime } from '@aemforms/af-core';
 import * as core from '@actions/core';
 import { resolve } from 'path';
 import { existsSync, readFileSync } from 'fs';
@@ -81,8 +81,6 @@ export class RulePerformanceAnalyzer {
 
     try {
       // Register custom functions for form initialization
-      const { FunctionRuntime, createFormInstanceSync } = await import('@aemforms/af-core');
-      
       // Try to load real custom function implementations from the checked-out repository
       const customFunctionsPath = formJson.properties?.customFunctionsPath;
       
@@ -126,8 +124,7 @@ export class RulePerformanceAnalyzer {
       const slowRules = [];
       const ruleExecutionCounts = new Map(); // Track how many times each rule executes
       
-      // Get RuleEngine class to hook into
-      const { RuleEngine } = await import('@aemforms/af-core');
+      // Hook into RuleEngine.prototype.execute to measure rule execution times
       const originalExecute = RuleEngine.prototype.execute;
       
       // Wrap execute to profile
