@@ -113,6 +113,75 @@ Respond ONLY with valid JSON:
   }
 
   /**
+   * Validate component refactoring (for CSS background-image fixes)
+   * Ensures AI preserved all critical code and only added <img> tag
+   */
+  validateComponentRefactoring = (originalCode, refactoredCode) => {
+    const errors = [];
+    
+    try {
+      // 1. Length sanity check - should not drastically shrink
+      if (refactoredCode.length < originalCode.length * 0.7) {
+        errors.push(`Code too short: ${originalCode.length} → ${refactoredCode.length} chars (likely removed code)`);
+      }
+      
+      // 2. Preserve export statements
+      const origExports = (originalCode.match(/export\s+(default\s+)?function|export\s+{/g) || []).length;
+      const refacExports = (refactoredCode.match(/export\s+(default\s+)?function|export\s+{/g) || []).length;
+      if (refacExports < origExports) {
+        errors.push(`Exports removed: ${origExports} → ${refacExports} (missing export statements)`);
+      }
+      
+      // 3. Preserve function declarations (especially "decorate" method)
+      const origFunctions = originalCode.match(/function\s+\w+/g) || [];
+      const refacFunctions = refactoredCode.match(/function\s+\w+/g) || [];
+      if (refacFunctions.length < origFunctions.length) {
+        errors.push(`Functions removed: ${origFunctions.length} → ${refacFunctions.length}`);
+      }
+      
+      // Check for critical function names (decorate, init, etc.)
+      const criticalFunctions = ['decorate', 'init', 'setup', 'render'];
+      for (const fnName of criticalFunctions) {
+        if (originalCode.includes(`function ${fnName}`) && !refactoredCode.includes(`function ${fnName}`)) {
+          errors.push(`Critical function removed: ${fnName}()`);
+        }
+      }
+      
+      // 4. Check that <img> tag was actually added with proper attributes
+      if (!refactoredCode.includes('loading') || !refactoredCode.includes('img')) {
+        errors.push('No <img> tag added (expected img element with loading attribute)');
+      }
+      
+      // Check for broken src attribute
+      if (refactoredCode.includes("src = 'undefined'") || refactoredCode.includes('src="undefined"')) {
+        errors.push("Image src is 'undefined' - must extract actual path from CSS background-image");
+      }
+      
+      // Check for hard-coded small dimensions (likely arbitrary)
+      const hardcodedDimensions = refactoredCode.match(/\.(width|height)\s*=\s*\d+/g) || [];
+      if (hardcodedDimensions.length > 0) {
+        errors.push(`Hard-coded dimensions found: ${hardcodedDimensions.join(', ')} - use 'auto' or extract from CSS`);
+      }
+      
+      // 5. Preserve addEventListener/event listeners
+      const origListeners = (originalCode.match(/addEventListener/g) || []).length;
+      const refacListeners = (refactoredCode.match(/addEventListener/g) || []).length;
+      if (refacListeners < origListeners) {
+        errors.push(`Event listeners removed: ${origListeners} → ${refacListeners}`);
+      }
+      
+    } catch (error) {
+      errors.push(`Validation error: ${error.message}`);
+    }
+    
+    return {
+      valid: errors.length === 0,
+      errors,
+      rulesChecked: 5
+    };
+  }
+
+  /**
    * GENERIC validation framework for AI-generated refactoring
    * Extensible for any fix type - just add validation rules
    * Returns {valid: boolean, errors: string[]}
@@ -175,9 +244,9 @@ Respond ONLY with valid JSON:
             const refacLines = (refac || '').split('\n').filter(l => l.trim()).length;
             
             // For runtime errors, code SHOULD get longer (adding null checks)
-            // So use more lenient thresholds
+            // Use very lenient thresholds - sometimes a 1-line expression needs multiple checks
             const minRatio = issueType === 'runtime' ? 0.3 : 0.5;
-            const maxRatio = issueType === 'runtime' ? 3.0 : 1.5;
+            const maxRatio = issueType === 'runtime' ? 10.0 : 1.5;  // Very lenient for runtime (1 line can become 10 with checks)
             
             if (refacLines < origLines * minRatio) {
               return { valid: false, error: `Too short: ${origLines} → ${refacLines} lines (removed logic?)` };
@@ -267,29 +336,23 @@ Respond ONLY with valid JSON:
         {
           name: 'Has defensive checks',
           check: (orig, refac) => {
-            // Should have defensive checks (if, ?, ||, &&, try-catch)
-            // More lenient patterns to catch various defensive coding styles
-            const patterns = [
-              /if\s*\(/,                           // Any if statement
-              /\?\.(?!\.)$/m,                      // Optional chaining (not followed by another dot to avoid false positives)
-              /\?\?/,                              // Nullish coalescing
-              /\|\|/,                              // OR operator
-              /&&/,                                // AND operator
+            // For runtime errors, just check if refactored code has defensive patterns
+            // Don't compare with original since it might already have some operators
+            const defensivePatterns = [
+              /if\s*\([^)]*(!|===?\s*null|===?\s*undefined|typeof)/,  // if with null/undefined checks
+              /\?\.(?!\.)$/m,                      // Optional chaining
+              /\?\?/,                              // Nullish coalescing  
               /try\s*\{/,                          // Try-catch
-              /typeof\s+\w+\s*[!=]==?\s*['"]undefined['"]/,  // typeof checks
-              /===?\s*null/,                       // Null checks
-              /!==?\s*undefined/,                  // Undefined checks
-              /!\s*\w+/                            // Negation checks (e.g., if (!obj))
+              /if\s*\([^)]*!\s*\w+\s*\)/          // if (!variable)
             ];
             
-            // Check if any pattern exists in refactored code
-            const hasDefensiveCode = patterns.some(pattern => pattern.test(refac));
+            // Just check if refactored code has ANY defensive pattern
+            const hasDefensiveCode = defensivePatterns.some(pattern => pattern.test(refac));
             
-            // Also check if new defensive code was added (not just existing)
-            const origDefensiveCount = patterns.filter(p => p.test(orig)).length;
-            const refacDefensiveCount = patterns.filter(p => p.test(refac)).length;
-            
-            if (!hasDefensiveCode || refacDefensiveCount <= origDefensiveCount) {
+            if (!hasDefensiveCode) {
+              // Log what we got to help debug
+              core.info(`  [Validation Debug] Original code length: ${orig.length}, Refactored: ${refac.length}`);
+              core.info(`  [Validation Debug] Refactored code preview: ${refac.substring(0, 200)}...`);
               return { valid: false, error: 'No defensive checks added (expected if/null checks or try-catch)' };
             }
             return { valid: true };
@@ -1511,6 +1574,21 @@ ${hasAIRefactoring ? '\n REVIEW CHECKLIST:\n- [ ] Test all affected functions\n-
           }
         }
         
+        // Extract dimensions from CSS if available
+        let cssWidth = 'auto';
+        let cssHeight = 'auto';
+        try {
+          const selectorMatch = cssContent.match(new RegExp(`${issue.selector}\\s*\\{[^}]*\\}`, 's'));
+          if (selectorMatch) {
+            const widthMatch = selectorMatch[0].match(/width:\s*([^;]+)/);
+            const heightMatch = selectorMatch[0].match(/height:\s*([^;]+)/);
+            if (widthMatch) cssWidth = widthMatch[1].trim();
+            if (heightMatch) cssHeight = heightMatch[1].trim();
+          }
+        } catch (e) {
+          core.info(`Could not extract dimensions from CSS: ${e.message}`);
+        }
+        
         // Build enhanced context with both CSS and component
         const enhancedContext = {
           cssFile: issue.file,
@@ -1519,11 +1597,28 @@ ${hasAIRefactoring ? '\n REVIEW CHECKLIST:\n- [ ] Test all affected functions\n-
           componentContent: componentContent,
           imagePath: issue.imagePath || '',
           selector: issue.selector || '',
+          cssWidth,  // Extracted from CSS or 'auto'
+          cssHeight, // Extracted from CSS or 'auto'
         };
         
         const fix = await this.generateBackgroundImageFix(issue, enhancedContext, cssContent, componentContent);
         
         if (fix) {
+          // VALIDATE: If component was provided, ensure AI preserved all critical code
+          if (componentContent && fix.fixedComponentCode) {
+            const validation = this.validateComponentRefactoring(componentContent, fix.fixedComponentCode);
+            if (!validation.valid) {
+              core.warning(`Component refactoring rejected for ${relative(this.workspaceRoot, componentPath)}:`);
+              validation.errors.forEach(err => core.warning(`  - ${err}`));
+              core.warning('  Skipping auto-fix for this component (manual review required)');
+              core.warning(`  Original component length: ${componentContent.length} chars`);
+              core.warning(`  AI refactored length: ${fix.fixedComponentCode.length} chars`);
+              // Don't include fixedComponentCode if validation failed
+              fix.fixedComponentCode = null;
+              fix.componentFile = null;
+            }
+          }
+          
           suggestions.push({
             type: 'css-background-image-fix',
             severity: 'critical',
@@ -2271,6 +2366,8 @@ ${fullFileContent}
 **Component File:** ${enhancedContext.componentFile || 'Not found'}
 **Image Path:** ${enhancedContext.imagePath || issue.image}
 **Selector:** ${enhancedContext.selector}
+**CSS Width:** ${enhancedContext.cssWidth || 'auto'} (use this or 'auto')
+**CSS Height:** ${enhancedContext.cssHeight || 'auto'} (use this or 'auto')
 
 **Current CSS:**
 \`\`\`css
@@ -2283,27 +2380,78 @@ ${componentContent}
 \`\`\`
 ` : '**Note:** No component file found. Generate HTML snippet instead.'}
 
-**Task:** Refactor to use <img> element for better performance.
+**Task:** Add <img> element to component while preserving ALL existing code.
+
+**CRITICAL RULES:**
+${hasComponent ? `1. PRESERVE ALL EXISTING CODE - Do NOT remove any:
+   - Functions (especially decorate() method)
+   - Variables
+   - Event listeners
+   - Import statements
+   - Export statements
+   - Comments
+2. ONLY ADD the <img> element where the background was used
+3. Return the COMPLETE component file with img added
+4. DO NOT refactor or simplify existing code` : `1. Generate standalone <img> snippet only`}
 
 **Response Format (JSON):**
 {
   "originalCSSCode": "CSS rule with background-image",
-  "fixedCSSCode": "Updated CSS (remove background-image, keep layout styles)",
-  ${hasComponent ? `"originalComponentCode": "Component code section to modify (if applicable)",
-  "fixedComponentCode": "Updated component with <img> tag (if applicable)",` : ''}
-  "htmlSuggestion": "Standalone <img> snippet with loading='lazy'",
+  "fixedCSSCode": "Complete CSS file with background-image removed, ALL other styles preserved",
+  ${hasComponent ? `"originalComponentCode": "NOT USED - ignore this field",
+  "fixedComponentCode": "COMPLETE component file with <img> tag added and ALL existing code preserved",` : ''}
+  "htmlSuggestion": "Standalone <img> snippet: <img src='...' loading='lazy' width='...' height='...' alt='...' />",
   "explanation": "Why this improves performance (1 sentence)"
 }
 
-**Requirements:**
-1. Remove background-image from CSS, keep other styles (display, width, height, positioning)
-${hasComponent ? `2. Add <img> element in component JSX/HTML with:
-   - src="${enhancedContext.imagePath || issue.image}"
-   - loading="lazy" (for off-screen images)
-   - width and height attributes (to prevent CLS)
-   - alt text for accessibility
-3. Maintain existing component logic and structure` : `2. Generate <img> element with loading="lazy", width, height, and alt`}
-4. Use object-fit CSS if needed to maintain aspect ratio
+**Image Requirements:**
+- src: Use "${enhancedContext.imagePath || issue.image}" (extracted from CSS background-image)
+- loading="lazy" (for off-screen images)
+- width: Use img.style.width = '${enhancedContext.cssWidth || 'auto'}' (from CSS above)
+- height: Use img.style.height = '${enhancedContext.cssHeight || 'auto'}' (from CSS above)
+- alt text: Generic descriptive text (e.g., "Background image", "Decorative image")
+- DO NOT use img.width/img.height attributes with hard-coded pixel values
+- DO NOT invent dimensions like 28, 1200, etc. - use the CSS values provided or 'auto'
+- Use object-fit CSS if needed for aspect ratio
+
+**CONCRETE EXAMPLE:**
+
+Given CSS: \`.hero { background-image: url('/images/hero-bg.jpg'); width: 100%; height: 400px; }\`
+
+BEFORE (component with background-image in CSS):
+\`\`\`javascript
+export default function decorate(block) {
+  const container = document.createElement('div');
+  container.className = 'hero-container';
+  // ... existing logic ...
+  block.appendChild(container);
+}
+\`\`\`
+
+AFTER (with <img> added, ALL existing code preserved):
+\`\`\`javascript
+export default function decorate(block) {
+  const container = document.createElement('div');
+  container.className = 'hero-container';
+  
+  // ADD: Lazy-loaded image (extracted from CSS background-image)
+  const img = document.createElement('img');
+  img.src = '/images/hero-bg.jpg';  // Extracted from CSS url()
+  img.loading = 'lazy';
+  img.style.width = '100%';  // Extracted from CSS or use 'auto'
+  img.style.height = 'auto';  // Use 'auto' to maintain aspect ratio
+  img.alt = 'Hero background';  // Descriptive alt text
+  container.appendChild(img);
+  
+  // ... existing logic PRESERVED ...
+  block.appendChild(container);
+}
+\`\`\`
+
+**WRONG EXAMPLES (DO NOT DO THIS):**
+❌ \`img.src = 'undefined';\` // Extract actual path from CSS!
+❌ \`img.width = 28;\` // Don't hard-code arbitrary dimensions!
+❌ Missing decorate() function in output // Preserve ALL functions!
 
 **Performance Impact:**
 - CSS background-images cannot be lazy loaded
@@ -2413,12 +2561,18 @@ Respond with ONLY the JSON object containing the COMPLETE function code, no mark
       const parsed = await this.callAzureOpenAI(`You are an expert at adding defensive null checks to JavaScript functions.`, userPrompt);
       
       if (parsed && parsed.jsCode && typeof parsed.jsCode === 'string' && parsed.jsCode.trim().length > 0) {
+        // Log AI response for debugging
+        core.info(`  AI generated ${parsed.jsCode.length} chars for ${issue.functionName}()`);
+        core.info(`  Preview: ${parsed.jsCode.substring(0, 150)}...`);
+        
         // Validate AI output
         const validation = this.validateAIRefactoring(functionCode, parsed.jsCode, issue.functionName, 'runtime');
         
         if (!validation.valid) {
           core.warning(`Runtime error fix rejected for ${issue.functionName}:`);
           validation.errors.forEach(err => core.warning(`  - ${err}`));
+          core.warning(`  Original code: ${functionCode.substring(0, 100)}...`);
+          core.warning(`  AI refactored: ${parsed.jsCode.substring(0, 200)}...`);
           return null;
         }
         
@@ -2461,13 +2615,13 @@ Respond with ONLY the JSON object containing the COMPLETE function code, no mark
         raw_details: fix.refactoredCode ? `Suggested fix:\n\n${fix.refactoredCode}` : undefined
       }));
       
-      await octokit.rest.checks.create({
+      const checkResponse = await octokit.rest.checks.create({
         owner,
         repo,
         name: 'AEM Forms Performance Analysis',
         head_sha: commitSha,
         status: 'completed',
-        conclusion: httpDomFixes.length > 0 ? 'neutral' : 'success',
+        conclusion: httpDomFixes.length > 0 ? 'action_required' : 'success',  // More visible than 'neutral'
         output: {
           title: `${httpDomFixes.length} Performance Issue(s) Detected`,
           summary: `Found ${httpDomFixes.length} issue(s) in custom functions. Click each annotation for AI-generated fix suggestions.`,
@@ -2476,6 +2630,8 @@ Respond with ONLY the JSON object containing the COMPLETE function code, no mark
       });
       
       core.info(`  Created check with ${checkAnnotations.length} annotation(s)`);
+      core.info(`  Check ID: ${checkResponse.data.id}`);
+      core.info(`  View annotations: PR → Checks tab → "AEM Forms Performance Analysis" (left sidebar)`);
       annotations.push(...checkAnnotations);
       
     } catch (error) {

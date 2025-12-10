@@ -397,9 +397,9 @@ async function run() {
           if (reviewComments.length > 0) {
             core.info(` Posted ${reviewComments.length} line-level suggestion(s) on PR`);
           } else {
-            core.warning(' No line-level comments posted - files not in PR diff');
-            core.warning('   AI suggestions are visible in main PR comment body instead');
-            core.warning('   Line-level comments only work for files modified in this PR');
+            core.info(' No line-level comments posted (files not in PR diff)');
+            core.info('   ✓ Annotations visible in: PR → Checks tab → "AEM Forms Performance Analysis"');
+            core.info('   ✓ Full AI suggestions in main PR comment body');
           }
         } catch (error) {
           core.warning(` Failed to post PR review comments: ${error.message}`);

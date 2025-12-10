@@ -102,6 +102,10 @@ export class FormPRReporter {
 
     const lines = ['### AI Auto-Fix Suggestions\n'];
     
+    // INFO: Where to find inline annotations
+    lines.push('> **Inline annotations available:** Go to **Checks** tab → **"AEM Forms Performance Analysis"** to see AI suggestions directly on code lines\n');
+    lines.push('');
+    
     // AUTO-FIX COMMIT INFO (show prominently at top if applied)
     if (autoFixCommit) {
       lines.push(`> ### Auto-Fixes Applied to Current PR\n`);
