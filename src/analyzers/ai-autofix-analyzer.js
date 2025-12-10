@@ -83,7 +83,7 @@ Respond ONLY with valid JSON:
       // Call Azure OpenAI with custom Codex endpoint
       const parsed = await this.callAzureOpenAI(systemPrompt, userPrompt);
       
-      if (parsed && parsed.jsCode) {
+      if (parsed && parsed.jsCode && typeof parsed.jsCode === 'string' && parsed.jsCode.trim().length > 0) {
         
       // CRITICAL: Validate AI output before accepting it
       const validation = this.validateAIRefactoring(functionCode, parsed.jsCode, issue.functionName, issueType);
@@ -2013,8 +2013,36 @@ Focus on performance impact and Core Web Vitals (FCP, LCP, TBT, INP).`;
     }
 
     const data = await response.json();
-    // Responses API returns content directly in 'output' field
-    const content = data.output || data.choices?.[0]?.message?.content || data.choices?.[0]?.text;
+    
+    // Responses API returns output as an array with message objects
+    // Structure: { output: [{ type: "reasoning" }, { type: "message", content: [{ text: "..." }] }] }
+    let content = null;
+    
+    if (data.output && Array.isArray(data.output)) {
+      // Find the message object in the output array
+      const messageObj = data.output.find(item => item.type === 'message');
+      if (messageObj && messageObj.content && Array.isArray(messageObj.content)) {
+        // Extract text from first content item
+        const textObj = messageObj.content.find(c => c.type === 'output_text');
+        content = textObj?.text;
+      }
+    }
+    
+    // Fallback to other formats (Chat Completions API)
+    if (!content) {
+      content = data.choices?.[0]?.message?.content || data.choices?.[0]?.text;
+    }
+    
+    // Defensive check: ensure content is a string
+    if (!content) {
+      core.warning(`No content in API response. Keys: ${Object.keys(data).join(', ')}`);
+      throw new Error('AI response contained no content');
+    }
+    
+    if (typeof content !== 'string') {
+      core.warning(`Content is not a string (type: ${typeof content}). Value: ${JSON.stringify(content).substring(0, 200)}`);
+      throw new Error('AI response content is not a string');
+    }
     
     core.info(` AI response received (${content.length} chars)`);
     
