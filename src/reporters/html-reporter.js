@@ -549,13 +549,13 @@ export class HTMLReporter {
     const domIssues = data.issues?.filter(i => i.type === 'dom-access') || [];
 
     if (httpIssues.length === 0 && domIssues.length === 0) {
-      return `<div class="section"><h2> Custom Functions</h2><p>${data.analyzed} functions analyzed, no violations</p></div>`;
+      return `<div class="section"><h2> Custom Functions</h2><p>${data.functionsAnalyzed || 0} functions analyzed, no violations</p></div>`;
     }
 
     return `
     <div class="section">
       <h2> Custom Functions</h2>
-      <p><strong>Analyzed:</strong> ${data.analyzed} functions</p>
+      <p><strong>Analyzed:</strong> ${data.functionsAnalyzed || 0} functions</p>
       
       ${httpIssues.length > 0 ? `
         <h3>HTTP Requests (${httpIssues.length})</h3>

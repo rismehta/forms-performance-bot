@@ -118,6 +118,22 @@ Respond ONLY with valid JSON:
    * Returns {valid: boolean, errors: string[]}
    */
   validateAIRefactoring = (originalCode, refactoredCode, functionName, issueType = 'http') => {
+    // Defensive check: ensure both codes are strings
+    if (!originalCode || typeof originalCode !== 'string') {
+      return { 
+        valid: false, 
+        rulesChecked: 0, 
+        errors: ['Original code is missing or not a string'] 
+      };
+    }
+    if (!refactoredCode || typeof refactoredCode !== 'string') {
+      return { 
+        valid: false, 
+        rulesChecked: 0, 
+        errors: ['Refactored code is missing or not a string'] 
+      };
+    }
+    
     // Define validation rules for each issue type
     const validationRules = {
       // Common rules that apply to ALL refactorings
@@ -131,8 +147,9 @@ Respond ONLY with valid JSON:
             if (!origSig) return { valid: false, error: 'Could not parse original signature' };
             if (!refacSig) return { valid: false, error: 'Refactored code missing function' };
             
-            const origParams = origSig[1].split(',').map(p => p.trim()).filter(Boolean);
-            const refacParams = refacSig[1].split(',').map(p => p.trim()).filter(Boolean);
+            // Handle case where capturing group is undefined (empty params)
+            const origParams = (origSig[1] || '').split(',').map(p => p.trim()).filter(Boolean);
+            const refacParams = (refacSig[1] || '').split(',').map(p => p.trim()).filter(Boolean);
             
             if (origParams.length !== refacParams.length) {
               return { valid: false, error: `Parameter count: ${origParams.length} → ${refacParams.length}` };
@@ -710,64 +727,79 @@ export function myDOMFunction(value, targetField, globals) {
       };
     }
 
+    core.info(' Starting AI Auto-Fix Analysis...');
+    core.info(`Azure OpenAI Endpoint: ${this.azureEndpoint}`);
+    core.info(`Azure OpenAI Model: ${this.azureModel}`);
+    
+    const fixableSuggestions = [];
+    
+    // 1. CSS @import → <link> tags (CRITICAL)
     try {
-      core.info(' Starting AI Auto-Fix Analysis...');
-      core.info(`Azure OpenAI Endpoint: ${this.azureEndpoint}`);
-      core.info(`Azure OpenAI Model: ${this.azureModel}`);
-      
-      const fixableSuggestions = [];
-      
-      // 1. CSS @import → <link> tags (CRITICAL)
       core.info('Generating CSS @import fixes...');
       const importFixes = await this.fixCSSImports(results.formCSS);
       core.info(`CSS @import fixes generated: ${importFixes.length}`);
       fixableSuggestions.push(...importFixes);
-      
-      // 2. CSS background-image → <img> component (CRITICAL)
+    } catch (error) {
+      core.warning(`Failed to generate CSS @import fixes: ${error.message}`);
+    }
+    
+    // 2. CSS background-image → <img> component (CRITICAL)
+    try {
       core.info('Generating CSS background-image fixes...');
       const backgroundImageFixes = await this.fixCSSBackgroundImages(results.formCSS);
       core.info(`CSS background-image fixes generated: ${backgroundImageFixes.length}`);
       fixableSuggestions.push(...backgroundImageFixes);
-      
-      // 3. Blocking scripts → defer (CRITICAL)
+    } catch (error) {
+      core.warning(`Failed to generate CSS background-image fixes: ${error.message}`);
+    }
+    
+    // 3. Blocking scripts → defer (CRITICAL)
+    try {
       core.info('Generating blocking scripts fixes...');
       const scriptFixes = await this.fixBlockingScripts(results.formHTML);
       core.info(`Blocking scripts fixes generated: ${scriptFixes.length}`);
       fixableSuggestions.push(...scriptFixes);
-      
-      // 4. Remove unnecessary hidden fields (HIGH)
+    } catch (error) {
+      core.warning(`Failed to generate blocking scripts fixes: ${error.message}`);
+    }
+    
+    // 4. Remove unnecessary hidden fields (HIGH)
+    try {
       core.info('Generating hidden fields fixes...');
       const hiddenFieldFixes = await this.fixUnnecessaryHiddenFields(results.hiddenFields);
       core.info(`Hidden fields fixes generated: ${hiddenFieldFixes.length}`);
       fixableSuggestions.push(...hiddenFieldFixes);
-      
-      // 5. API calls in initialize → custom events (CRITICAL but complex)
+    } catch (error) {
+      core.warning(`Failed to generate hidden fields fixes: ${error.message}`);
+    }
+    
+    // 5. API calls in initialize → custom events (CRITICAL but complex)
+    try {
       core.info('Generating API call in initialize fixes...');
       const initializeFixes = await this.fixAPICallsInInitialize(results.formEvents);
       core.info(`API call fixes generated: ${initializeFixes.length}`);
       fixableSuggestions.push(...initializeFixes);
-      
-      // 6. Custom functions with HTTP requests or DOM access (CRITICAL)
+    } catch (error) {
+      core.warning(`Failed to generate API call fixes: ${error.message}`);
+    }
+    
+    // 6. Custom functions with HTTP requests or DOM access (CRITICAL)
+    try {
       core.info('Generating custom function fixes...');
       const customFunctionFixes = await this.fixCustomFunctions(results.customFunctions);
       core.info(`Custom function fixes generated: ${customFunctionFixes.length}`);
       fixableSuggestions.push(...customFunctionFixes);
-      
-      core.info(` AI Auto-Fix completed: ${fixableSuggestions.length} suggestion(s) generated`);
-      
-      return {
-        enabled: true,
-        provider: 'azure-openai',
-        suggestions: fixableSuggestions
-      };
     } catch (error) {
-      core.warning(`AI Auto-Fix failed: ${error.message}`);
-      return {
-        enabled: false,
-        error: error.message,
-        suggestions: []
-      };
+      core.warning(`Failed to generate custom function fixes: ${error.message}`);
     }
+    
+    core.info(` AI Auto-Fix completed: ${fixableSuggestions.length} suggestion(s) generated`);
+    
+    return {
+      enabled: true,
+      provider: 'azure-openai',
+      suggestions: fixableSuggestions
+    };
   }
 
   /**
