@@ -70,6 +70,22 @@ Create `.performance-bot.json` in your project root:
 
 ### As a GitHub Action
 
+#### 1. Create Personal Access Token (PAT)
+
+**Required for:** Auto-fix PRs and Gist creation
+
+1. Go to **GitHub → Settings → Developer Settings → Personal Access Tokens → Tokens (classic)**
+2. Click **Generate new token (classic)**
+3. **Scopes required:**
+   - ✅ `repo` (Full repository access)
+   - ✅ `workflow` (Update workflows)
+   - ✅ `gist` (Create gists for inline report viewing) ← **NEW!**
+4. Click **Generate token** and copy it
+5. Go to your repository → **Settings → Secrets → Actions**
+6. Add secret: `PAT_TOKEN` with the token value
+
+#### 2. Create Workflow
+
 Create `.github/workflows/performance-check.yml` in your repository:
 
 ```yaml
@@ -77,7 +93,7 @@ name: Performance Check
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, edited]
 
 permissions:
   contents: write  # Required for auto-fix PR creation
@@ -90,29 +106,49 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
+          token: ${{ secrets.PAT_TOKEN }}  # Use PAT, not GITHUB_TOKEN
           fetch-depth: 0
       
       - name: Run Performance Bot
-        uses: your-org/performance-bot@v1
+        uses: rismehta/forms-performance-bot@v1
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          github-token: ${{ secrets.PAT_TOKEN }}  # Use PAT for PR creation + Gist
         env:
-          # Optional: Enable AI Auto-Fix Suggestions
-          AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
-          AZURE_OPENAI_ENDPOINT: 'https://forms-azure-openai-stg-eastus2.openai.azure.com/'
-          AZURE_OPENAI_DEPLOYMENT: 'gpt-4.1-garage-week'
-          AZURE_OPENAI_API_VERSION: '2024-12-01-preview'
+          # Optional: Enable AI Auto-Fix with Codex
+          AZURE_API_KEY: ${{ secrets.AZURE_API_KEY }}
+          AZURE_OPENAI_ENDPOINT: 'https://your-endpoint.openai.azure.com/openai/responses'
+          AZURE_OPENAI_MODEL: 'gpt-5.1-codex'
+          AZURE_OPENAI_API_VERSION: '2025-04-01-preview'
+      
+      - name: Upload Performance Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-report-pr-${{ github.event.pull_request.number }}
+          path: performance-report.html
+          retention-days: 90
 ```
 
 ### AI Auto-Fix Configuration (Optional)
 
-To enable AI-powered auto-fix suggestions, add Azure OpenAI credentials to your repository secrets:
+To enable AI-powered auto-fix suggestions with Codex, add Azure OpenAI credentials to your repository secrets:
 
 1. Go to **Settings** → **Secrets and variables** → **Actions**
-2. Add secret: `AZURE_OPENAI_API_KEY` with your Azure OpenAI API key
-3. (Optional) Override endpoint/deployment in workflow env vars
+2. Add secret: `AZURE_API_KEY` with your Azure OpenAI API key
+3. Update workflow env vars with your endpoint details
 
 **Environment Variables:**
+
+| Variable | Description | Default | Required |
+|----------|-------------|---------|----------|
+| `AZURE_API_KEY` (or `AZURE_OPENAI_API_KEY`) | Azure OpenAI API key | - | Yes |
+| `AZURE_OPENAI_ENDPOINT` | Custom endpoint URL | `.../openai/responses` | Yes |
+| `AZURE_OPENAI_MODEL` | Model name (e.g., gpt-5.1-codex) | `gpt-5.1-codex` | Yes |
+| `AZURE_OPENAI_API_VERSION` | API version | `2025-04-01-preview` | Yes |
+
+**Note:** The bot supports both standard Azure OpenAI and custom Codex endpoints. Use `AZURE_API_KEY` for Bearer auth or `AZURE_OPENAI_API_KEY` for api-key header.
+
+**Old Variable Names (Deprecated):**
 
 | Variable | Description | Default |
 |----------|-------------|---------|

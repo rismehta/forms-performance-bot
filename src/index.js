@@ -291,7 +291,13 @@ async function run() {
       gistUrl = previewUrl;
     } catch (error) {
       core.warning(`Failed to create gist: ${error.message}`);
-      core.warning('Full report will only be available as artifact download');
+      if (error.message.includes('Not Found')) {
+        core.warning('PAT token missing "gist" scope. To enable inline viewing:');
+        core.warning('  1. Go to GitHub → Settings → Developer Settings → Personal Access Tokens');
+        core.warning('  2. Edit your PAT and enable "gist" scope');
+        core.warning('  3. Update PAT_TOKEN secret in repository settings');
+      }
+      core.warning('Full report will be available as artifact download only');
     }
     
     // Generate and post minimal PR comment (with link to gist and artifact)

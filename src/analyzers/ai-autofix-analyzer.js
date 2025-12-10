@@ -702,7 +702,7 @@ export function myDOMFunction(value, targetField, globals) {
    */
   analyze = async (results) => {
     if (!this.azureApiKey) {
-      core.info('AI Auto-Fix skipped: No Azure OpenAI API key configured (set AZURE_OPENAI_API_KEY)');
+      core.info('AI Auto-Fix skipped: No Azure OpenAI API key configured (set AZURE_API_KEY or AZURE_OPENAI_API_KEY)');
       return {
         enabled: false,
         reason: 'No Azure OpenAI API key configured',
@@ -713,7 +713,7 @@ export function myDOMFunction(value, targetField, globals) {
     try {
       core.info(' Starting AI Auto-Fix Analysis...');
       core.info(`Azure OpenAI Endpoint: ${this.azureEndpoint}`);
-      core.info(`Azure OpenAI Deployment: ${this.azureDeployment}`);
+      core.info(`Azure OpenAI Model: ${this.azureModel}`);
       
       const fixableSuggestions = [];
       
