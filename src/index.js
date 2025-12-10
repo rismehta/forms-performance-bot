@@ -686,6 +686,31 @@ async function loadFilesFromWorkspace() {
 }
 
 /**
+ * ✅ Helper: Get list of files changed in PR (used by CSS & JS fetchers)
+ */
+async function getPRChangedFiles(context, octokit) {
+  try {
+    const { owner, repo } = context.repo;
+    const prNumber = context.payload.pull_request.number;
+    
+    core.info(`Fetching files changed in PR #${prNumber}...`);
+    const { data: prFiles } = await octokit.rest.pulls.listFiles({
+      owner,
+      repo,
+      pull_number: prNumber
+    });
+    
+    const changedFiles = prFiles.map(f => f.filename);
+    core.info(`PR contains ${changedFiles.length} changed file(s)`);
+    return changedFiles;
+  } catch (error) {
+    core.warning(`Could not fetch PR files: ${error.message}`);
+    core.warning('Will analyze all files in repo (no PR filtering)');
+    return []; // Empty array = no filtering
+  }
+}
+
+/**
  * Fetch ALL JavaScript files from the PR branch (DEPRECATED - use loadFilesFromWorkspace instead)
  * Not just the diff - we need to scan all JS files to find hidden field references
  */
@@ -695,6 +720,9 @@ async function fetchJSFilesFromPR(context, octokit) {
     const prNumber = context.payload.pull_request.number;
     const branch = context.payload.pull_request.head.ref;
     const sha = context.payload.pull_request.head.sha;
+
+    // ✅ Get files changed in this PR (centralized helper)
+    const prChangedFiles = await getPRChangedFiles(context, octokit);
 
     core.info(`Fetching all JavaScript files from branch: ${branch} (${sha})`);
 
@@ -706,8 +734,15 @@ async function fetchJSFilesFromPR(context, octokit) {
       recursive: 'true', // Get entire tree recursively
     });
 
+    // ✅ Filter tree by PR files FIRST (applies to all file types)
+    let filteredTree = tree.tree;
+    if (prChangedFiles.length > 0) {
+      filteredTree = tree.tree.filter(file => prChangedFiles.includes(file.path));
+      core.info(`Filtered tree from ${tree.tree.length} to ${filteredTree.length} files (only PR changes)`);
+    }
+
     // Filter for JavaScript files
-    const jsFiles = tree.tree.filter(file => 
+    const jsFiles = filteredTree.filter(file => 
       file.type === 'blob' &&
       (file.path.endsWith('.js') || file.path.endsWith('.mjs')) &&
       !file.path.includes('node_modules') &&
@@ -717,7 +752,7 @@ async function fetchJSFilesFromPR(context, octokit) {
       !file.path.includes('.spec.')
     );
 
-    core.info(`Found ${jsFiles.length} JavaScript files in branch (excluding tests and node_modules)`);
+    core.info(`Found ${jsFiles.length} JavaScript files (PR-filtered)`)
 
     const fileContents = [];
     
@@ -763,6 +798,9 @@ async function fetchCSSFilesFromPR(context, octokit) {
     const { owner, repo } = context.repo;
     const sha = context.payload.pull_request.head.sha;
 
+    // ✅ Get files changed in this PR (centralized helper)
+    const prChangedFiles = await getPRChangedFiles(context, octokit);
+
     core.info(`Fetching all CSS files from branch (${sha})`);
 
     // Get the tree of the entire branch
@@ -773,8 +811,15 @@ async function fetchCSSFilesFromPR(context, octokit) {
       recursive: 'true',
     });
 
+    // ✅ Filter tree by PR files FIRST (applies to all file types)
+    let filteredTree = tree.tree;
+    if (prChangedFiles.length > 0) {
+      filteredTree = tree.tree.filter(file => prChangedFiles.includes(file.path));
+      core.info(`Filtered tree from ${tree.tree.length} to ${filteredTree.length} files (only PR changes)`);
+    }
+
     // Filter for CSS files
-    const cssFiles = tree.tree.filter(file => 
+    const cssFiles = filteredTree.filter(file => 
       file.type === 'blob' &&
       file.path.endsWith('.css') &&
       !file.path.includes('node_modules') &&
@@ -782,7 +827,7 @@ async function fetchCSSFilesFromPR(context, octokit) {
       !file.path.includes('__tests__')
     );
 
-    core.info(`Found ${cssFiles.length} CSS files in branch (excluding tests and node_modules)`);
+    core.info(`Found ${cssFiles.length} CSS files (PR-filtered)`)
 
     const fileContents = [];
     
