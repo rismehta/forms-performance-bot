@@ -266,7 +266,35 @@ async function run() {
     writeFileSync(reportPath, htmlReport, 'utf-8');
     core.info(` HTML report saved to: ${reportPath}`);
     
-    // Generate and post minimal PR comment (with link to artifact)
+    // Upload HTML report to GitHub Gist for direct browser viewing
+    core.info(' Uploading HTML report to GitHub Gist for inline viewing...');
+    let gistUrl = null;
+    try {
+      const gistResponse = await octokit.rest.gists.create({
+        description: `Performance Report - PR #${prNumber} - ${repo}`,
+        public: false, // Private gist
+        files: {
+          [`performance-report-pr-${prNumber}.html`]: {
+            content: htmlReport
+          }
+        }
+      });
+      
+      gistUrl = gistResponse.data.html_url;
+      // Use htmlpreview.github.io for direct HTML rendering
+      const previewUrl = `https://htmlpreview.github.io/?${gistResponse.data.files[`performance-report-pr-${prNumber}.html`].raw_url}`;
+      
+      core.info(` Gist created: ${gistUrl}`);
+      core.info(` Preview URL: ${previewUrl}`);
+      
+      // Pass preview URL to reporter
+      gistUrl = previewUrl;
+    } catch (error) {
+      core.warning(`Failed to create gist: ${error.message}`);
+      core.warning('Full report will only be available as artifact download');
+    }
+    
+    // Generate and post minimal PR comment (with link to gist and artifact)
     const reporter = new FormPRReporter(octokit, owner, repo, prNumber);
     await reporter.generateReport(results, {
       before: urls.before,
@@ -275,6 +303,7 @@ async function run() {
       afterData,  // Include performance metrics
       autoFixSuggestions, // Include AI-generated fix suggestions
       autoFixPR, // Include auto-fix PR details
+      gistUrl, // Direct browser link to HTML report
     }, prNumber, `${owner}/${repo}`);
 
     // Fail the build if critical issues are detected

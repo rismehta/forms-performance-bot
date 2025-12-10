@@ -247,11 +247,11 @@ export class FormHTMLAnalyzer {
       issues.push({
         severity: 'error',
         type: 'inline-scripts-on-page',
-        message: `${analysis.scripts.inline} inline script(s) on page (${(analysis.scripts.inlineSize / 1024).toFixed(2)} KB) - ${inHead} in <head>, ${inBody} in <body>. Inline scripts ALWAYS block form rendering.`,
+        message: `${analysis.scripts.inline} inline script(s) on page (${(analysis.scripts.inlineSize / 1024).toFixed(2)} KB) - ${inHead} in HEAD, ${inBody} in BODY. Inline scripts ALWAYS block form rendering.`,
         size: analysis.scripts.inlineSize,
         count: analysis.scripts.inline,
         breakdown: { head: inHead, body: inBody },
-        recommendation: 'All JavaScript should be in external files with defer attribute. Move inline scripts to external files loaded with defer. Scripts in <head> especially delay form rendering.',
+        recommendation: 'All JavaScript should be in external files with defer attribute. Move inline scripts to external files loaded with defer. Scripts in HEAD especially delay form rendering.',
       });
     }
 
@@ -261,14 +261,17 @@ export class FormHTMLAnalyzer {
       const inHead = blockingScripts.filter(s => s.location === 'head').length;
       const inBody = blockingScripts.filter(s => s.location === 'body').length;
       
+      // Build script list for message
+      const scriptNames = blockingScripts.map(s => s.src).join(', ');
+      
       issues.push({
         severity: 'error',
         type: 'blocking-scripts-on-page',
-        message: `${analysis.scripts.blocking} synchronous script(s) on page without async/defer - ${inHead} in <head>, ${inBody} in <body>. These block parsing and delay form rendering.`,
+        message: `${analysis.scripts.blocking} synchronous script(s) on page without async/defer - ${inHead} in HEAD, ${inBody} in BODY. Scripts: ${scriptNames}`,
         count: analysis.scripts.blocking,
         breakdown: { head: inHead, body: inBody },
         scripts: blockingScripts,
-        recommendation: 'All JavaScript should use defer attribute. Add defer to all script tags to prevent blocking. Use defer (not async) for forms to maintain execution order. Scripts in <head> are especially critical.',
+        recommendation: 'Add defer attribute to all script tags above. Use defer (not async) for forms to maintain execution order. Scripts in HEAD are especially critical.',
       });
     }
 

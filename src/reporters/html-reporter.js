@@ -447,7 +447,7 @@ export class HTMLReporter {
       
       <button class="collapsible">View Field Names (${fields.length})</button>
       <div class="content">
-        <p>${displayFields.map(f => `<code>${f.name}</code>`).join(', ')}</p>
+        <p>${displayFields.map(f => `<code>${f.field || f.name}</code>`).join(', ')}</p>
         ${fields.length > 20 ? `<p>... and ${fields.length - 20} more</p>` : ''}
       </div>
       
@@ -489,7 +489,13 @@ export class HTMLReporter {
       ${data.issues.slice(0, 10).map(issue => `
         <div class="issue-item ${issue.severity === 'error' ? '' : 'warning'}">
           <h4>${issue.message}</h4>
-          ${issue.recommendation ? `<p>${issue.recommendation}</p>` : ''}
+          ${issue.scripts && issue.scripts.length > 0 ? `
+            <p><strong>Scripts to fix:</strong></p>
+            <ul>
+              ${issue.scripts.map(s => `<li><code>${s.src}</code> (in ${s.location})</li>`).join('')}
+            </ul>
+          ` : ''}
+          ${issue.recommendation ? `<p><strong>Fix:</strong> ${issue.recommendation}</p>` : ''}
         </div>
       `).join('')}
       ${data.issues.length > 10 ? `<p><em>... and ${data.issues.length - 10} more issues</em></p>` : ''}

@@ -11,13 +11,20 @@ export class AIAutoFixAnalyzer {
   constructor(config = null) {
     this.config = config;
     
-    // Azure OpenAI Configuration
-    this.azureApiKey = process.env.AZURE_OPENAI_API_KEY;
-    this.azureEndpoint = process.env.AZURE_OPENAI_ENDPOINT || 'https://forms-azure-openai-stg-eastus2.openai.azure.com/';
-    this.azureDeployment = process.env.AZURE_OPENAI_DEPLOYMENT || 'gpt-4.1-garage-week';
-    this.azureApiVersion = process.env.AZURE_OPENAI_API_VERSION || '2024-12-01-preview';
+    // Azure OpenAI Configuration (Custom Codex Endpoint)
+    this.azureApiKey = process.env.AZURE_API_KEY || process.env.AZURE_OPENAI_API_KEY; // Support both
+    this.azureEndpoint = process.env.AZURE_OPENAI_ENDPOINT || 'https://forms-azure-openai-stg-eastus2.openai.azure.com/openai/responses';
+    this.azureModel = process.env.AZURE_OPENAI_MODEL || 'gpt-5.1-codex';
+    this.azureApiVersion = process.env.AZURE_OPENAI_API_VERSION || '2025-04-01-preview';
+    this.aiEnabled = !!this.azureApiKey; // Enable if API key is present
     
     this.workspaceRoot = process.cwd();
+    
+    if (this.aiEnabled) {
+      core.info(` AI Auto-Fix enabled with model: ${this.azureModel}`);
+    } else {
+      core.info(' AI Auto-Fix disabled (no API key found)');
+    }
   }
 
   /**
@@ -33,60 +40,231 @@ export class AIAutoFixAnalyzer {
       const functionCode = this.extractFunctionCode(issue);
       const enhancedContext = this.buildEnhancedContext(issue);
       
-      const prompt = issueType === 'http' 
+      const userPrompt = issueType === 'http' 
         ? this.buildHTTPRefactorPrompt(issue, functionCode, enhancedContext)
         : this.buildDOMRefactorPrompt(issue, functionCode, enhancedContext);
 
-      const completion = await this.openai.chat.completions.create({
-        model: this.aiModel,
-        messages: [
-          {
-            role: 'system',
-            content: `You are an expert in AEM Adaptive Forms architecture. Generate production-ready refactored code that follows AEM Forms best practices. 
-            
-Key principles:
-- Custom functions should NOT make direct HTTP calls - use form-level request() via custom events
-- Custom functions should NOT manipulate DOM - use setProperty() or custom components
-- Always use globals.functions.dispatchEvent() to trigger form events
-- Form JSON events should use request() for HTTP calls
-- Wrap sensitive data with encrypt()
+      const systemPrompt = `You are a senior AEM Forms developer performing a surgical refactoring. Your ONLY job is to extract ${issueType === 'http' ? 'HTTP calls' : 'DOM manipulation'} from custom functions.
 
-Respond ONLY with valid JSON matching this schema:
+ABSOLUTE RULES (WILL BE REJECTED IF NOT FOLLOWED):
+1. NEVER change function parameters - keep exact signature
+2. NEVER remove existing logic - keep all validation, sorting, calculations
+3. NEVER change variable names - use exact same names
+4. NEVER change return types or values
+5. ONLY extract the ${issueType === 'http' ? 'HTTP call (fetch/axios/request)' : 'DOM manipulation (document.*, .style.*, .innerHTML)'} to ${issueType === 'http' ? 'event dispatcher' : 'setProperty()'}
+6. PRESERVE all comments, formatting, and code structure
+
+YOU ARE NOT:
+- Redesigning the function
+- Improving the code
+- Changing the architecture
+- Adding new features
+
+YOU ARE ONLY:
+- ${issueType === 'http' ? 'Extracting HTTP calls to events' : 'Converting DOM manipulation to setProperty()'}
+- Keeping EVERYTHING else EXACTLY the same
+
+VALIDATION CHECKLIST (your response MUST pass this):
+✓ Same number of parameters as original
+✓ Same parameter names as original
+✓ All validation logic preserved
+✓ All data processing preserved  
+✓ All setProperty/globals.functions calls preserved
+✓ Only ${issueType === 'http' ? 'fetch/axios/request replaced with dispatchEvent' : 'DOM calls replaced with setProperty'}
+
+Respond ONLY with valid JSON:
 {
-  "jsCode": "refactored JavaScript code",
-  "formJsonSnippet": "form JSON event configuration (if applicable)",
-  "componentExample": "custom component example (if applicable)",
-  "testingSteps": "step-by-step testing instructions"
-}`
-          },
-          {
-            role: 'user',
-            content: prompt
-          }
-        ],
-        temperature: 0.3,
-        max_tokens: 2000
-      });
+  "jsCode": "refactored JavaScript with SAME signature and logic",
+  "formJsonSnippet": "form JSON event configuration${issueType === 'dom' ? ' (if applicable)' : ''}",
+  "componentExample": "${issueType === 'dom' ? 'custom component code (if complex UI needed)' : ''}",
+  "testingSteps": "testing instructions"
+}`;
 
-      const response = completion.choices[0].message.content.trim();
+      // Call Azure OpenAI with custom Codex endpoint
+      const parsed = await this.callAzureOpenAI(systemPrompt, userPrompt);
       
-      // Parse JSON response
-      const jsonMatch = response.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        return {
-          jsCode: parsed.jsCode || this.getDefaultRefactoredCode(issue, issueType).jsCode,
-          formJsonSnippet: parsed.formJsonSnippet || null,
-          componentExample: parsed.componentExample || null,
-          testingSteps: parsed.testingSteps || 'Test in browser after applying changes'
-        };
+      if (parsed && parsed.jsCode) {
+        
+      // CRITICAL: Validate AI output before accepting it
+      const validation = this.validateAIRefactoring(functionCode, parsed.jsCode, issue.functionName, issueType);
+      if (!validation.valid) {
+        core.warning(`AI refactoring rejected for ${issue.functionName} (${validation.rulesChecked} rules checked):`);
+        validation.errors.forEach(err => core.warning(`  - ${err}`));
+        core.warning('Falling back to safe comment-only approach');
+        return this.getDefaultRefactoredCode(issue, issueType);
       }
       
+      core.info(`AI refactoring validated for ${issue.functionName} (${validation.rulesChecked} rules passed)`);
+      
+      return {
+        jsCode: parsed.jsCode,
+        formJsonSnippet: parsed.formJsonSnippet || null,
+        componentExample: parsed.componentExample || null,
+        testingSteps: parsed.testingSteps || 'Test in browser after applying changes'
+      };
+    } else {
+      core.warning(`AI response missing jsCode for ${issue.functionName}`);
       return this.getDefaultRefactoredCode(issue, issueType);
+    }
     } catch (error) {
       core.warning(`AI refactoring failed for ${issue.functionName}: ${error.message}`);
       return this.getDefaultRefactoredCode(issue, issueType);
     }
+  }
+
+  /**
+   * GENERIC validation framework for AI-generated refactoring
+   * Extensible for any fix type - just add validation rules
+   * Returns {valid: boolean, errors: string[]}
+   */
+  validateAIRefactoring = (originalCode, refactoredCode, functionName, issueType = 'http') => {
+    // Define validation rules for each issue type
+    const validationRules = {
+      // Common rules that apply to ALL refactorings
+      common: [
+        {
+          name: 'Signature preservation',
+          check: (orig, refac, fname) => {
+            const origSig = orig.match(new RegExp(`function\\s+${fname}\\s*\\(([^)]*)\\)`));
+            const refacSig = refac.match(new RegExp(`function\\s+${fname}\\s*\\(([^)]*)\\)`));
+            
+            if (!origSig) return { valid: false, error: 'Could not parse original signature' };
+            if (!refacSig) return { valid: false, error: 'Refactored code missing function' };
+            
+            const origParams = origSig[1].split(',').map(p => p.trim()).filter(Boolean);
+            const refacParams = refacSig[1].split(',').map(p => p.trim()).filter(Boolean);
+            
+            if (origParams.length !== refacParams.length) {
+              return { valid: false, error: `Parameter count: ${origParams.length} → ${refacParams.length}` };
+            }
+            
+            // Check parameter names match
+            const origNames = origParams.map(p => p.split('=')[0].trim());
+            const refacNames = refacParams.map(p => p.split('=')[0].trim());
+            
+            for (const name of origNames) {
+              if (!refacNames.includes(name)) {
+                return { valid: false, error: `Parameter "${name}" removed/renamed` };
+              }
+            }
+            
+            return { valid: true };
+          }
+        },
+        {
+          name: 'Code length sanity',
+          check: (orig, refac) => {
+            const origLines = orig.split('\n').filter(l => l.trim()).length;
+            const refacLines = refac.split('\n').filter(l => l.trim()).length;
+            
+            // Refactored should be within 50-150% of original (not drastically shorter/longer)
+            if (refacLines < origLines * 0.5) {
+              return { valid: false, error: `Too short: ${origLines} → ${refacLines} lines (removed logic?)` };
+            }
+            if (refacLines > origLines * 1.5) {
+              return { valid: false, error: `Too long: ${origLines} → ${refacLines} lines (added unnecessary code?)` };
+            }
+            
+            return { valid: true };
+          }
+        },
+        {
+          name: 'Critical calls preserved',
+          check: (orig, refac) => {
+            // Preserve setProperty, setVariable, any globals.functions.* calls
+            const criticalPatterns = ['.setProperty(', '.setVariable(', '.getProperty('];
+            
+            for (const pattern of criticalPatterns) {
+              const origHas = orig.includes(pattern);
+              const refacHas = refac.includes(pattern);
+              
+              if (origHas && !refacHas) {
+                return { valid: false, error: `Removed critical call: ${pattern}` };
+              }
+            }
+            
+            return { valid: true };
+          }
+        }
+      ],
+      
+      // Rules specific to HTTP refactoring
+      http: [
+        {
+          name: 'Event dispatcher added',
+          check: (orig, refac) => {
+            if (!refac.includes('dispatchEvent')) {
+              return { valid: false, error: 'Missing dispatchEvent - HTTP not extracted' };
+            }
+            return { valid: true };
+          }
+        },
+        {
+          name: 'HTTP calls removed',
+          check: (orig, refac) => {
+            const httpPatterns = ['fetch(', 'axios(', '$.ajax(', 'XMLHttpRequest'];
+            
+            for (const pattern of httpPatterns) {
+              if (refac.includes(pattern)) {
+                return { valid: false, error: `Still contains ${pattern} - not extracted` };
+              }
+            }
+            return { valid: true };
+          }
+        }
+      ],
+      
+      // Rules specific to DOM refactoring
+      dom: [
+        {
+          name: 'setProperty added',
+          check: (orig, refac) => {
+            if (!refac.includes('.setProperty(')) {
+              return { valid: false, error: 'Missing setProperty - DOM not converted' };
+            }
+            return { valid: true };
+          }
+        },
+        {
+          name: 'DOM calls removed',
+          check: (orig, refac) => {
+            const domPatterns = ['document.querySelector', 'document.getElementById', 
+                               '.innerHTML', '.style.', 'createElement'];
+            
+            for (const pattern of domPatterns) {
+              if (refac.includes(pattern)) {
+                return { valid: false, error: `Still contains ${pattern} - not converted` };
+              }
+            }
+            return { valid: true };
+          }
+        }
+      ]
+    };
+    
+    // Run validation
+    const errors = [];
+    const rules = [
+      ...validationRules.common,
+      ...(validationRules[issueType] || [])
+    ];
+    
+    try {
+      for (const rule of rules) {
+        const result = rule.check(originalCode, refactoredCode, functionName);
+        if (!result.valid) {
+          errors.push(`[${rule.name}] ${result.error}`);
+        }
+      }
+    } catch (error) {
+      errors.push(`Validation exception: ${error.message}`);
+    }
+    
+    return {
+      valid: errors.length === 0,
+      errors,
+      rulesChecked: rules.length
+    };
   }
 
   /**
@@ -144,8 +322,12 @@ Respond ONLY with valid JSON matching this schema:
   buildEnhancedContext = (issue) => {
     const context = {
       relatedFunctions: [],
+      relatedFunctionCode: [],  // NEW: Full function implementations
       imports: [],
-      moduleType: 'ESM'  // Default assumption
+      callSites: [],
+      fullFileContent: '',  // NEW: Entire file for Codex
+      moduleType: 'ESM',
+      utilityFunctions: []  // NEW: Helper functions like encrypt, externalize
     };
 
     try {
@@ -155,24 +337,50 @@ Respond ONLY with valid JSON matching this schema:
       }
 
       const content = readFileSync(filePath, 'utf-8');
+      context.fullFileContent = content;  // Codex can handle full file!
       
-      // ESSENTIAL: Extract imports (AI needs to know available utilities)
+      // Extract ALL imports (Codex has enough tokens)
       const importMatches = content.match(/^import .+ from .+$/gm) || [];
       const requireMatches = content.match(/const .+ = require\(.+\)/g) || [];
-      context.imports = [...importMatches, ...requireMatches].slice(0, 5); // Top 5
+      context.imports = [...importMatches, ...requireMatches];
       
-      // ESSENTIAL: Extract function names (AI can reference existing helpers)
-      const functionMatches = content.matchAll(/(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\(|const\s+(\w+)\s*=\s*(?:async\s*)?\(|(\w+)\s*:\s*(?:async\s+)?function/g);
+      // Extract ALL function names and their implementations
+      const functionMatches = content.matchAll(/(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\([^)]*\)\s*\{/g);
       for (const match of functionMatches) {
-        const fname = match[1] || match[2] || match[3];
+        const fname = match[1];
         if (fname && fname !== issue.functionName) {
           context.relatedFunctions.push(fname);
+          
+          // Extract full function body for top 10 functions
+          if (context.relatedFunctionCode.length < 10) {
+            const funcStart = match.index;
+            const funcCode = this.extractFunctionFromIndex(content, funcStart);
+            if (funcCode && funcCode.length < 500) {  // Only include small helpers
+              context.relatedFunctionCode.push({
+                name: fname,
+                code: funcCode
+              });
+            }
+          }
         }
       }
-      context.relatedFunctions = context.relatedFunctions.slice(0, 5); // Top 5
       
-      // ESSENTIAL: Module type (for correct syntax)
+      // Identify common AEM utility functions used in the file
+      const aemUtils = ['encrypt', 'decrypt', 'externalize', 'request', 'setProperty', 
+                       'getProperty', 'setVariable', 'getVariable', 'dispatchEvent'];
+      context.utilityFunctions = aemUtils.filter(util => content.includes(util));
+      
+      // Module type
       context.moduleType = content.includes('export') ? 'ESM' : 'CommonJS';
+      
+      // Find ALL call sites (Codex can handle more)
+      const callPattern = new RegExp(`${issue.functionName}\\s*\\([^)]*\\)`, 'g');
+      const calls = content.match(callPattern) || [];
+      context.callSites = calls.map(call => call.trim());
+      
+      // Extract surrounding context (functions that call this function)
+      const callers = this.findCallingFunctions(content, issue.functionName);
+      context.callingFunctions = callers.slice(0, 3);
       
     } catch (error) {
       core.info(`Could not build context: ${error.message}`);
@@ -182,40 +390,177 @@ Respond ONLY with valid JSON matching this schema:
   }
 
   /**
+   * Extract function code from a specific index
+   */
+  extractFunctionFromIndex = (content, startIndex) => {
+    try {
+      const lines = content.substring(startIndex).split('\n');
+      let braceCount = 0;
+      let started = false;
+      let result = [];
+      
+      for (let i = 0; i < lines.length && i < 50; i++) {  // Max 50 lines
+        const line = lines[i];
+        result.push(line);
+        
+        for (const char of line) {
+          if (char === '{') {
+            braceCount++;
+            started = true;
+          }
+          if (char === '}') braceCount--;
+        }
+        
+        if (started && braceCount === 0) {
+          return result.join('\n');
+        }
+      }
+      
+      return result.join('\n');
+    } catch (error) {
+      return '';
+    }
+  }
+
+  /**
+   * Find functions that call the target function
+   */
+  findCallingFunctions = (content, targetFunction) => {
+    const callers = [];
+    const functionMatches = content.matchAll(/(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\([^)]*\)\s*\{[^}]*\}/gs);
+    
+    for (const match of functionMatches) {
+      const funcName = match[1];
+      const funcBody = match[0];
+      
+      if (funcBody.includes(`${targetFunction}(`)) {
+        callers.push({
+          name: funcName,
+          callSite: funcBody.match(new RegExp(`${targetFunction}\\s*\\([^)]*\\)`))?.[0]
+        });
+      }
+    }
+    
+    return callers;
+  }
+
+  /**
    * Build prompt for HTTP refactoring
    */
   buildHTTPRefactorPrompt = (issue, functionCode, enhancedContext) => {
     const contextSection = enhancedContext ? `
 
-**Context:**
-- File: ${issue.file}
-- Module: ${enhancedContext.moduleType}
-${enhancedContext.relatedFunctions?.length ? `- Available functions: ${enhancedContext.relatedFunctions.join(', ')}` : ''}
-${enhancedContext.imports?.length ? `- Available imports:\n${enhancedContext.imports.map(i => `  ${i}`).join('\n')}` : ''}
+**FULL CONTEXT (You have access to everything):**
+
+**File:** ${issue.file}
+**Module Type:** ${enhancedContext.moduleType}
+
+**Available Imports:**
+${enhancedContext.imports?.length ? enhancedContext.imports.join('\n') : 'None'}
+
+**AEM Utility Functions Available:**
+${enhancedContext.utilityFunctions?.length ? enhancedContext.utilityFunctions.join(', ') : 'None'}
+
+**How This Function Is Called (${enhancedContext.callSites?.length || 0} call sites):**
+${enhancedContext.callSites?.length ? enhancedContext.callSites.slice(0, 5).join('\n') : 'No call sites found'}
+
+**Related Helper Functions You Can Use:**
+${enhancedContext.relatedFunctionCode?.length ? enhancedContext.relatedFunctionCode.map(f => `
+Function: ${f.name}()
+\`\`\`javascript
+${f.code}
+\`\`\`
+`).join('\n') : 'No helper functions'}
+
+**Functions That Call This One:**
+${enhancedContext.callingFunctions?.length ? enhancedContext.callingFunctions.map(c => `- ${c.name}() calls as: ${c.callSite}`).join('\n') : 'None'}
+
+**All Functions in This File:**
+${enhancedContext.relatedFunctions?.length ? enhancedContext.relatedFunctions.join(', ') : 'None'}
 ` : '';
 
-    return `Refactor this AEM Forms custom function that makes direct HTTP requests:
+    return `Refactor this AEM Forms custom function that makes direct HTTP requests.
 
-**Current Code:**
+**CRITICAL RULES - MUST FOLLOW:**
+1. **PRESERVE EXACT FUNCTION SIGNATURE** - Do NOT change parameters, parameter names, or order
+2. **PRESERVE ALL EXISTING LOGIC** - Keep all sorting, validation, data processing
+3. **ONLY REMOVE HTTP CALLS** - Extract fetch/axios/request calls to form events
+4. **KEEP ALL OTHER CODE** - Keep all setProperty, calculations, array operations, etc.
+5. **USE EXISTING HELPERS** - Reuse helper functions already defined in the file
+6. **MATCH CODING STYLE** - Follow the same patterns as other functions in this file
+
+**Target Function to Refactor:**
 \`\`\`javascript
 ${functionCode}
 \`\`\`
 ${contextSection}
-**Problem:** Direct HTTP calls bypass form's error handling, loading states, and retry logic.
 
-**Requirements:**
-1. Refactor the function to dispatch a custom event instead
-2. Provide the form JSON event configuration that uses request()
-3. Preserve the original function's logic and parameters
-4. Use AEM Forms conventions: globals.functions.dispatchEvent()
-5. Maintain the same function signature and return type
-6. Keep imports and dependencies if needed
-7. Include testing steps
+${enhancedContext?.fullFileContent && enhancedContext.fullFileContent.length < 10000 ? `
+**COMPLETE FILE FOR REFERENCE (so you can see all patterns and helpers):**
+\`\`\`javascript
+${enhancedContext.fullFileContent}
+\`\`\`
+` : ''}
 
-Generate a JSON response with:
-- jsCode: The refactored JavaScript function (complete, ready to use)
-- formJsonSnippet: The form JSON event configuration
-- testingSteps: How to test the refactored code`;
+**What to do:**
+1. Identify the HTTP call (fetch, axios, request, etc.) in the function
+2. Extract ONLY the HTTP call to a custom event handler
+3. Keep everything else in the function EXACTLY as-is
+4. Add event dispatcher to trigger the HTTP call
+5. Use callback pattern for async results
+
+**Example of correct refactoring:**
+
+BEFORE (BAD):
+\`\`\`javascript
+export function myFunction(data, field1, field2, globals) {
+  // Some validation
+  if (!data) return;
+  
+  // HTTP call (PROBLEM)
+  const response = await fetch('/api/endpoint', {
+    method: 'POST',
+    body: JSON.stringify(data)
+  });
+  
+  // Process response
+  const result = response.json();
+  globals.functions.setProperty(field1, { value: result.value });
+}
+\`\`\`
+
+AFTER (GOOD):
+\`\`\`javascript
+export function myFunction(data, field1, field2, globals) {
+  // Same validation (PRESERVED)
+  if (!data) return;
+  
+  // Dispatch event instead of direct HTTP call (CHANGED)
+  globals.functions.dispatchEvent(globals.form.$form, 'custom:myFunctionFetch', {
+    data: data,
+    onSuccess: (result) => {
+      // Same processing logic (PRESERVED)
+      globals.functions.setProperty(field1, { value: result.value });
+    }
+  });
+}
+\`\`\`
+
+Form JSON event:
+\`\`\`json
+{
+  "events": {
+    "custom:myFunctionFetch": [
+      "request(externalize('/api/endpoint'), 'POST', encrypt({body: $event.data}), {onSuccess: $event.onSuccess})"
+    ]
+  }
+}
+\`\`\`
+
+**Generate JSON response with:**
+- jsCode: Refactored function with SAME signature, SAME logic, ONLY HTTP extracted
+- formJsonSnippet: Form JSON event with request() call
+- testingSteps: How to test`;
   }
 
   /**
@@ -224,35 +569,95 @@ Generate a JSON response with:
   buildDOMRefactorPrompt = (issue, functionCode, enhancedContext) => {
     const contextSection = enhancedContext ? `
 
-**Context:**
-- File: ${issue.file}
-- Module: ${enhancedContext.moduleType}
-${enhancedContext.relatedFunctions?.length ? `- Available functions: ${enhancedContext.relatedFunctions.join(', ')}` : ''}
-${enhancedContext.imports?.length ? `- Available imports:\n${enhancedContext.imports.map(i => `  ${i}`).join('\n')}` : ''}
+**FULL CONTEXT (You have access to everything):**
+
+**File:** ${issue.file}
+**Module Type:** ${enhancedContext.moduleType}
+
+**Available Imports:**
+${enhancedContext.imports?.length ? enhancedContext.imports.join('\n') : 'None'}
+
+**AEM Utility Functions Available:**
+${enhancedContext.utilityFunctions?.length ? enhancedContext.utilityFunctions.join(', ') : 'None'}
+
+**How This Function Is Called (${enhancedContext.callSites?.length || 0} call sites):**
+${enhancedContext.callSites?.length ? enhancedContext.callSites.slice(0, 5).join('\n') : 'No call sites found'}
+
+**Related Helper Functions You Can Use:**
+${enhancedContext.relatedFunctionCode?.length ? enhancedContext.relatedFunctionCode.map(f => `
+Function: ${f.name}()
+\`\`\`javascript
+${f.code}
+\`\`\`
+`).join('\n') : 'No helper functions'}
+
+**Functions That Call This One:**
+${enhancedContext.callingFunctions?.length ? enhancedContext.callingFunctions.map(c => `- ${c.name}() calls as: ${c.callSite}`).join('\n') : 'None'}
 ` : '';
 
-    return `Refactor this AEM Forms custom function that directly manipulates DOM:
+    return `Refactor this AEM Forms custom function that directly manipulates DOM.
 
-**Current Code:**
+**CRITICAL RULES - MUST FOLLOW:**
+1. **PRESERVE EXACT FUNCTION SIGNATURE** - Do NOT change parameters, parameter names, or order
+2. **PRESERVE ALL EXISTING LOGIC** - Keep all validation, calculations, data processing
+3. **ONLY REMOVE DOM MANIPULATION** - Replace document.querySelector, .innerHTML, .style, etc.
+4. **USE setProperty() INSTEAD** - Use globals.functions.setProperty() for state changes
+5. **KEEP ALL OTHER CODE** - Keep all other logic, variables, returns EXACTLY as-is
+6. **USE EXISTING HELPERS** - Reuse helper functions already defined in the file
+7. **MATCH CODING STYLE** - Follow the same patterns as other functions in this file
+
+**Target Function to Refactor:**
 \`\`\`javascript
 ${functionCode}
 \`\`\`
 ${contextSection}
-**Problem:** Direct DOM manipulation bypasses form state management and breaks reactivity.
 
-**Requirements:**
-1. Refactor to use globals.functions.setProperty() instead of DOM manipulation
-2. If complex UI changes are needed, provide a custom component example
-3. Preserve the original function's intent and logic
-4. Use AEM Forms conventions
-5. Maintain the same function signature
-6. Keep imports and dependencies if needed
-7. Include testing steps
+${enhancedContext?.fullFileContent && enhancedContext.fullFileContent.length < 10000 ? `
+**COMPLETE FILE FOR REFERENCE (so you can see all patterns and helpers):**
+\`\`\`javascript
+${enhancedContext.fullFileContent}
+\`\`\`
+` : ''}
 
-Generate a JSON response with:
-- jsCode: The refactored JavaScript function (complete, ready to use)
-- componentExample: Custom component code (if needed)
-- testingSteps: How to test the refactored code`;
+**What to do:**
+1. Identify DOM manipulation (document.*, element.innerHTML, .style.*, etc.)
+2. Replace with globals.functions.setProperty() to update field properties
+3. Keep everything else EXACTLY the same
+4. Preserve all parameters, logic, validation
+
+**Example of correct refactoring:**
+
+BEFORE (BAD):
+\`\`\`javascript
+export function myDOMFunction(value, targetField, globals) {
+  // Validation
+  if (!value) return;
+  
+  // DOM manipulation (PROBLEM)
+  const element = document.querySelector('#field');
+  element.style.color = 'red';
+  element.innerHTML = value;
+}
+\`\`\`
+
+AFTER (GOOD):
+\`\`\`javascript
+export function myDOMFunction(value, targetField, globals) {
+  // Same validation (PRESERVED)
+  if (!value) return;
+  
+  // Use setProperty instead of DOM (CHANGED)
+  globals.functions.setProperty(targetField, { 
+    value: value,
+    visible: true
+  });
+}
+\`\`\`
+
+**Generate JSON response with:**
+- jsCode: Refactored function with SAME signature, SAME logic, ONLY DOM → setProperty
+- componentExample: Custom component code (if complex UI needed)
+- testingSteps: How to test`;
   }
 
   /**
@@ -1547,42 +1952,47 @@ Focus on performance impact and Core Web Vitals (FCP, LCP, TBT, INP).`;
    * Call Azure OpenAI API (converted from Python)
    */
   callAzureOpenAI = async (systemPrompt, userPrompt) => {
-    // Build Azure OpenAI endpoint URL
-    // Format: {endpoint}/openai/deployments/{deployment}/chat/completions?api-version={api-version}
-    const url = `${this.azureEndpoint}/openai/deployments/${this.azureDeployment}/chat/completions?api-version=${this.azureApiVersion}`;
+    // Build Azure OpenAI Custom Codex endpoint URL
+    // Format: {endpoint}?api-version={api-version}
+    const url = `${this.azureEndpoint}?api-version=${this.azureApiVersion}`;
+    
+    core.info(` Calling Azure OpenAI: ${this.azureModel}`);
     
     const response = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'api-key': this.azureApiKey  // Azure uses 'api-key' header, not 'Authorization'
+        'Authorization': `Bearer ${this.azureApiKey}`  // Custom endpoint uses Bearer auth
       },
       body: JSON.stringify({
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt }
         ],
-        max_completion_tokens: 1000,  // Azure uses max_completion_tokens instead of max_tokens
-        temperature: 0.3,
+        model: this.azureModel,  // Model in body for custom endpoint
+        max_completion_tokens: 16384,  // Codex supports higher token limits
+        temperature: 0.1,  // Lower for more predictable refactoring
         top_p: 1.0,
         frequency_penalty: 0.0,
-        presence_penalty: 0.0,
-        response_format: { type: 'json_object' }  // Force JSON output
+        presence_penalty: 0.0
       })
     });
 
     if (!response.ok) {
       const errorBody = await response.text();
-      throw new Error(`Azure OpenAI API error: ${response.status} - ${errorBody}`);
+      core.warning(`Azure OpenAI API error: ${response.status} - ${errorBody}`);
+      throw new Error(`Azure OpenAI API error: ${response.status}`);
     }
 
     const data = await response.json();
     const content = data.choices[0].message.content;
     
+    core.info(` AI response received (${content.length} chars)`);
+    
     try {
       return JSON.parse(content);
     } catch (error) {
-      core.warning(`Failed to parse AI response as JSON: ${content}`);
+      core.warning(`Failed to parse AI response as JSON: ${content.substring(0, 200)}...`);
       throw new Error('AI response was not valid JSON');
     }
   }
