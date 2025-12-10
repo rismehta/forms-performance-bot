@@ -100,8 +100,9 @@ export class URLAnalyzer {
       // Get rendered HTML (after JavaScript execution)
       const renderedHTML = await page.content();
 
-      // Extract JSON data from rendered page
-      const jsonData = this.jsonExtractor.extract(renderedHTML);
+      // Extract JSON data from rendered page (supports both EDS and Core Components)
+      // Pass page object for Core Components to use authenticated session
+      const jsonData = await this.jsonExtractor.extract(renderedHTML, url, page);
 
       await browser.close();
       browser = null;
