@@ -1,6 +1,6 @@
 import * as core from '@actions/core';
 import * as github from '@actions/github';
-import { readdirSync, readFileSync, statSync } from 'fs';
+import { readdirSync, readFileSync, statSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { URLAnalyzer } from './analyzers/url-analyzer.js';
 import { FormAnalyzer } from './analyzers/form-analyzer.js';
@@ -12,6 +12,7 @@ import { FormCSSAnalyzer } from './analyzers/form-css-analyzer.js';
 import { CustomFunctionAnalyzer } from './analyzers/custom-function-analyzer.js';
 import { AIAutoFixAnalyzer } from './analyzers/ai-autofix-analyzer.js';
 import { FormPRReporter } from './reporters/pr-reporter-form.js';
+import { HTMLReporter } from './reporters/html-reporter.js';
 import { extractURLsFromPR } from './utils/github-helper.js';
 import { loadConfig } from './utils/config-loader.js';
 
@@ -250,7 +251,22 @@ async function run() {
       }
     }
     
-    // Generate and post PR comment
+    // Generate HTML report (for GitHub artifact)
+    core.info(' Generating detailed HTML report...');
+    const htmlReporter = new HTMLReporter();
+    const htmlReport = htmlReporter.generateReport(results, {
+      before: urls.before,
+      after: urls.after,
+      beforeData,
+      afterData
+    }, prNumber, `${owner}/${repo}`);
+    
+    // Save HTML report to file (will be uploaded as artifact)
+    const reportPath = join(process.cwd(), 'performance-report.html');
+    writeFileSync(reportPath, htmlReport, 'utf-8');
+    core.info(` HTML report saved to: ${reportPath}`);
+    
+    // Generate and post minimal PR comment (with link to artifact)
     const reporter = new FormPRReporter(octokit, owner, repo, prNumber);
     await reporter.generateReport(results, {
       before: urls.before,
@@ -259,7 +275,7 @@ async function run() {
       afterData,  // Include performance metrics
       autoFixSuggestions, // Include AI-generated fix suggestions
       autoFixPR, // Include auto-fix PR details
-    });
+    }, prNumber, `${owner}/${repo}`);
 
     // Fail the build if critical issues are detected
     if (criticalIssues.hasCritical) {
