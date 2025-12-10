@@ -171,8 +171,8 @@ Respond ONLY with valid JSON:
         {
           name: 'Code length sanity',
           check: (orig, refac) => {
-            const origLines = orig.split('\n').filter(l => l.trim()).length;
-            const refacLines = refac.split('\n').filter(l => l.trim()).length;
+            const origLines = (orig || '').split('\n').filter(l => l.trim()).length;
+            const refacLines = (refac || '').split('\n').filter(l => l.trim()).length;
             
             // Refactored should be within 50-150% of original (not drastically shorter/longer)
             if (refacLines < origLines * 0.5) {
@@ -295,6 +295,9 @@ Respond ONLY with valid JSON:
       }
 
       const content = readFileSync(filePath, 'utf-8');
+      if (!content || typeof content !== 'string') {
+        return `function ${issue.functionName}() { /* file read error */ }`;
+      }
       const lines = content.split('\n');
       
       // Find function definition
@@ -1306,7 +1309,7 @@ ${hasAIRefactoring ? '\n REVIEW CHECKLIST:\n- [ ] Test all affected functions\n-
         const fileContent = readFileSync(filePath, 'utf-8');
         
         // PHASE 1 ENHANCEMENT: Send full file + related files for better context
-        const enhancedContext = this.buildEnhancedContext(issue.file, fileContent);
+        const enhancedContext = this.buildCSSEnhancedContext(issue.file, fileContent);
         
         // Generate fix using AI with enhanced context
         const fix = await this.generateImportFix(issue, enhancedContext, fileContent);
@@ -1351,7 +1354,7 @@ ${hasAIRefactoring ? '\n REVIEW CHECKLIST:\n- [ ] Test all affected functions\n-
         const fileContent = readFileSync(filePath, 'utf-8');
         
         // PHASE 1 ENHANCEMENT: Send full file + related files
-        const enhancedContext = this.buildEnhancedContext(issue.file, fileContent);
+        const enhancedContext = this.buildCSSEnhancedContext(issue.file, fileContent);
         
         const fix = await this.generateBackgroundImageFix(issue, enhancedContext, fileContent);
         
@@ -1820,10 +1823,15 @@ export function ${issue.functionName}(field, newState, globals) {
   }
 
   /**
-   * Build enhanced context for AI with full file + related files + patterns
+   * Build enhanced context for CSS fixes with full file + related files + patterns
    * PHASE 1 ENHANCEMENT: Much richer context for better suggestions
    */
-  buildEnhancedContext = (targetFile, fileContent) => {
+  buildCSSEnhancedContext = (targetFile, fileContent) => {
+    // Defensive check for fileContent
+    if (!fileContent || typeof fileContent !== 'string') {
+      return { targetFile, fullContent: '', relatedFiles: {}, projectPatterns: {}, fileStats: { lines: 0, size: '0KB' } };
+    }
+    
     const context = {
       targetFile,
       fullContent: fileContent,
@@ -2046,10 +2054,21 @@ Focus on performance impact and Core Web Vitals (FCP, LCP, TBT, INP).`;
     
     core.info(` AI response received (${content.length} chars)`);
     
+    // Strip markdown code blocks if present (```json ... ``` or ``` ... ```)
+    let cleanContent = content.trim();
+    if (cleanContent.startsWith('```')) {
+      // Remove opening ```json or ```
+      cleanContent = cleanContent.replace(/^```(?:json)?\s*\n?/, '');
+      // Remove closing ```
+      cleanContent = cleanContent.replace(/\n?```\s*$/, '');
+      cleanContent = cleanContent.trim();
+      core.info(` Stripped markdown code blocks from AI response`);
+    }
+    
     try {
-      return JSON.parse(content);
+      return JSON.parse(cleanContent);
     } catch (error) {
-      core.warning(`Failed to parse AI response as JSON: ${content.substring(0, 200)}...`);
+      core.warning(`Failed to parse AI response as JSON: ${cleanContent.substring(0, 200)}...`);
       throw new Error('AI response was not valid JSON');
     }
   }
