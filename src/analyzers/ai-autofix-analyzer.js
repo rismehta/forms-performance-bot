@@ -2001,12 +2001,8 @@ Focus on performance impact and Core Web Vitals (FCP, LCP, TBT, INP).`;
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt }
         ],
-        model: this.azureModel,  // Model in body for custom endpoint
-        max_output_tokens: 16384,  // Responses API uses max_output_tokens
-        temperature: 0.1,  // Lower for more predictable refactoring
-        top_p: 1.0,
-        frequency_penalty: 0.0,
-        presence_penalty: 0.0
+        max_output_tokens: 16384,
+        model: this.azureModel  // Only parameters from your curl example
       })
     });
 
