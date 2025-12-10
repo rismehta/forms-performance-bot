@@ -112,8 +112,9 @@ jobs:
       - name: Run Performance Bot
         uses: rismehta/forms-performance-bot@v1
         with:
-          github-token: ${{ secrets.PAT_TOKEN }}  # Use PAT for PR creation + Gist
+          github-token: ${{ secrets.GITHUB_TOKEN }}  # Default token (has checks:write)
         env:
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}  # Only for PR creation + Gist
           # Optional: Enable AI Auto-Fix with Codex
           AZURE_API_KEY: ${{ secrets.AZURE_API_KEY }}
           AZURE_OPENAI_ENDPOINT: 'https://your-endpoint.openai.azure.com/openai/responses'

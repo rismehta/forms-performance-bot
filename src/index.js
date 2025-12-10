@@ -17,6 +17,23 @@ import { extractURLsFromPR } from './utils/github-helper.js';
 import { loadConfig } from './utils/config-loader.js';
 
 /**
+ * Get tokens for different operations
+ * - GITHUB_TOKEN (default): For Checks API, PR comments, and reading files
+ * - PAT_TOKEN (optional): Only needed for PR creation and Gist creation
+ */
+function getTokens() {
+  const defaultToken = core.getInput('github-token', { required: true });
+  const patToken = process.env.PAT_TOKEN || defaultToken;
+  
+  return {
+    // Use default GITHUB_TOKEN for most operations (has checks:write permission)
+    defaultToken,
+    // Use PAT only for PR creation (GITHUB_TOKEN can't trigger workflows) and Gist (needs gist scope)
+    patToken
+  };
+}
+
+/**
  * Main entry point for the performance bot
  */
 async function run() {
@@ -29,8 +46,16 @@ async function run() {
 
     // Get GitHub context
     const context = github.context;
-    const token = core.getInput('github-token', { required: true });
-    const octokit = github.getOctokit(token);
+    const tokens = getTokens();
+    
+    // Use default GITHUB_TOKEN for Checks API and PR comments
+    // This token has checks:write permission from workflow
+    const octokit = github.getOctokit(tokens.defaultToken);
+    
+    // Use PAT only for operations that need it (PR creation, Gist)
+    const patOctokit = tokens.patToken !== tokens.defaultToken 
+      ? github.getOctokit(tokens.patToken) 
+      : octokit;
 
     // Verify this is a pull request
     if (!context.payload.pull_request) {
@@ -272,7 +297,7 @@ async function run() {
       try {
         autoFixCommit = await aiAutoFixAnalyzer.applyFixesToCurrentPR(
           autoFixSuggestions.suggestions,
-          octokit,
+          patOctokit,  // Use PAT for pushing commits
           owner,
           repo,
           prBranch  // Commit to the feature branch itself
@@ -309,7 +334,7 @@ async function run() {
     core.info(' Uploading HTML report to GitHub Gist for inline viewing...');
     let gistUrl = null;
     try {
-      const gistResponse = await octokit.rest.gists.create({
+      const gistResponse = await patOctokit.rest.gists.create({
         description: `Performance Report - PR #${prNumber} - ${repo}`,
         public: false, // Private gist
         files: {
@@ -360,7 +385,7 @@ async function run() {
       if (httpDomFixes.length > 0) {
         core.info(` Posting ${httpDomFixes.length} line-level PR review comment(s)...`);
         try {
-          await aiAutoFixAnalyzer.postPRReviewComments(
+          const { reviewComments, annotations } = await aiAutoFixAnalyzer.postPRReviewComments(
             httpDomFixes,
             octokit,
             owner,
@@ -368,7 +393,14 @@ async function run() {
             prNumber,
             context.payload.pull_request.head.sha
           );
-          core.info(` Posted ${httpDomFixes.length} line-level suggestion(s) on PR`);
+          
+          if (reviewComments.length > 0) {
+            core.info(` Posted ${reviewComments.length} line-level suggestion(s) on PR`);
+          } else {
+            core.warning(' No line-level comments posted - files not in PR diff');
+            core.warning('   AI suggestions are visible in main PR comment body instead');
+            core.warning('   Line-level comments only work for files modified in this PR');
+          }
         } catch (error) {
           core.warning(` Failed to post PR review comments: ${error.message}`);
           core.warning('Suggestions are still visible in main PR comment');

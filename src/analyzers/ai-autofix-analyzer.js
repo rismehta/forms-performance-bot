@@ -267,11 +267,29 @@ Respond ONLY with valid JSON:
         {
           name: 'Has defensive checks',
           check: (orig, refac) => {
-            // Should have defensive checks (if, ?, ||, &&)
-            const hasNullCheck = /if\s*\([^)]*(!|===?\s*null|===?\s*undefined|\|\||&&|\?\.|\?\?)/.test(refac);
-            const hasTryCatch = /try\s*\{/.test(refac);
+            // Should have defensive checks (if, ?, ||, &&, try-catch)
+            // More lenient patterns to catch various defensive coding styles
+            const patterns = [
+              /if\s*\(/,                           // Any if statement
+              /\?\.(?!\.)$/m,                      // Optional chaining (not followed by another dot to avoid false positives)
+              /\?\?/,                              // Nullish coalescing
+              /\|\|/,                              // OR operator
+              /&&/,                                // AND operator
+              /try\s*\{/,                          // Try-catch
+              /typeof\s+\w+\s*[!=]==?\s*['"]undefined['"]/,  // typeof checks
+              /===?\s*null/,                       // Null checks
+              /!==?\s*undefined/,                  // Undefined checks
+              /!\s*\w+/                            // Negation checks (e.g., if (!obj))
+            ];
             
-            if (!hasNullCheck && !hasTryCatch) {
+            // Check if any pattern exists in refactored code
+            const hasDefensiveCode = patterns.some(pattern => pattern.test(refac));
+            
+            // Also check if new defensive code was added (not just existing)
+            const origDefensiveCount = patterns.filter(p => p.test(orig)).length;
+            const refacDefensiveCount = patterns.filter(p => p.test(refac)).length;
+            
+            if (!hasDefensiveCode || refacDefensiveCount <= origDefensiveCount) {
               return { valid: false, error: 'No defensive checks added (expected if/null checks or try-catch)' };
             }
             return { valid: true };
@@ -1249,138 +1267,6 @@ ${hasAIRefactoring ? '\n REVIEW CHECKLIST:\n- [ ] Test all affected functions\n-
           description = `Comment out background-image in ${fix.file}`;
           impact = 'Enables lazy loading when replaced with <img>';
         }
-      }
-      
-    } else if (fix.type === 'custom-function-http-fix') {
-      // Apply AI-generated refactored code for HTTP requests
-      const lines = content.split('\n');
-      const functionName = fix.functionName || 'unknown';
-      
-      // Find the function definition
-      const functionPattern = new RegExp(`(export\\s+)?(async\\s+)?function\\s+${functionName}\\s*\\(|const\\s+${functionName}\\s*=|${functionName}\\s*:\\s*(async\\s+)?function`);
-      const functionLineIndex = lines.findIndex(line => functionPattern.test(line));
-      
-      if (functionLineIndex !== -1) {
-        // Find the end of the function (closing brace)
-        let braceCount = 0;
-        let inFunction = false;
-        let functionEndIndex = functionLineIndex;
-        
-        for (let i = functionLineIndex; i < lines.length; i++) {
-          const line = lines[i];
-          for (const char of line) {
-            if (char === '{') {
-              braceCount++;
-              inFunction = true;
-            } else if (char === '}') {
-              braceCount--;
-              if (inFunction && braceCount === 0) {
-                functionEndIndex = i;
-                break;
-              }
-            }
-          }
-          if (inFunction && braceCount === 0) break;
-        }
-        
-        // Add AI-generated code with clear attribution
-        const indent = lines[functionLineIndex].match(/^(\s*)/)[1];
-        const aiHeader = [
-          `${indent}// ============================================================`,
-          `${indent}//   AI-GENERATED REFACTORING (Azure OpenAI GPT-4.1)`,
-          `${indent}// Original: Direct HTTP call in custom function`,
-          `${indent}// Refactored: Trigger via custom event for better performance`,
-          `${indent}// REVIEW REQUIRED: Test thoroughly before merging`,
-          `${indent}// ============================================================`,
-          ''
-        ];
-        
-        // Replace function with AI-generated code
-        if (fix.refactoredCode) {
-          lines.splice(functionLineIndex, functionEndIndex - functionLineIndex + 1, ...aiHeader, fix.refactoredCode);
-          content = lines.join('\n');
-          description = `Refactor ${functionName}() to use form-level request() (AI-generated)`;
-          impact = 'Eliminates blocking HTTP calls, enables request queueing and error handling';
-        } else {
-          // Fallback: add warning comment if no AI code available
-          const warningComment = [
-            `${indent}//  PERFORMANCE WARNING: This function makes HTTP requests`,
-            `${indent}// ISSUE: Direct HTTP calls block form interactions`,
-            `${indent}// FIX: Move to form-level request() via custom events`,
-          ];
-          lines.splice(functionLineIndex, 0, ...warningComment);
-          content = lines.join('\n');
-          description = `Annotate ${functionName}() with HTTP request warning`;
-          impact = 'Flags blocking HTTP calls for manual refactoring';
-        }
-      } else {
-        throw new Error(`Could not find function definition for ${functionName}`);
-      }
-      
-    } else if (fix.type === 'custom-function-dom-fix') {
-      // Apply AI-generated refactored code for DOM access
-      const lines = content.split('\n');
-      const functionName = fix.functionName || 'unknown';
-      
-      // Find the function definition
-      const functionPattern = new RegExp(`(export\\s+)?(async\\s+)?function\\s+${functionName}\\s*\\(|const\\s+${functionName}\\s*=|${functionName}\\s*:\\s*(async\\s+)?function`);
-      const functionLineIndex = lines.findIndex(line => functionPattern.test(line));
-      
-      if (functionLineIndex !== -1) {
-        // Find the end of the function (closing brace)
-        let braceCount = 0;
-        let inFunction = false;
-        let functionEndIndex = functionLineIndex;
-        
-        for (let i = functionLineIndex; i < lines.length; i++) {
-          const line = lines[i];
-          for (const char of line) {
-            if (char === '{') {
-              braceCount++;
-              inFunction = true;
-            } else if (char === '}') {
-              braceCount--;
-              if (inFunction && braceCount === 0) {
-                functionEndIndex = i;
-                break;
-              }
-            }
-          }
-          if (inFunction && braceCount === 0) break;
-        }
-        
-        // Add AI-generated code with clear attribution
-        const indent = lines[functionLineIndex].match(/^(\s*)/)[1];
-        const aiHeader = [
-          `${indent}// ============================================================`,
-          `${indent}//   AI-GENERATED REFACTORING (Azure OpenAI GPT-4.1)`,
-          `${indent}// Original: Direct DOM manipulation in custom function`,
-          `${indent}// Refactored: Use setProperty() for state management`,
-          `${indent}// REVIEW REQUIRED: Test thoroughly before merging`,
-          `${indent}// ============================================================`,
-          ''
-        ];
-        
-        // Replace function with AI-generated code
-        if (fix.refactoredCode) {
-          lines.splice(functionLineIndex, functionEndIndex - functionLineIndex + 1, ...aiHeader, fix.refactoredCode);
-          content = lines.join('\n');
-          description = `Refactor ${functionName}() to use setProperty() instead of DOM (AI-generated)`;
-          impact = 'Eliminates direct DOM access, uses form state management';
-        } else {
-          // Fallback: add warning comment if no AI code available
-          const warningComment = [
-            `${indent}//  PERFORMANCE WARNING: This function accesses DOM directly`,
-            `${indent}// ISSUE: Bypasses form state management`,
-            `${indent}// FIX: Use setProperty() instead of direct DOM manipulation`,
-          ];
-          lines.splice(functionLineIndex, 0, ...warningComment);
-          content = lines.join('\n');
-          description = `Annotate ${functionName}() with DOM access warning`;
-          impact = 'Flags direct DOM manipulation for manual refactoring';
-        }
-      } else {
-        throw new Error(`Could not find function definition for ${functionName}`);
       }
       
     } else if (fix.type === 'custom-function-runtime-error-fix') {
@@ -2472,34 +2358,56 @@ ${enhancedContext.fullFileContent}
 
 **Task:** Add proper null/undefined checks to prevent these runtime errors.
 
+**CONCRETE EXAMPLE (showing what we expect):**
+
+BEFORE (crashes on null):
+\`\`\`javascript
+function formatPhoneNumber(phone, formData) {
+  const cleaned = phone.toString().replace(/\\D/g, '');
+  return formData.countryCode + '-' + cleaned;
+}
+\`\`\`
+
+AFTER (with defensive checks):
+\`\`\`javascript
+function formatPhoneNumber(phone, formData) {
+  // Add null check before toString()
+  if (!phone) {
+    return '';
+  }
+  const cleaned = phone.toString().replace(/\\D/g, '');
+  
+  // Add null check before accessing properties
+  if (!formData || !formData.countryCode) {
+    return cleaned;
+  }
+  
+  return formData.countryCode + '-' + cleaned;
+}
+\`\`\`
+
 **Response Format (JSON ONLY):**
 {
-  "jsCode": "refactored function with null checks",
+  "jsCode": "COMPLETE refactored function code with defensive checks",
   "testingSteps": "how to test the fix"
 }
 
 **CRITICAL RULES:**
-1. ADD null/undefined checks before property access
-2. PRESERVE function signature (parameters, name) exactly
-3. PRESERVE all existing logic and calculations
-4. PRESERVE all setProperty, setVariable, dispatchEvent calls
-5. ADD checks like: if (!obj || !obj.property) { return; }
-6. DO NOT change variable names
-7. DO NOT remove any logic
-8. DO NOT simplify or refactor existing code
-9. ONLY ADD defensive checks where errors occurred
+1. RETURN THE COMPLETE FUNCTION with all original code intact
+2. ADD if checks BEFORE operations that can fail (like .toString(), .split(), property access)
+3. PRESERVE function signature (parameters, name) exactly
+4. PRESERVE all existing logic and calculations
+5. PRESERVE all setProperty, setVariable, dispatchEvent calls
+6. DO NOT change variable names or remove any logic
+7. ONLY ADD defensive checks - don't refactor or simplify
 
-**Example Patterns:**
-- "Cannot read properties of null (reading 'toString')"
-  → Add: if (!value) { return; } before value.toString()
+**Defensive Check Patterns:**
+- Before .toString(): if (!value) { return ''; }
+- Before .split(): if (!str || typeof str !== 'string') { return []; }
+- Before property access: if (!obj || !obj.property) { return null; }
+- Before field.$value: if (!field || field.$value === undefined) { return; }
 
-- "Cannot read properties of undefined (reading 'split')"
-  → Add: if (!str || typeof str !== 'string') { return; } before str.split()
-
-- "Cannot read properties of undefined (reading '$value')"
-  → Add: if (!field || !field.$value) { return; } before field.$value
-
-Respond with ONLY the JSON object, no markdown formatting.`;
+Respond with ONLY the JSON object containing the COMPLETE function code, no markdown formatting.`;
 
     try {
       const parsed = await this.callAzureOpenAI(`You are an expert at adding defensive null checks to JavaScript functions.`, userPrompt);
@@ -2537,47 +2445,42 @@ Respond with ONLY the JSON object, no markdown formatting.`;
     const annotations = [];
     
     // 1. Try to create GitHub Check with annotations (works for ALL files)
-    // NOTE: Checks API requires GitHub App authentication, not PAT tokens
-    // Skip this if using PAT to avoid authentication errors
-    const isGitHubApp = !!process.env.GITHUB_APP_ID; // Only attempt if GitHub App is configured
+    // The default GITHUB_TOKEN in GitHub Actions has checks:write permission
+    // This works without needing a GitHub App!
     
-    if (isGitHubApp) {
-      try {
-        core.info(' Creating GitHub Check with annotations...');
-        
-        const checkAnnotations = httpDomFixes.map(fix => ({
-          path: fix.file,
-          start_line: fix.line || 1,
-          end_line: fix.line || 1,
-          annotation_level: fix.severity === 'critical' ? 'failure' : 'warning',
-          title: fix.title || `${fix.type === 'custom-function-http-fix' ? 'HTTP Request' : 'DOM Access'} in Custom Function`,
-          message: this.buildAnnotationMessage(fix),
-          raw_details: fix.refactoredCode ? `Suggested fix:\n\n${fix.refactoredCode}` : undefined
-        }));
-        
-        await octokit.rest.checks.create({
-          owner,
-          repo,
-          name: 'AEM Forms Performance Analysis',
-          head_sha: commitSha,
-          status: 'completed',
-          conclusion: httpDomFixes.length > 0 ? 'neutral' : 'success',
-          output: {
-            title: `${httpDomFixes.length} Performance Issue(s) Detected`,
-            summary: `Found ${httpDomFixes.length} issue(s) in custom functions. Click each annotation for AI-generated fix suggestions.`,
-            annotations: checkAnnotations.slice(0, 50) // GitHub limit: 50 annotations per check
-          }
-        });
-        
-        core.info(`  Created check with ${checkAnnotations.length} annotation(s)`);
-        annotations.push(...checkAnnotations);
-        
-      } catch (error) {
-        core.warning(` Failed to create GitHub Check: ${error.message}`);
-      }
-    } else {
-      core.info(' Skipping GitHub Checks API (requires GitHub App, using PAT instead)');
-      core.info('   Line-level comments will be posted for files in PR diff');
+    try {
+      core.info(' Creating GitHub Check with annotations...');
+      
+      const checkAnnotations = httpDomFixes.map(fix => ({
+        path: fix.file,
+        start_line: fix.line || 1,
+        end_line: fix.line || 1,
+        annotation_level: fix.severity === 'critical' ? 'failure' : 'warning',
+        title: fix.title || `${fix.type === 'custom-function-http-fix' ? 'HTTP Request' : 'DOM Access'} in Custom Function`,
+        message: this.buildAnnotationMessage(fix),
+        raw_details: fix.refactoredCode ? `Suggested fix:\n\n${fix.refactoredCode}` : undefined
+      }));
+      
+      await octokit.rest.checks.create({
+        owner,
+        repo,
+        name: 'AEM Forms Performance Analysis',
+        head_sha: commitSha,
+        status: 'completed',
+        conclusion: httpDomFixes.length > 0 ? 'neutral' : 'success',
+        output: {
+          title: `${httpDomFixes.length} Performance Issue(s) Detected`,
+          summary: `Found ${httpDomFixes.length} issue(s) in custom functions. Click each annotation for AI-generated fix suggestions.`,
+          annotations: checkAnnotations.slice(0, 50) // GitHub limit: 50 annotations per check
+        }
+      });
+      
+      core.info(`  Created check with ${checkAnnotations.length} annotation(s)`);
+      annotations.push(...checkAnnotations);
+      
+    } catch (error) {
+      core.warning(` Failed to create GitHub Check: ${error.message}`);
+      core.warning('   Check annotations unavailable - AI suggestions in PR comment body');
     }
     
     // 2. Try PR Review Comments for files in PR diff (gives "Apply suggestion" button)
