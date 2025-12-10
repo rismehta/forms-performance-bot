@@ -38,6 +38,13 @@ export class AIAutoFixAnalyzer {
     try {
       // Extract function code and enhanced context
       const functionCode = this.extractFunctionCode(issue);
+      
+      // Skip if extraction failed
+      if (!functionCode) {
+        core.warning(`Skipping ${issue.functionName}() - could not extract function code`);
+        return this.getDefaultRefactoredCode(issue, issueType);
+      }
+      
       const enhancedContext = this.buildEnhancedContext(issue);
       
       const userPrompt = issueType === 'http' 
@@ -407,21 +414,36 @@ Respond ONLY with valid JSON:
     try {
       const filePath = resolve(this.workspaceRoot, issue.file);
       if (!existsSync(filePath)) {
-        return `function ${issue.functionName}() { /* code not available */ }`;
+        core.warning(`File not found for ${issue.functionName}(): ${filePath}`);
+        return null; // Signal failure
       }
 
       const content = readFileSync(filePath, 'utf-8');
       if (!content || typeof content !== 'string') {
-        return `function ${issue.functionName}() { /* file read error */ }`;
+        core.warning(`Could not read file for ${issue.functionName}(): ${filePath}`);
+        return null; // Signal failure
       }
       const lines = content.split('\n');
       
-      // Find function definition
-      const functionPattern = new RegExp(`(export\\s+)?(async\\s+)?function\\s+${issue.functionName}\\s*\\(|const\\s+${issue.functionName}\\s*=|${issue.functionName}\\s*:\\s*(async\\s+)?function`);
-      const startIndex = lines.findIndex(line => functionPattern.test(line));
+      // Find function definition - try multiple patterns
+      const patterns = [
+        new RegExp(`export\\s+(default\\s+)?(async\\s+)?function\\s+${issue.functionName}\\s*\\(`),
+        new RegExp(`function\\s+${issue.functionName}\\s*\\(`),
+        new RegExp(`const\\s+${issue.functionName}\\s*=\\s*(async\\s+)?\\(`),
+        new RegExp(`${issue.functionName}\\s*:\\s*(async\\s+)?function\\s*\\(`),
+        new RegExp(`${issue.functionName}\\s*=\\s*(async\\s+)?\\(`),
+      ];
+      
+      let startIndex = -1;
+      for (const pattern of patterns) {
+        startIndex = lines.findIndex(line => pattern.test(line));
+        if (startIndex !== -1) break;
+      }
       
       if (startIndex === -1) {
-        return `function ${issue.functionName}() { /* definition not found */ }`;
+        core.warning(`Function definition not found for ${issue.functionName}() in ${issue.file}`);
+        core.info(`  Tried patterns: export function, function, const =, object method, arrow function`);
+        return null; // Signal failure
       }
 
       // Extract function body (simple brace matching)
@@ -444,10 +466,18 @@ Respond ONLY with valid JSON:
           break;
         }
       }
+      
+      if (!started || braceCount !== 0) {
+        core.warning(`Could not extract complete function body for ${issue.functionName}()`);
+        return null; // Signal failure
+      }
 
-      return lines.slice(startIndex, endIndex + 1).join('\n');
+      const extracted = lines.slice(startIndex, endIndex + 1).join('\n');
+      core.info(`  Extracted ${issue.functionName}(): ${extracted.length} chars`);
+      return extracted;
     } catch (error) {
-      return `function ${issue.functionName}() { /* extraction failed */ }`;
+      core.warning(`Extraction failed for ${issue.functionName}(): ${error.message}`);
+      return null; // Signal failure
     }
   }
 
@@ -693,10 +723,21 @@ Form JSON event:
 }
 \`\`\`
 
-**Generate JSON response with:**
-- jsCode: Refactored function with SAME signature, SAME logic, ONLY HTTP extracted
-- formJsonSnippet: Form JSON event with request() call
-- testingSteps: How to test`;
+**Response Format (JSON ONLY):**
+{
+  "jsCode": "COMPLETE refactored function with SAME signature, SAME logic, ONLY HTTP call extracted to event dispatcher",
+  "formJsonSnippet": "Form JSON event configuration with request() call (for Visual Rule Editor)",
+  "testingSteps": "Step-by-step testing instructions"
+}
+
+**VALIDATION CHECKLIST:**
+✓ Function signature preserved exactly
+✓ All parameters in same order
+✓ All validation logic preserved
+✓ All data processing preserved
+✓ Only HTTP call removed (fetch/axios/request)
+✓ Event dispatcher added with callback
+✓ Form JSON snippet provided`;
   }
 
   /**
@@ -790,10 +831,21 @@ export function myDOMFunction(value, targetField, globals) {
 }
 \`\`\`
 
-**Generate JSON response with:**
-- jsCode: Refactored function with SAME signature, SAME logic, ONLY DOM → setProperty
-- componentExample: Custom component code (if complex UI needed)
-- testingSteps: How to test`;
+**Response Format (JSON ONLY):**
+{
+  "jsCode": "COMPLETE refactored function with SAME signature, SAME logic, ONLY DOM manipulation → setProperty",
+  "componentExample": "Custom component code (only if complex UI logic needed beyond setProperty)",
+  "testingSteps": "Step-by-step testing instructions"
+}
+
+**VALIDATION CHECKLIST:**
+✓ Function signature preserved exactly
+✓ All parameters in same order
+✓ All validation logic preserved
+✓ All data processing preserved
+✓ Only DOM manipulation removed (document.*, .innerHTML, .style)
+✓ setProperty() used instead
+✓ Component example provided (if needed)`;
   }
 
   /**
@@ -1595,24 +1647,42 @@ ${hasAIRefactoring ? '\n REVIEW CHECKLIST:\n- [ ] Test all affected functions\n-
           cssContent: cssContent,
           componentFile: componentPath ? relative(this.workspaceRoot, componentPath) : null,
           componentContent: componentContent,
-          imagePath: issue.imagePath || '',
+          imagePath: issue.imageUrl || issue.imagePath || '',  // CSS analyzer uses 'imageUrl'
           selector: issue.selector || '',
           cssWidth,  // Extracted from CSS or 'auto'
           cssHeight, // Extracted from CSS or 'auto'
         };
         
+        // Log what we extracted for debugging
+        core.info(`  Image path: ${enhancedContext.imagePath || 'NOT FOUND'}`);
+        core.info(`  CSS dimensions: ${cssWidth} x ${cssHeight}`);
+        
+        // Skip if we couldn't extract the image path
+        if (!enhancedContext.imagePath) {
+          core.warning(`Skipping ${issue.file}:${issue.line} - could not extract image path from CSS`);
+          core.warning(`  CSS issue: ${issue.message}`);
+          continue;
+        }
+        
         const fix = await this.generateBackgroundImageFix(issue, enhancedContext, cssContent, componentContent);
         
         if (fix) {
           // VALIDATE: If component was provided, ensure AI preserved all critical code
+          let componentValidationFailed = false;
+          let validationErrors = [];
+          
           if (componentContent && fix.fixedComponentCode) {
             const validation = this.validateComponentRefactoring(componentContent, fix.fixedComponentCode);
             if (!validation.valid) {
-              core.warning(`Component refactoring rejected for ${relative(this.workspaceRoot, componentPath)}:`);
+              componentValidationFailed = true;
+              validationErrors = validation.errors;
+              
+              core.warning(`Component refactoring REJECTED for ${relative(this.workspaceRoot, componentPath)}:`);
               validation.errors.forEach(err => core.warning(`  - ${err}`));
-              core.warning('  Skipping auto-fix for this component (manual review required)');
-              core.warning(`  Original component length: ${componentContent.length} chars`);
-              core.warning(`  AI refactored length: ${fix.fixedComponentCode.length} chars`);
+              core.warning('  Only CSS fix will be applied (component requires manual review)');
+              core.warning(`  Original component: ${componentContent.length} chars`);
+              core.warning(`  AI refactored: ${fix.fixedComponentCode.length} chars`);
+              
               // Don't include fixedComponentCode if validation failed
               fix.fixedComponentCode = null;
               fix.componentFile = null;
@@ -2055,17 +2125,31 @@ export function ${issue.functionName}(field, newState, globals) {
     for (const issue of runtimeErrorIssues.slice(0, 5)) { // Top 5
       try {
         // Extract function code
+        // Runtime errors now include file property from custom function analysis
+        core.info(`Extracting ${issue.functionName}() from ${issue.file || 'blocks/form/functions.js'}`);
         const functionCode = this.extractFunctionCode(issue);
         
-        // Runtime errors don't have a 'file' property, use default
-        const issueWithFile = {
-          ...issue,
-          file: issue.file || 'blocks/form/functions.js'
-        };
-        const enhancedContext = this.buildEnhancedContext(issueWithFile);
+        // Skip if extraction failed
+        if (!functionCode) {
+          core.warning(`Skipping ${issue.functionName}() - could not extract function code from ${issue.file}`);
+          continue;
+        }
         
-        if (!enhancedContext || !functionCode) {
+        // Log what was extracted
+        core.info(`  Extracted ${functionCode.length} chars`);
+        core.info(`  Preview: ${functionCode.substring(0, 100)}...`);
+        
+        const enhancedContext = this.buildEnhancedContext(issue);
+        
+        if (!enhancedContext) {
           core.warning(`Could not extract context for ${issue.functionName}`);
+          continue;
+        }
+        
+        // Validate the extracted code has actual body (not just signature)
+        if (functionCode.length < 50 || !functionCode.includes('{') || functionCode.split('\n').length < 3) {
+          core.warning(`Skipping ${issue.functionName}() - extracted code too short or incomplete`);
+          core.warning(`  Extracted: ${functionCode}`);
           continue;
         }
         
@@ -2334,15 +2418,56 @@ ${fullFileContent}
 
 **Task:** Provide practical fix as JSON:
 {
-  "originalCode": "The @import line to replace",
-  "fixedCode": "Replacement code or comment with clear instructions",
-  "alternativeFix": "Alternative approach (bundling vs <link> tag)",
-  "explanation": "Why this fix improves FCP/LCP (1 sentence)"
+  "originalCode": "The exact @import line to replace (e.g., @import url('/fonts.css');)",
+  "fixedCode": "Replacement code or comment with build tool integration steps",
+  "alternativeFix": "Alternative approach if build tools not available",
+  "explanation": "Performance impact (1 sentence, mention FCP/LCP improvement)"
 }
 
+**CRITICAL RULES:**
+1. Extract EXACT @import line from the CSS file above as "originalCode"
+2. DO NOT invent imports that don't exist in the file
+3. Preserve all other CSS rules
+4. Provide actionable fix (not just generic advice)
+
+**CONCRETE EXAMPLES:**
+
+Example 1: With Build Tools
+BEFORE:
+\`\`\`css
+@import url('/styles/fonts.css');
+.header { color: blue; }
+\`\`\`
+
+AFTER (fixedCode):
+\`\`\`css
+/* @import url('/styles/fonts.css'); */
+/* PERFORMANCE FIX: Bundle fonts.css during build with webpack/rollup */
+/* Add to webpack.config.js: import './styles/fonts.css' */
+.header { color: blue; }
+\`\`\`
+
+Example 2: Without Build Tools
+BEFORE:
+\`\`\`css
+@import url('https://fonts.googleapis.com/css?family=Roboto');
+.text { font-family: Roboto; }
+\`\`\`
+
+AFTER (fixedCode):
+\`\`\`css
+/* @import url('https://fonts.googleapis.com/css?family=Roboto'); */
+/* PERFORMANCE FIX: Add to HTML <head> with preconnect: */
+/* <link rel="preconnect" href="https://fonts.googleapis.com"> */
+/* <link href="https://fonts.googleapis.com/css?family=Roboto&display=swap" rel="stylesheet"> */
+.text { font-family: Roboto; }
+\`\`\`
+
 **Requirements:**
-- If bundler detected, suggest bundling during build
-- Otherwise, suggest <link> tag in HTML
+- Extract exact @import line from actual file
+- Comment out the @import
+- Provide clear, actionable replacement steps
+- Mention specific build tool if detected (${buildToolInfo ? 'detected' : 'not detected'})
 - Keep explanation concise and performance-focused`;
 
     try {
@@ -2364,10 +2489,12 @@ ${fullFileContent}
 
 **CSS File:** ${enhancedContext.cssFile}
 **Component File:** ${enhancedContext.componentFile || 'Not found'}
-**Image Path:** ${enhancedContext.imagePath || issue.image}
+**Image Path:** ${enhancedContext.imagePath || '(extraction failed - check CSS background-image URL)'}
 **Selector:** ${enhancedContext.selector}
 **CSS Width:** ${enhancedContext.cssWidth || 'auto'} (use this or 'auto')
 **CSS Height:** ${enhancedContext.cssHeight || 'auto'} (use this or 'auto')
+
+**CRITICAL: If Image Path is "(extraction failed)", skip this fix - cannot proceed without valid image path.**
 
 **Current CSS:**
 \`\`\`css
@@ -2589,31 +2716,97 @@ Respond with ONLY the JSON object containing the COMPLETE function code, no mark
   }
 
   /**
-   * Post PR review comments and check annotations with AI suggestions
-   * Uses BOTH:
-   * 1. GitHub Checks API (annotations) - Works for ALL files, even not in PR diff
-   * 2. PR Review Comments - Only works for files in PR diff, but gives "Apply suggestion" button
+   * Create comprehensive GitHub Check with all performance issues
+   * Shows up alongside ESLint, build checks in PR Checks tab
    */
-  postPRReviewComments = async (httpDomFixes, octokit, owner, repo, prNumber, commitSha) => {
-    const reviewComments = [];
+  createPerformanceCheck = async (results, suggestions, octokit, owner, repo, prNumber, commitSha) => {
     const annotations = [];
     
-    // 1. Try to create GitHub Check with annotations (works for ALL files)
-    // The default GITHUB_TOKEN in GitHub Actions has checks:write permission
-    // This works without needing a GitHub App!
+    // Collect all critical issues as annotations
+    const criticalIssues = [];
+    
+    // 1. CSS @import issues (critical errors)
+    if (results.formCSS?.newIssues) {
+      results.formCSS.newIssues
+        .filter(i => i.type === 'css-import-blocking')
+        .forEach(issue => {
+          criticalIssues.push({
+            path: issue.file,
+            start_line: issue.line || 1,
+            end_line: issue.line || 1,
+            annotation_level: 'failure',
+            title: 'Blocking CSS @import',
+            message: `${issue.message}\n\nFix: Bundle CSS during build or use <link> tag in HTML.`,
+          });
+        });
+    }
+    
+    // 2. CSS background-image issues (critical errors)
+    if (results.formCSS?.newIssues) {
+      results.formCSS.newIssues
+        .filter(i => i.type === 'css-background-image')
+        .forEach(issue => {
+          criticalIssues.push({
+            path: issue.file,
+            start_line: issue.line || 1,
+            end_line: issue.line || 1,
+            annotation_level: 'failure',
+            title: 'CSS background-image cannot be lazy loaded',
+            message: `${issue.message}\n\nFix: Replace with <img loading="lazy"> for better performance.`,
+          });
+        });
+    }
+    
+    // 3. HTTP requests in custom functions
+    if (suggestions) {
+      suggestions
+        .filter(s => s.type === 'custom-function-http-fix')
+        .forEach(fix => {
+          criticalIssues.push({
+            path: fix.file,
+            start_line: fix.line || 1,
+            end_line: fix.line || 1,
+            annotation_level: 'failure',
+            title: `HTTP Request in ${fix.functionName}()`,
+            message: `${fix.description}\n\n**AI-Generated Fix Available** (see PR comment for details)`,
+            raw_details: fix.refactoredCode ? `AI-suggested refactoring:\n\n${fix.refactoredCode}` : undefined
+          });
+        });
+    }
+    
+    // 4. DOM access in custom functions
+    if (suggestions) {
+      suggestions
+        .filter(s => s.type === 'custom-function-dom-fix')
+        .forEach(fix => {
+          criticalIssues.push({
+            path: fix.file,
+            start_line: fix.line || 1,
+            end_line: fix.line || 1,
+            annotation_level: 'failure',
+            title: `DOM Access in ${fix.functionName}()`,
+            message: `${fix.description}\n\n**AI-Generated Fix Available** (see PR comment for details)`,
+            raw_details: fix.refactoredCode ? `AI-suggested refactoring:\n\n${fix.refactoredCode}` : undefined
+          });
+        });
+    }
+    
+    // 5. Slow rules
+    if (results.ruleCycles?.after?.slowRules?.length > 0) {
+      results.ruleCycles.after.slowRules.slice(0, 10).forEach(rule => {
+        criticalIssues.push({
+          path: 'form.json',
+          start_line: 1,
+          end_line: 1,
+          annotation_level: 'warning',
+          title: `Slow Rule: ${rule.field}`,
+          message: `Rule execution took ${rule.duration}ms (threshold: 50ms)\n\nExpression: ${rule.expression}\n\nOptimize rule logic to improve form responsiveness.`,
+        });
+      });
+    }
     
     try {
-      core.info(' Creating GitHub Check with annotations...');
-      
-      const checkAnnotations = httpDomFixes.map(fix => ({
-        path: fix.file,
-        start_line: fix.line || 1,
-        end_line: fix.line || 1,
-        annotation_level: fix.severity === 'critical' ? 'failure' : 'warning',
-        title: fix.title || `${fix.type === 'custom-function-http-fix' ? 'HTTP Request' : 'DOM Access'} in Custom Function`,
-        message: this.buildAnnotationMessage(fix),
-        raw_details: fix.refactoredCode ? `Suggested fix:\n\n${fix.refactoredCode}` : undefined
-      }));
+      const conclusion = criticalIssues.length > 0 ? 'action_required' : 'success';
       
       const checkResponse = await octokit.rest.checks.create({
         owner,
@@ -2621,25 +2814,38 @@ Respond with ONLY the JSON object containing the COMPLETE function code, no mark
         name: 'AEM Forms Performance Analysis',
         head_sha: commitSha,
         status: 'completed',
-        conclusion: httpDomFixes.length > 0 ? 'action_required' : 'success',  // More visible than 'neutral'
+        conclusion,
         output: {
-          title: `${httpDomFixes.length} Performance Issue(s) Detected`,
-          summary: `Found ${httpDomFixes.length} issue(s) in custom functions. Click each annotation for AI-generated fix suggestions.`,
-          annotations: checkAnnotations.slice(0, 50) // GitHub limit: 50 annotations per check
+          title: criticalIssues.length > 0 
+            ? `${criticalIssues.length} Performance Issue(s) Found` 
+            : 'All Performance Checks Passed',
+          summary: criticalIssues.length > 0
+            ? `Found ${criticalIssues.length} performance issue(s). Review annotations below for AI-powered fix suggestions.`
+            : 'No critical performance issues detected. Form meets performance best practices.',
+          annotations: criticalIssues.slice(0, 50) // GitHub limit: 50 annotations per check
         }
       });
       
-      core.info(`  Created check with ${checkAnnotations.length} annotation(s)`);
+      core.info(`  Created check "${checkResponse.data.name}" with ${criticalIssues.length} annotation(s)`);
       core.info(`  Check ID: ${checkResponse.data.id}`);
-      core.info(`  View annotations: PR → Checks tab → "AEM Forms Performance Analysis" (left sidebar)`);
-      annotations.push(...checkAnnotations);
+      core.info(`  Conclusion: ${conclusion}`);
+      core.info(`  View in: PR → Checks tab → "AEM Forms Performance Analysis"`);
       
     } catch (error) {
-      core.warning(` Failed to create GitHub Check: ${error.message}`);
-      core.warning('   Check annotations unavailable - AI suggestions in PR comment body');
+      core.warning(` Failed to create performance check: ${error.message}`);
     }
+  }
+
+  /**
+   * Post PR review comments and check annotations with AI suggestions
+   * Uses BOTH:
+   * 1. GitHub Checks API (annotations) - Works for ALL files, even not in PR diff
+   * 2. PR Review Comments - Only works for files in PR diff, but gives "Apply suggestion" button
+   */
+  postPRReviewComments = async (httpDomFixes, octokit, owner, repo, prNumber, commitSha) => {
+    const reviewComments = [];
     
-    // 2. Try PR Review Comments for files in PR diff (gives "Apply suggestion" button)
+    // Try PR Review Comments for files in PR diff (gives "Apply suggestion" button)
     for (const fix of httpDomFixes) {
       try {
         const commentBody = this.buildPRLineCommentBody(fix);
@@ -2668,7 +2874,7 @@ Respond with ONLY the JSON object containing the COMPLETE function code, no mark
       }
     }
     
-    return { reviewComments, annotations };
+    return { reviewComments };
   }
   
   /**

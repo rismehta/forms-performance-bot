@@ -247,16 +247,30 @@ async function run() {
       core.info(`Merging ${ruleCycleAnalysis.after.runtimeErrors.length} runtime error(s) into custom functions`);
       
       // Add runtime errors as issues to custom functions
+      // IMPORTANT: Match with custom function analysis to get file paths
+      const runtimeErrorsWithFiles = ruleCycleAnalysis.after.runtimeErrors.map(error => {
+        // Find the function in custom function analysis to get its file path
+        const functionInfo = customFunctionAnalysis.after.analysis?.find(
+          fn => fn.functionName === error.functionName
+        );
+        
+        return {
+          ...error,
+          file: functionInfo?.file || 'blocks/form/functions.js', // Use actual file or fallback
+          line: functionInfo?.line || 1
+        };
+      });
+      
       if (!customFunctionAnalysis.after.issues) {
         customFunctionAnalysis.after.issues = [];
       }
-      customFunctionAnalysis.after.issues.push(...ruleCycleAnalysis.after.runtimeErrors);
+      customFunctionAnalysis.after.issues.push(...runtimeErrorsWithFiles);
       
       // Add to newIssues for reporting
       if (!customFunctionAnalysis.newIssues) {
         customFunctionAnalysis.newIssues = [];
       }
-      customFunctionAnalysis.newIssues.push(...ruleCycleAnalysis.after.runtimeErrors);
+      customFunctionAnalysis.newIssues.push(...runtimeErrorsWithFiles);
       
       // Track runtime error count
       customFunctionAnalysis.after.runtimeErrorCount = ruleCycleAnalysis.after.runtimeErrorCount;
@@ -376,6 +390,25 @@ async function run() {
       gistUrl, // Direct browser link to HTML report
     }, prNumber, `${owner}/${repo}`);
     
+    // Create GitHub Check with all performance issues (not just HTTP/DOM)
+    // This makes performance analysis visible in PR Checks tab alongside ESLint, build, etc.
+    if (autoFixSuggestions?.enabled) {
+      core.info(' Creating comprehensive performance check...');
+      try {
+        await aiAutoFixAnalyzer.createPerformanceCheck(
+          results,
+          autoFixSuggestions.suggestions,
+          octokit,
+          owner,
+          repo,
+          prNumber,
+          context.payload.pull_request.head.sha
+        );
+      } catch (error) {
+        core.warning(` Failed to create performance check: ${error.message}`);
+      }
+    }
+    
     // Post PR review comments on specific lines for HTTP/DOM fixes
     if (autoFixSuggestions?.enabled && autoFixSuggestions.suggestions.length > 0) {
       const httpDomFixes = autoFixSuggestions.suggestions.filter(s =>
@@ -385,7 +418,7 @@ async function run() {
       if (httpDomFixes.length > 0) {
         core.info(` Posting ${httpDomFixes.length} line-level PR review comment(s)...`);
         try {
-          const { reviewComments, annotations } = await aiAutoFixAnalyzer.postPRReviewComments(
+          const { reviewComments } = await aiAutoFixAnalyzer.postPRReviewComments(
             httpDomFixes,
             octokit,
             owner,
