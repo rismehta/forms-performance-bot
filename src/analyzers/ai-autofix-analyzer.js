@@ -2808,7 +2808,14 @@ Respond with ONLY the JSON object containing the COMPLETE function code, no mark
     try {
       const conclusion = criticalIssues.length > 0 ? 'action_required' : 'success';
       
-      const checkResponse = await octokit.rest.checks.create({
+      core.info(`  Annotations prepared: ${criticalIssues.length}`);
+      if (criticalIssues.length > 0) {
+        criticalIssues.slice(0, 5).forEach((ann, i) => {
+          core.info(`    ${i + 1}. ${ann.path}:${ann.start_line} - ${ann.title}`);
+        });
+      }
+      
+      const checkPayload = {
         owner,
         repo,
         name: 'AEM Forms Performance Analysis',
@@ -2824,15 +2831,23 @@ Respond with ONLY the JSON object containing the COMPLETE function code, no mark
             : 'No critical performance issues detected. Form meets performance best practices.',
           annotations: criticalIssues.slice(0, 50) // GitHub limit: 50 annotations per check
         }
-      });
+      };
       
-      core.info(`  Created check "${checkResponse.data.name}" with ${criticalIssues.length} annotation(s)`);
-      core.info(`  Check ID: ${checkResponse.data.id}`);
-      core.info(`  Conclusion: ${conclusion}`);
-      core.info(`  View in: PR → Checks tab → "AEM Forms Performance Analysis"`);
+      core.info(`  Sending check to GitHub API...`);
+      const checkResponse = await octokit.rest.checks.create(checkPayload);
+      
+      core.info(`  ✅ Check created successfully!`);
+      core.info(`     Name: ${checkResponse.data.name}`);
+      core.info(`     ID: ${checkResponse.data.id}`);
+      core.info(`     URL: ${checkResponse.data.html_url}`);
+      core.info(`     Conclusion: ${conclusion}`);
+      core.info(`     Annotations: ${criticalIssues.length}`);
+      core.info(`  View in: PR → Checks tab → "AEM Forms Performance Analysis" (left sidebar)`);
       
     } catch (error) {
       core.warning(` Failed to create performance check: ${error.message}`);
+      core.warning(`  Status: ${error.status}`);
+      core.warning(`  Response: ${JSON.stringify(error.response?.data || {})}`);
     }
   }
 

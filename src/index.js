@@ -392,9 +392,36 @@ async function run() {
     
     // Create GitHub Check with all performance issues (not just HTTP/DOM)
     // This makes performance analysis visible in PR Checks tab alongside ESLint, build, etc.
+    // IMPORTANT: Use the latest commit SHA (after auto-fixes were pushed)
     if (autoFixSuggestions?.enabled) {
       core.info(' Creating comprehensive performance check...');
       try {
+        // If auto-fixes were pushed, fetch the latest commit from GitHub to ensure sync
+        let checkCommitSha = context.payload.pull_request.head.sha;
+        
+        if (autoFixCommit?.sha) {
+          // Wait a moment for GitHub to process the push
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          
+          // Fetch latest commit from GitHub API to ensure it's visible
+          try {
+            const { data: refData } = await octokit.rest.git.getRef({
+              owner,
+              repo,
+              ref: `heads/${prBranch}`
+            });
+            checkCommitSha = refData.object.sha;
+            core.info(`  Fetched latest commit from GitHub: ${checkCommitSha.substring(0, 7)}`);
+          } catch (fetchError) {
+            // Fallback to local SHA if API fetch fails
+            core.warning(`  Could not fetch latest commit from API: ${fetchError.message}`);
+            checkCommitSha = autoFixCommit.sha;
+            core.info(`  Using local commit SHA: ${checkCommitSha.substring(0, 7)}`);
+          }
+        }
+        
+        core.info(`  Creating check on commit: ${checkCommitSha.substring(0, 7)}`);
+        
         await aiAutoFixAnalyzer.createPerformanceCheck(
           results,
           autoFixSuggestions.suggestions,
@@ -402,10 +429,11 @@ async function run() {
           owner,
           repo,
           prNumber,
-          context.payload.pull_request.head.sha
+          checkCommitSha  // Use latest commit SHA after auto-fixes
         );
       } catch (error) {
         core.warning(` Failed to create performance check: ${error.message}`);
+        core.warning(`  Error details: ${error.stack}`);
       }
     }
     
