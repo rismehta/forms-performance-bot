@@ -218,6 +218,7 @@ export class HTMLReporter {
     ${this.buildFormHTMLSection(results)}
     ${this.buildFormCSSSection(results)}
     ${this.buildCustomFunctionsSection(results)}
+    ${this.buildFormValidationSection(results)}
     ${this.buildRecommendationsSection(results)}
 
     <footer>
@@ -427,7 +428,7 @@ export class HTMLReporter {
           <pre><code>${call.expression.substring(0, 150)}...</code></pre>
         </div>
       `).join('')}
-      <p><strong>Recommendation:</strong> Move API calls to <code>custom:formViewInitialized</code> event</p>
+      <p><strong>Recommendation:</strong> Use <strong>Visual Rule Editor</strong> to move API calls from <code>initialize</code> event to <code>custom:formViewInitialized</code> event (triggered after form renders). Initialize events should only set up initial state, not fetch data.</p>
     </div>`;
   }
 
@@ -451,7 +452,7 @@ export class HTMLReporter {
         ${fields.length > 20 ? `<p>... and ${fields.length - 20} more</p>` : ''}
       </div>
       
-      <p><strong>Recommendation:</strong> Remove these fields and use <code>setVariable()</code> for state storage</p>
+      <p><strong>Recommendation:</strong> Use <strong>Visual Rule Editor</strong> to replace hidden fields with Form Variables (<code>setVariable()</code> instead of field-based storage). Remove the hidden fields from form JSON. Hidden fields that are never shown bloat the DOM (each adds ~50-100 bytes) and slow down rendering. Configure state management via the rule editor's variable actions.</p>
     </div>`;
   }
 
@@ -589,6 +590,67 @@ export class HTMLReporter {
           </div>
         `).join('')}
       ` : ''}
+    </div>`;
+  }
+
+  buildFormValidationSection(results) {
+    const validationErrors = results.ruleCycles?.after?.validationErrors;
+    if (!validationErrors || !validationErrors.dataRefErrors && !validationErrors.typeConflicts) return '';
+    
+    const dataRefErrors = validationErrors.dataRefErrors || [];
+    const typeConflicts = validationErrors.typeConflicts || [];
+    const totalErrors = dataRefErrors.length + typeConflicts.length;
+    
+    if (totalErrors === 0) return '';
+    
+    return `
+    <div class="section">
+      <h2> Form Validation Warnings (${totalErrors})</h2>
+      <p class="warning-message">These are form authoring issues detected by af-core. They require fixes in AEM Forms Editor, not code changes.</p>
+      
+      ${dataRefErrors.length > 0 ? `
+      <h3>Invalid dataRef Syntax (${dataRefErrors.length})</h3>
+      <p><strong>Issue:</strong> Fields have invalid JSONPath in <code>dataRef</code> property. Their data won't be exported in form submissions.</p>
+      <div class="issue-list">
+        ${dataRefErrors.slice(0, 10).map(error => `
+          <div class="issue-item">
+            <h4>Field: <code>${error.fieldId}</code></h4>
+            <p><strong>Invalid dataRef:</strong> <code>"${error.dataRef}"</code></p>
+            <p><strong>Possible causes:</strong></p>
+            <ul>
+              <li>Missing path prefix - Should be <code>$.${error.dataRef}</code> (global) or <code>data.${error.dataRef}</code> (relative)</li>
+              <li>Invalid characters - Contains special chars without proper escaping</li>
+              <li>Unclosed quotes - JSONPath string literal not properly closed</li>
+            </ul>
+            <p><strong>Fix:</strong> Open form in AEM Forms Editor → Select field → Update "Data Reference (dataRef)" in Properties panel</p>
+          </div>
+        `).join('')}
+        ${dataRefErrors.length > 10 ? `<p>... and ${dataRefErrors.length - 10} more. See action logs for full list.</p>` : ''}
+      </div>
+      ` : ''}
+      
+      ${typeConflicts.length > 0 ? `
+      <h3>Data Type Conflicts (${typeConflicts.length})</h3>
+      <p><strong>Issue:</strong> Multiple fields are mapped to the same <code>dataRef</code> but have different data types. This causes type coercion and potential data loss.</p>
+      <div class="issue-list">
+        ${typeConflicts.slice(0, 10).map(conflict => `
+          <div class="issue-item">
+            <h4>DataRef: <code>${conflict.dataRef}</code></h4>
+            <p><strong>New field:</strong> <code>${conflict.newField}</code> (type: <code>${conflict.newFieldType}</code>)</p>
+            <p><strong>Conflicts with:</strong> ${conflict.conflictingFields}</p>
+            <p><strong>Fix options:</strong></p>
+            <ul>
+              <li><strong>Option A:</strong> Use unique <code>dataRef</code> for each field (e.g., <code>${conflict.dataRef}_text</code> vs <code>${conflict.dataRef}_number</code>)</li>
+              <li><strong>Option B:</strong> Ensure all fields use the SAME type</li>
+              <li><strong>Option C:</strong> Remove <code>dataRef</code> from one field if it's just for display</li>
+            </ul>
+          </div>
+        `).join('')}
+        ${typeConflicts.length > 10 ? `<p>... and ${typeConflicts.length - 10} more. See action logs for full list.</p>` : ''}
+      </div>
+      ` : ''}
+      
+      <p class="recommendation"><strong>Action Required:</strong> Fix these in <strong>AEM Forms Editor</strong> - these are form JSON structure issues, not code issues.</p>
     </div>`;
   }
 

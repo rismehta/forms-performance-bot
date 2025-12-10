@@ -881,11 +881,32 @@ export function myDOMFunction(value, targetField, globals) {
       
       for (const fix of trivialFixes) {
         try {
+          // Apply primary file fix (CSS, JS, etc.)
           const result = await this.applyFixToFile(fix);
           if (result.success) {
             git.stageFile(result.filePath);
             filesChanged.push(result);
             core.info(` Applied fix to ${result.filePath}`);
+          }
+          
+          // For background-image fixes, also apply component file refactoring
+          if (fix.type === 'css-background-image-fix' && fix.componentFile && fix.fixedComponentCode) {
+            try {
+              const componentPath = resolve(this.workspaceRoot, fix.componentFile);
+              if (existsSync(componentPath)) {
+                writeFileSync(componentPath, fix.fixedComponentCode, 'utf-8');
+                git.stageFile(componentPath);
+                filesChanged.push({
+                  success: true,
+                  filePath: fix.componentFile,
+                  description: `Refactor component to use <img> tag (AI-generated)`,
+                  impact: 'Adds lazy-loaded image component'
+                });
+                core.info(` Applied component refactoring to ${fix.componentFile}`);
+              }
+            } catch (compError) {
+              core.warning(`Failed to apply component fix to ${fix.componentFile}: ${compError.message}`);
+            }
           }
         } catch (error) {
           core.warning(`Failed to apply fix to ${fix.file}: ${error.message}`);
@@ -1010,11 +1031,32 @@ ${hasAIRefactoring ? '\n REVIEW CHECKLIST:\n- [ ] Test all affected functions\n-
       
       for (const fix of trivialFixes) {
         try {
+          // Apply primary file fix (CSS, JS, etc.)
           const result = await this.applyFixToFile(fix);
           if (result.success) {
             git.stageFile(result.filePath);
             filesChanged.push(result);
             core.info(` Applied fix to ${result.filePath}`);
+          }
+          
+          // For background-image fixes, also apply component file refactoring
+          if (fix.type === 'css-background-image-fix' && fix.componentFile && fix.fixedComponentCode) {
+            try {
+              const componentPath = resolve(this.workspaceRoot, fix.componentFile);
+              if (existsSync(componentPath)) {
+                writeFileSync(componentPath, fix.fixedComponentCode, 'utf-8');
+                git.stageFile(componentPath);
+                filesChanged.push({
+                  success: true,
+                  filePath: fix.componentFile,
+                  description: `Refactor component to use <img> tag (AI-generated)`,
+                  impact: 'Adds lazy-loaded image component'
+                });
+                core.info(` Applied component refactoring to ${fix.componentFile}`);
+              }
+            } catch (compError) {
+              core.warning(`Failed to apply component fix to ${fix.componentFile}: ${compError.message}`);
+            }
           }
         } catch (error) {
           core.warning(`Failed to apply fix to ${fix.file}: ${error.message}`);
@@ -1167,16 +1209,25 @@ ${hasAIRefactoring ? '\n REVIEW CHECKLIST:\n- [ ] Test all affected functions\n-
       impact = 'Eliminates render-blocking CSS import';
       
     } else if (fix.type === 'css-background-image-fix') {
-      // Comment out background-image line
-      const lines = content.split('\n');
-      const lineIndex = fix.line - 1;
+      // Apply AI-generated CSS and component refactoring
       
-      if (lines[lineIndex] && lines[lineIndex].includes('background-image')) {
-        lines[lineIndex] = `  /* ${lines[lineIndex].trim()} */`;
-        lines.splice(lineIndex + 1, 0, '  /* Performance: Replace with <img loading="lazy"> in HTML - see Performance Bot PR comment */');
-        content = lines.join('\n');
-        description = `Comment out background-image in ${fix.file}`;
-        impact = 'Enables lazy loading when replaced with <img>';
+      // 1. Apply CSS fix (comment out or replace background-image)
+      if (fix.fixedCSSCode) {
+        content = fix.fixedCSSCode;
+        description = `Refactor background-image in ${fix.file} (AI-generated)`;
+        impact = 'Replaces background-image with <img loading="lazy"> for better performance';
+      } else {
+        // Fallback: just comment out
+        const lines = content.split('\n');
+        const lineIndex = fix.line - 1;
+        
+        if (lines[lineIndex] && lines[lineIndex].includes('background-image')) {
+          lines[lineIndex] = `  /* ${lines[lineIndex].trim()} */`;
+          lines.splice(lineIndex + 1, 0, '  /* Performance: Replace with <img loading="lazy"> in HTML - see Performance Bot PR comment */');
+          content = lines.join('\n');
+          description = `Comment out background-image in ${fix.file}`;
+          impact = 'Enables lazy loading when replaced with <img>';
+        }
       }
       
     } else if (fix.type === 'custom-function-http-fix') {
@@ -2372,10 +2423,10 @@ ${hasComponent ? `2. Add <img> element in component JSX/HTML with:
     const contextInfo = enhancedContext ? `
 **Function Context:**
 - File: ${enhancedContext.fullFileContent ? `${enhancedContext.fullFileContent.split('\n').length} lines` : 'N/A'}
-- Imports: ${enhancedContext.imports.slice(0, 5).join(', ') || 'None'}
-- Related functions: ${enhancedContext.relatedFunctions.slice(0, 10).join(', ') || 'None'}
-- Helper functions available: ${enhancedContext.helperFunctions.slice(0, 5).map(h => h.name).join(', ') || 'None'}
-- AEM Utilities: ${enhancedContext.aemUtilities.join(', ') || 'None'}
+- Imports: ${(enhancedContext.imports || []).slice(0, 5).join(', ') || 'None'}
+- Related functions: ${(enhancedContext.relatedFunctions || []).slice(0, 10).join(', ') || 'None'}
+- Helper functions available: ${(enhancedContext.relatedFunctionCode || []).slice(0, 5).map(h => h.name).join(', ') || 'None'}
+- AEM Utilities: ${(enhancedContext.utilityFunctions || []).join(', ') || 'None'}
 ` : '';
 
     const userPrompt = `Add defensive null/undefined checks to prevent runtime errors in this custom function.

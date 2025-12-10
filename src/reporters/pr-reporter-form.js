@@ -59,6 +59,17 @@ export class FormPRReporter {
 
     // Quick Stats
     sections.push(this.buildQuickStatsSection(results, urls));
+    
+    // Form Validation Warnings (if any)
+    const validationCount = results.ruleCycles?.after?.validationErrorCount || 0;
+    if (validationCount > 0) {
+      sections.push('\n### Form Validation Warnings\n');
+      const dataRefCount = results.ruleCycles?.after?.validationErrors?.dataRefErrors?.length || 0;
+      const typeConflictCount = results.ruleCycles?.after?.validationErrors?.typeConflicts?.length || 0;
+      sections.push(`**${validationCount} authoring issue(s):** ${dataRefCount} invalid dataRef, ${typeConflictCount} type conflict(s)\n`);
+      sections.push('**Action:** Fix these in AEM Forms Editor (form JSON structure issues)\n');
+      sections.push('**Details:** See full HTML report for specific fields and fix instructions\n');
+    }
 
     // Link to full report (Gist with inline viewing or artifact download)
     const runId = process.env.GITHUB_RUN_ID || 'latest';
