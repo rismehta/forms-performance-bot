@@ -1997,12 +1997,12 @@ Focus on performance impact and Core Web Vitals (FCP, LCP, TBT, INP).`;
         'Authorization': `Bearer ${this.azureApiKey}`  // Custom endpoint uses Bearer auth
       },
       body: JSON.stringify({
-        messages: [
+        input: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt }
         ],
         model: this.azureModel,  // Model in body for custom endpoint
-        max_completion_tokens: 16384,  // Codex supports higher token limits
+        max_output_tokens: 16384,  // Responses API uses max_output_tokens
         temperature: 0.1,  // Lower for more predictable refactoring
         top_p: 1.0,
         frequency_penalty: 0.0,
@@ -2017,7 +2017,8 @@ Focus on performance impact and Core Web Vitals (FCP, LCP, TBT, INP).`;
     }
 
     const data = await response.json();
-    const content = data.choices[0].message.content;
+    // Responses API returns content directly in 'output' field
+    const content = data.output || data.choices?.[0]?.message?.content || data.choices?.[0]?.text;
     
     core.info(` AI response received (${content.length} chars)`);
     
