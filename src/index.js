@@ -314,7 +314,8 @@ async function run() {
           patOctokit,  // Use PAT for pushing commits
           owner,
           repo,
-          prBranch  // Commit to the feature branch itself
+          prBranch,  // Commit to the feature branch itself
+          prNumber   // Pass PR number for file filtering
         );
         
         if (autoFixCommit) {

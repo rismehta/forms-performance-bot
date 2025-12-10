@@ -977,7 +977,7 @@ export function myDOMFunction(value, targetField, globals) {
    * Apply fixes directly to the current PR branch (no new PR created)
    * Commits changes to the same branch with a bot-identifiable message
    */
-  applyFixesToCurrentPR = async (suggestions, octokit, owner, repo, currentBranch) => {
+  applyFixesToCurrentPR = async (suggestions, octokit, owner, repo, currentBranch, prNumber = null) => {
     if (!suggestions || suggestions.length === 0) {
       core.info('No suggestions to apply - skipping auto-fix');
       return null;
@@ -994,7 +994,7 @@ export function myDOMFunction(value, targetField, globals) {
 
     // Filter for auto-fixable issues that should be applied to files
     // HTTP/DOM fixes are shown as PR comments only (not applied to files)
-    const trivialFixes = suggestions.filter(s => 
+    let trivialFixes = suggestions.filter(s => 
       s.type === 'css-import-fix' || 
       s.type === 'css-background-image-fix' ||
       s.type === 'custom-function-runtime-error-fix'
@@ -1003,6 +1003,42 @@ export function myDOMFunction(value, targetField, globals) {
     if (trivialFixes.length === 0) {
       core.info('No trivial fixes available - skipping auto-commit');
       return null;
+    }
+
+    // ✅ SAFETY: Only fix files that are actually changed in the PR
+    if (prNumber && octokit) {
+      try {
+        core.info(` Fetching files changed in PR #${prNumber}...`);
+        const { data: prFiles } = await octokit.rest.pulls.listFiles({
+          owner,
+          repo,
+          pull_number: prNumber
+        });
+        
+        const changedFiles = prFiles.map(f => f.filename);
+        core.info(`  PR contains ${changedFiles.length} changed file(s)`);
+        
+        const beforeCount = trivialFixes.length;
+        trivialFixes = trivialFixes.filter(fix => {
+          const fileInPR = changedFiles.includes(fix.file);
+          if (!fileInPR) {
+            core.info(`  Skipping fix for ${fix.file} (not in this PR)`);
+          }
+          return fileInPR;
+        });
+        
+        core.info(`  Filtered to ${trivialFixes.length}/${beforeCount} fix(es) for files in PR`);
+        
+        if (trivialFixes.length === 0) {
+          core.info('No fixes needed for files changed in this PR - skipping auto-commit');
+          return null;
+        }
+        
+      } catch (error) {
+        core.warning(`Could not fetch PR files: ${error.message}`);
+        core.warning('Proceeding with all fixes (fallback behavior)');
+        // Continue with unfiltered fixes as fallback
+      }
     }
 
     try {
