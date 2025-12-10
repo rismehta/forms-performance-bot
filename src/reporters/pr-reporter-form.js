@@ -1068,7 +1068,7 @@ export class FormPRReporter {
 
     lines.push(`- **Components:** ${components} | **Rules:** ${rules} (${cycles} cycles)`);
     lines.push(`- **Form Load:** ${loadTime} | **Hidden Fields:** ${hidden} unnecessary`);
-    lines.push(`- **CSS Files:** ${results.formCSS?.after?.filesAnalyzed || 0} analyzed | **Custom Functions:** ${results.customFunctions?.after?.analyzed || 0} analyzed`);
+    lines.push(`- **CSS Files:** ${results.formCSS?.after?.filesAnalyzed || 0} analyzed | **Custom Functions:** ${results.customFunctions?.after?.functionsAnalyzed || 0} analyzed`);
     
     return lines.join('\n');
   }
