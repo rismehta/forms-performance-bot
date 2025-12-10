@@ -937,9 +937,26 @@ ${hasAIRefactoring ? '\n REVIEW CHECKLIST:\n- [ ] Test all affected functions\n-
 
       git.commit(commitMessage);
 
+      // Pull latest changes from remote before pushing (handle race conditions)
+      core.info(` Pulling latest changes from ${currentBranch}...`);
+      try {
+        git.exec(`git pull --rebase origin ${currentBranch}`);
+        core.info(`  Rebased successfully`);
+      } catch (pullError) {
+        // If pull fails, try force push with lease (safer than --force)
+        core.warning(`  Pull failed: ${pullError.message}`);
+        core.info(`  Will use --force-with-lease for safe force push`);
+      }
+
       // Push to the same branch (current PR branch)
       core.info(` Pushing changes to ${currentBranch}...`);
-      git.push(currentBranch, false); // Don't force push
+      try {
+        git.push(currentBranch, false); // Try normal push first
+      } catch (pushError) {
+        // If normal push fails, use --force-with-lease (safer than --force)
+        core.warning(`  Normal push failed, using --force-with-lease`);
+        git.exec(`git push origin HEAD:${currentBranch} --force-with-lease`);
+      }
 
       const commitSHA = git.getCurrentSHA();
       
