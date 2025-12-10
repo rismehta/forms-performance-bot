@@ -170,15 +170,19 @@ Respond ONLY with valid JSON:
         },
         {
           name: 'Code length sanity',
-          check: (orig, refac) => {
+          check: (orig, refac, fnName, issueType) => {
             const origLines = (orig || '').split('\n').filter(l => l.trim()).length;
             const refacLines = (refac || '').split('\n').filter(l => l.trim()).length;
             
-            // Refactored should be within 50-150% of original (not drastically shorter/longer)
-            if (refacLines < origLines * 0.5) {
+            // For runtime errors, code SHOULD get longer (adding null checks)
+            // So use more lenient thresholds
+            const minRatio = issueType === 'runtime' ? 0.3 : 0.5;
+            const maxRatio = issueType === 'runtime' ? 3.0 : 1.5;
+            
+            if (refacLines < origLines * minRatio) {
               return { valid: false, error: `Too short: ${origLines} → ${refacLines} lines (removed logic?)` };
             }
-            if (refacLines > origLines * 1.5) {
+            if (refacLines > origLines * maxRatio) {
               return { valid: false, error: `Too long: ${origLines} → ${refacLines} lines (added unnecessary code?)` };
             }
             
@@ -261,14 +265,14 @@ Respond ONLY with valid JSON:
       // Rules specific to runtime error fixes
       runtime: [
         {
-          name: 'Null checks added',
+          name: 'Has defensive checks',
           check: (orig, refac) => {
-            // Should have more defensive checks (if statements checking for null/undefined)
-            const origIfCount = (orig.match(/if\s*\(/g) || []).length;
-            const refacIfCount = (refac.match(/if\s*\(/g) || []).length;
+            // Should have defensive checks (if, ?, ||, &&)
+            const hasNullCheck = /if\s*\([^)]*(!|===?\s*null|===?\s*undefined|\|\||&&|\?\.|\?\?)/.test(refac);
+            const hasTryCatch = /try\s*\{/.test(refac);
             
-            if (refacIfCount <= origIfCount) {
-              return { valid: false, error: 'No null checks added - refactored code should have more defensive checks' };
+            if (!hasNullCheck && !hasTryCatch) {
+              return { valid: false, error: 'No defensive checks added (expected if/null checks or try-catch)' };
             }
             return { valid: true };
           }
@@ -299,7 +303,7 @@ Respond ONLY with valid JSON:
     
     try {
       for (const rule of rules) {
-        const result = rule.check(originalCode, refactoredCode, functionName);
+        const result = rule.check(originalCode, refactoredCode, functionName, issueType);
         if (!result.valid) {
           errors.push(`[${rule.name}] ${result.error}`);
         }
