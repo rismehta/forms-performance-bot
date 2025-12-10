@@ -86,7 +86,9 @@ export class GitHelper {
   push(branchName, force = false) {
     const forceFlag = force ? '--force' : '';
     core.info(`Pushing branch: ${branchName}`);
-    this.exec(`git push origin ${branchName} ${forceFlag}`.trim());
+    // Use HEAD:branchName syntax for GitHub Actions (detached HEAD state)
+    // This pushes the current HEAD to the remote branch
+    this.exec(`git push origin HEAD:${branchName} ${forceFlag}`.trim());
   }
 
   /**

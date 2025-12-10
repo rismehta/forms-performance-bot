@@ -767,87 +767,57 @@ export function myDOMFunction(value, targetField, globals) {
     
     const fixableSuggestions = [];
     
-    // 1. CSS @import → <link> tags (CRITICAL)
-    try {
-      core.info('Generating CSS @import fixes...');
-      const importFixes = await this.fixCSSImports(results.formCSS);
-      core.info(`CSS @import fixes generated: ${importFixes.length}`);
-      fixableSuggestions.push(...importFixes);
-    } catch (error) {
-      core.warning(`Failed to generate CSS @import fixes: ${error.message}`);
-    }
+    // Run all fix generators in PARALLEL for faster execution
+    core.info(' Generating all fixes in parallel...');
+    const startTime = performance.now();
     
-    // 2. CSS background-image → <img> component (CRITICAL)
-    try {
-      core.info('Generating CSS background-image fixes...');
-      const backgroundImageFixes = await this.fixCSSBackgroundImages(results.formCSS);
-      core.info(`CSS background-image fixes generated: ${backgroundImageFixes.length}`);
-      fixableSuggestions.push(...backgroundImageFixes);
-    } catch (error) {
-      core.warning(`Failed to generate CSS background-image fixes: ${error.message}`);
-    }
+    const fixGenerators = [
+      // 1. CSS @import → comments (CRITICAL, no AI needed)
+      { name: 'CSS @import fixes', fn: () => this.fixCSSImports(results.formCSS) },
+      
+      // 2. CSS background-image → <img> component (CRITICAL, AI-powered)
+      { name: 'CSS background-image fixes', fn: () => this.fixCSSBackgroundImages(results.formCSS) },
+      
+      // 3. Blocking scripts → defer (guidance only)
+      { name: 'Blocking scripts fixes', fn: () => this.fixBlockingScripts(results.formHTML) },
+      
+      // 4. Remove unnecessary hidden fields (guidance only)
+      { name: 'Hidden fields fixes', fn: () => this.fixUnnecessaryHiddenFields(results.hiddenFields) },
+      
+      // 5. API calls in initialize → custom events (guidance only)
+      { name: 'API call fixes', fn: () => this.fixAPICallsInInitialize(results.formEvents) },
+      
+      // 6. Custom functions with HTTP/DOM (CRITICAL, AI-powered)
+      { name: 'Custom function fixes', fn: () => this.fixCustomFunctions(results.customFunctions) },
+      
+      // 7. Runtime errors → add null checks (AI-powered)
+      { name: 'Runtime error fixes', fn: () => this.fixRuntimeErrors(results.customFunctions) },
+      
+      // 8. Form validation errors → recommendations (no AI)
+      { name: 'Validation recommendations', fn: () => this.generateValidationErrorRecommendations(results.ruleCycles) }
+    ];
     
-    // 3. Blocking scripts → defer (CRITICAL)
-    try {
-      core.info('Generating blocking scripts fixes...');
-      const scriptFixes = await this.fixBlockingScripts(results.formHTML);
-      core.info(`Blocking scripts fixes generated: ${scriptFixes.length}`);
-      fixableSuggestions.push(...scriptFixes);
-    } catch (error) {
-      core.warning(`Failed to generate blocking scripts fixes: ${error.message}`);
-    }
+    // Execute all generators in parallel using Promise.allSettled
+    // This ensures all fixes are attempted even if one fails
+    const settledResults = await Promise.allSettled(
+      fixGenerators.map(generator => generator.fn())
+    );
     
-    // 4. Remove unnecessary hidden fields (HIGH)
-    try {
-      core.info('Generating hidden fields fixes...');
-      const hiddenFieldFixes = await this.fixUnnecessaryHiddenFields(results.hiddenFields);
-      core.info(`Hidden fields fixes generated: ${hiddenFieldFixes.length}`);
-      fixableSuggestions.push(...hiddenFieldFixes);
-    } catch (error) {
-      core.warning(`Failed to generate hidden fields fixes: ${error.message}`);
-    }
+    // Collect results and log individual outcomes
+    settledResults.forEach((result, index) => {
+      const generatorName = fixGenerators[index].name;
+      
+      if (result.status === 'fulfilled') {
+        const fixes = result.value || [];
+        core.info(`  ${generatorName}: ${fixes.length} generated`);
+        fixableSuggestions.push(...fixes);
+      } else {
+        core.warning(`  ${generatorName}: Failed - ${result.reason?.message || 'Unknown error'}`);
+      }
+    });
     
-    // 5. API calls in initialize → custom events (CRITICAL but complex)
-    try {
-      core.info('Generating API call in initialize fixes...');
-      const initializeFixes = await this.fixAPICallsInInitialize(results.formEvents);
-      core.info(`API call fixes generated: ${initializeFixes.length}`);
-      fixableSuggestions.push(...initializeFixes);
-    } catch (error) {
-      core.warning(`Failed to generate API call fixes: ${error.message}`);
-    }
-    
-    // 6. Custom functions with HTTP requests or DOM access (CRITICAL)
-    try {
-      core.info('Generating custom function fixes...');
-      const customFunctionFixes = await this.fixCustomFunctions(results.customFunctions);
-      core.info(`Custom function fixes generated: ${customFunctionFixes.length}`);
-      fixableSuggestions.push(...customFunctionFixes);
-    } catch (error) {
-      core.warning(`Failed to generate custom function fixes: ${error.message}`);
-    }
-    
-    // 7. Runtime errors in custom functions → add null checks
-    try {
-      core.info('Generating runtime error fixes...');
-      const runtimeErrorFixes = await this.fixRuntimeErrors(results.customFunctions);
-      core.info(`Runtime error fixes generated: ${runtimeErrorFixes.length}`);
-      fixableSuggestions.push(...runtimeErrorFixes);
-    } catch (error) {
-      core.warning(`Failed to generate runtime error fixes: ${error.message}`);
-    }
-    
-    // 8. Form validation errors → recommendations only (NEW)
-    try {
-      core.info('Generating form validation error recommendations...');
-      const validationRecommendations = await this.generateValidationErrorRecommendations(results.ruleCycles);
-      core.info(`Validation recommendations generated: ${validationRecommendations.length}`);
-      fixableSuggestions.push(...validationRecommendations);
-    } catch (error) {
-      core.warning(`Failed to generate validation recommendations: ${error.message}`);
-    }
-    
-    core.info(` AI Auto-Fix completed: ${fixableSuggestions.length} suggestion(s) generated`);
+    const duration = ((performance.now() - startTime) / 1000).toFixed(2);
+    core.info(` AI Auto-Fix completed in ${duration}s: ${fixableSuggestions.length} suggestion(s) generated`);
     
     return {
       enabled: true,
@@ -2033,7 +2003,13 @@ export function ${issue.functionName}(field, newState, globals) {
       try {
         // Extract function code
         const functionCode = this.extractFunctionCode(issue);
-        const enhancedContext = this.buildEnhancedContext(issue);
+        
+        // Runtime errors don't have a 'file' property, use default
+        const issueWithFile = {
+          ...issue,
+          file: issue.file || 'blocks/form/functions.js'
+        };
+        const enhancedContext = this.buildEnhancedContext(issueWithFile);
         
         if (!enhancedContext || !functionCode) {
           core.warning(`Could not extract context for ${issue.functionName}`);
@@ -2488,40 +2464,48 @@ Respond with ONLY the JSON object, no markdown formatting.`;
     const reviewComments = [];
     const annotations = [];
     
-    // 1. Create GitHub Check with annotations (works for ALL files)
-    try {
-      core.info(' Creating GitHub Check with annotations...');
-      
-      const checkAnnotations = httpDomFixes.map(fix => ({
-        path: fix.file,
-        start_line: fix.line || 1,
-        end_line: fix.line || 1,
-        annotation_level: fix.severity === 'critical' ? 'failure' : 'warning',
-        title: fix.title || `${fix.type === 'custom-function-http-fix' ? 'HTTP Request' : 'DOM Access'} in Custom Function`,
-        message: this.buildAnnotationMessage(fix),
-        raw_details: fix.refactoredCode ? `Suggested fix:\n\n${fix.refactoredCode}` : undefined
-      }));
-      
-      await octokit.rest.checks.create({
-        owner,
-        repo,
-        name: 'AEM Forms Performance Analysis',
-        head_sha: commitSha,
-        status: 'completed',
-        conclusion: httpDomFixes.length > 0 ? 'neutral' : 'success',
-        output: {
-          title: `${httpDomFixes.length} Performance Issue(s) Detected`,
-          summary: `Found ${httpDomFixes.length} issue(s) in custom functions. Click each annotation for AI-generated fix suggestions.`,
-          annotations: checkAnnotations.slice(0, 50) // GitHub limit: 50 annotations per check
-        }
-      });
-      
-      core.info(`  Created check with ${checkAnnotations.length} annotation(s)`);
-      annotations.push(...checkAnnotations);
-      
-    } catch (error) {
-      core.warning(` Failed to create GitHub Check: ${error.message}`);
-      core.warning('  This requires "checks: write" permission in workflow');
+    // 1. Try to create GitHub Check with annotations (works for ALL files)
+    // NOTE: Checks API requires GitHub App authentication, not PAT tokens
+    // Skip this if using PAT to avoid authentication errors
+    const isGitHubApp = !!process.env.GITHUB_APP_ID; // Only attempt if GitHub App is configured
+    
+    if (isGitHubApp) {
+      try {
+        core.info(' Creating GitHub Check with annotations...');
+        
+        const checkAnnotations = httpDomFixes.map(fix => ({
+          path: fix.file,
+          start_line: fix.line || 1,
+          end_line: fix.line || 1,
+          annotation_level: fix.severity === 'critical' ? 'failure' : 'warning',
+          title: fix.title || `${fix.type === 'custom-function-http-fix' ? 'HTTP Request' : 'DOM Access'} in Custom Function`,
+          message: this.buildAnnotationMessage(fix),
+          raw_details: fix.refactoredCode ? `Suggested fix:\n\n${fix.refactoredCode}` : undefined
+        }));
+        
+        await octokit.rest.checks.create({
+          owner,
+          repo,
+          name: 'AEM Forms Performance Analysis',
+          head_sha: commitSha,
+          status: 'completed',
+          conclusion: httpDomFixes.length > 0 ? 'neutral' : 'success',
+          output: {
+            title: `${httpDomFixes.length} Performance Issue(s) Detected`,
+            summary: `Found ${httpDomFixes.length} issue(s) in custom functions. Click each annotation for AI-generated fix suggestions.`,
+            annotations: checkAnnotations.slice(0, 50) // GitHub limit: 50 annotations per check
+          }
+        });
+        
+        core.info(`  Created check with ${checkAnnotations.length} annotation(s)`);
+        annotations.push(...checkAnnotations);
+        
+      } catch (error) {
+        core.warning(` Failed to create GitHub Check: ${error.message}`);
+      }
+    } else {
+      core.info(' Skipping GitHub Checks API (requires GitHub App, using PAT instead)');
+      core.info('   Line-level comments will be posted for files in PR diff');
     }
     
     // 2. Try PR Review Comments for files in PR diff (gives "Apply suggestion" button)
