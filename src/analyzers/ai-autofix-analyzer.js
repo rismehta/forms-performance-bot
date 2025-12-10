@@ -1,6 +1,6 @@
 import * as core from '@actions/core';
 import { readFileSync, writeFileSync, existsSync } from 'fs';
-import { resolve } from 'path';
+import { resolve, basename, relative } from 'path';
 import { GitHelper } from '../utils/git-helper.js';
 
 /**
@@ -252,6 +252,37 @@ Respond ONLY with valid JSON:
               if (refac.includes(pattern)) {
                 return { valid: false, error: `Still contains ${pattern} - not converted` };
               }
+            }
+            return { valid: true };
+          }
+        }
+      ],
+      
+      // Rules specific to runtime error fixes
+      runtime: [
+        {
+          name: 'Null checks added',
+          check: (orig, refac) => {
+            // Should have more defensive checks (if statements checking for null/undefined)
+            const origIfCount = (orig.match(/if\s*\(/g) || []).length;
+            const refacIfCount = (refac.match(/if\s*\(/g) || []).length;
+            
+            if (refacIfCount <= origIfCount) {
+              return { valid: false, error: 'No null checks added - refactored code should have more defensive checks' };
+            }
+            return { valid: true };
+          }
+        },
+        {
+          name: 'Property access still present',
+          check: (orig, refac) => {
+            // Should still have the original property accesses (just guarded now)
+            const origProps = orig.match(/\.\w+/g) || [];
+            const refacProps = refac.match(/\.\w+/g) || [];
+            
+            // Should have at least 80% of original property accesses
+            if (refacProps.length < origProps.length * 0.8) {
+              return { valid: false, error: 'Too many property accesses removed - logic may be broken' };
             }
             return { valid: true };
           }
@@ -796,6 +827,26 @@ export function myDOMFunction(value, targetField, globals) {
       core.warning(`Failed to generate custom function fixes: ${error.message}`);
     }
     
+    // 7. Runtime errors in custom functions → add null checks
+    try {
+      core.info('Generating runtime error fixes...');
+      const runtimeErrorFixes = await this.fixRuntimeErrors(results.customFunctions);
+      core.info(`Runtime error fixes generated: ${runtimeErrorFixes.length}`);
+      fixableSuggestions.push(...runtimeErrorFixes);
+    } catch (error) {
+      core.warning(`Failed to generate runtime error fixes: ${error.message}`);
+    }
+    
+    // 8. Form validation errors → recommendations only (NEW)
+    try {
+      core.info('Generating form validation error recommendations...');
+      const validationRecommendations = await this.generateValidationErrorRecommendations(results.ruleCycles);
+      core.info(`Validation recommendations generated: ${validationRecommendations.length}`);
+      fixableSuggestions.push(...validationRecommendations);
+    } catch (error) {
+      core.warning(`Failed to generate validation recommendations: ${error.message}`);
+    }
+    
     core.info(` AI Auto-Fix completed: ${fixableSuggestions.length} suggestion(s) generated`);
     
     return {
@@ -815,6 +866,104 @@ export function myDOMFunction(value, targetField, globals) {
    * @param {Number} prNumber - Original PR number
    * @returns {Promise<Object|null>} Created PR details or null if no fixes applied
    */
+  /**
+   * Apply fixes directly to the current PR branch (no new PR created)
+   * Commits changes to the same branch with a bot-identifiable message
+   */
+  applyFixesToCurrentPR = async (suggestions, octokit, owner, repo, currentBranch) => {
+    if (!suggestions || suggestions.length === 0) {
+      core.info('No suggestions to apply - skipping auto-fix');
+      return null;
+    }
+
+    // SAFETY: Never auto-commit to main/master branches
+    const protectedBranches = ['main', 'master'];
+    if (protectedBranches.includes(currentBranch.toLowerCase())) {
+      core.warning(` Skipping auto-fix: Cannot commit to protected branch '${currentBranch}'`);
+      core.warning('   Auto-fixes can only be applied to feature branches');
+      core.warning('   AI suggestions will still be shown in PR comment for manual review');
+      return null;
+    }
+
+    // Filter for auto-fixable issues that should be applied to files
+    // HTTP/DOM fixes are shown as PR comments only (not applied to files)
+    const trivialFixes = suggestions.filter(s => 
+      s.type === 'css-import-fix' || 
+      s.type === 'css-background-image-fix' ||
+      s.type === 'custom-function-runtime-error-fix'
+    );
+    
+    if (trivialFixes.length === 0) {
+      core.info('No trivial fixes available - skipping auto-commit');
+      return null;
+    }
+
+    try {
+      core.info(` Applying ${trivialFixes.length} fix(es) to current PR...`);
+
+      const git = new GitHelper(this.workspaceRoot);
+      
+      // Configure git user for commits
+      git.configureGitUser();
+
+      // Apply fixes to files
+      const filesChanged = [];
+      
+      for (const fix of trivialFixes) {
+        try {
+          const result = await this.applyFixToFile(fix);
+          if (result.success) {
+            git.stageFile(result.filePath);
+            filesChanged.push(result);
+            core.info(` Applied fix to ${result.filePath}`);
+          }
+        } catch (error) {
+          core.warning(`Failed to apply fix to ${fix.file}: ${error.message}`);
+        }
+      }
+
+      if (filesChanged.length === 0) {
+        core.warning('No fixes were successfully applied - aborting auto-commit');
+        return null;
+      }
+
+      // Create commit with bot-identifiable message prefix (for loop prevention)
+      const hasAIRefactoring = filesChanged.some(f => f.description.includes('AI-generated'));
+      
+      const commitMessage = `[bot] chore: Auto-fix ${filesChanged.length} performance issue(s)
+
+${hasAIRefactoring ? '  WARNING: This commit contains AI-generated code refactoring\n  REQUIRED: Thorough testing and code review before merging\n  AI Model: Azure OpenAI GPT-5.1-codex\n\n' : ''}Performance fixes applied:
+${filesChanged.map((f, i) => `${i + 1}. ${f.description}`).join('\n')}
+
+Impact:
+${filesChanged.map(f => `- ${f.impact}`).join('\n')}
+
+${hasAIRefactoring ? '\n REVIEW CHECKLIST:\n- [ ] Test all affected functions\n- [ ] Verify form behavior unchanged\n- [ ] Check error handling\n- [ ] Validate performance improvement\n\n' : ''} Auto-generated by AEM Forms Performance Analyzer`;
+
+      git.commit(commitMessage);
+
+      // Push to the same branch (current PR branch)
+      core.info(` Pushing changes to ${currentBranch}...`);
+      git.push(currentBranch, false); // Don't force push
+
+      const commitSHA = git.getCurrentSHA();
+      
+      core.info(` Successfully committed to ${currentBranch} (${commitSHA.substring(0, 7)})`);
+
+      return {
+        sha: commitSHA,
+        filesChanged: filesChanged.length,
+        message: commitMessage.split('\n')[0], // First line only
+        files: filesChanged.map(f => f.filePath)
+      };
+
+    } catch (error) {
+      core.error(`Failed to apply auto-fixes: ${error.message}`);
+      core.error(error.stack);
+      throw error;
+    }
+  }
+
   createAutoFixPR = async (suggestions, octokit, owner, repo, baseBranch, prNumber) => {
     if (!suggestions || suggestions.length === 0) {
       core.info('No suggestions to apply - skipping auto-fix PR');
@@ -830,13 +979,23 @@ export function myDOMFunction(value, targetField, globals) {
       return null;
     }
 
-    // Filter for trivial, auto-fixable issues (CSS + JS annotations)
+    // Filter for auto-fixable issues that should be applied to files
+    // HTTP/DOM fixes are shown as PR comments only (not applied to files)
     const trivialFixes = suggestions.filter(s => 
       s.type === 'css-import-fix' || 
       s.type === 'css-background-image-fix' ||
+      s.type === 'custom-function-runtime-error-fix'
+    );
+    
+    // HTTP/DOM fixes remain in suggestions for PR comments but not applied to files
+    const commentOnlyFixes = suggestions.filter(s =>
       s.type === 'custom-function-http-fix' ||
       s.type === 'custom-function-dom-fix'
     );
+    
+    if (commentOnlyFixes.length > 0) {
+      core.info(`${commentOnlyFixes.length} fix(es) will be shown as PR comments only (not applied to files)`);
+    }
 
     if (trivialFixes.length === 0) {
       core.info('No trivial fixes available - skipping auto-fix PR');
@@ -844,7 +1003,7 @@ export function myDOMFunction(value, targetField, globals) {
     }
 
     try {
-      core.info(`🔧 Creating auto-fix PR with ${trivialFixes.length} fix(es)...`);
+      core.info(` Creating auto-fix PR with ${trivialFixes.length} fix(es)...`);
 
       const git = new GitHelper(this.workspaceRoot);
       
@@ -1181,6 +1340,61 @@ ${hasAIRefactoring ? '\n REVIEW CHECKLIST:\n- [ ] Test all affected functions\n-
       } else {
         throw new Error(`Could not find function definition for ${functionName}`);
       }
+      
+    } else if (fix.type === 'custom-function-runtime-error-fix') {
+      // Apply AI-generated null checks for runtime errors
+      const lines = content.split('\n');
+      const functionName = fix.functionName || 'unknown';
+      
+      // Find the function definition
+      const functionPattern = new RegExp(`(export\\s+)?(async\\s+)?function\\s+${functionName}\\s*\\(|const\\s+${functionName}\\s*=|${functionName}\\s*:\\s*(async\\s+)?function`);
+      const functionLineIndex = lines.findIndex(line => functionPattern.test(line));
+      
+      if (functionLineIndex !== -1) {
+        // Find the end of the function
+        let braceCount = 0;
+        let inFunction = false;
+        let functionEndIndex = functionLineIndex;
+        
+        for (let i = functionLineIndex; i < lines.length; i++) {
+          const line = lines[i];
+          for (const char of line) {
+            if (char === '{') {
+              braceCount++;
+              inFunction = true;
+            } else if (char === '}') {
+              braceCount--;
+              if (inFunction && braceCount === 0) {
+                functionEndIndex = i;
+                break;
+              }
+            }
+          }
+          if (inFunction && braceCount === 0) break;
+        }
+        
+        // Add AI-generated code with attribution
+        const indent = lines[functionLineIndex].match(/^(\s*)/)[1];
+        const aiHeader = [
+          `${indent}// ============================================================`,
+          `${indent}//   AI-GENERATED FIX (Azure OpenAI gpt-5.1-codex)`,
+          `${indent}// Original: Runtime errors due to missing null checks`,
+          `${indent}// Fixed: Added defensive null/undefined checks`,
+          `${indent}// REVIEW REQUIRED: Test with various input scenarios`,
+          `${indent}// ============================================================`,
+          ''
+        ];
+        
+        // Replace function with AI-generated code
+        if (fix.refactoredCode) {
+          lines.splice(functionLineIndex, functionEndIndex - functionLineIndex + 1, ...aiHeader, fix.refactoredCode);
+          content = lines.join('\n');
+          description = `Add null checks to ${functionName}() (AI-generated)`;
+          impact = fix.impact || 'Prevents runtime errors, improves stability';
+        }
+      } else {
+        throw new Error(`Could not find function definition for ${functionName}`);
+      }
     }
 
     // Write updated content
@@ -1350,24 +1564,50 @@ ${hasAIRefactoring ? '\n REVIEW CHECKLIST:\n- [ ] Test all affected functions\n-
     
     for (const issue of bgImageIssues.slice(0, 3)) { // Limit to top 3
       try {
-        const filePath = resolve(this.workspaceRoot, issue.file);
-        const fileContent = readFileSync(filePath, 'utf-8');
+        const cssFilePath = resolve(this.workspaceRoot, issue.file);
+        const cssContent = readFileSync(cssFilePath, 'utf-8');
         
-        // PHASE 1 ENHANCEMENT: Send full file + related files
-        const enhancedContext = this.buildCSSEnhancedContext(issue.file, fileContent);
+        // NEW: Find associated component file (same base name, different extension)
+        const baseName = cssFilePath.replace(/\.css$/, '');
+        const componentExtensions = ['.js', '.jsx', '.ts', '.tsx'];
+        let componentPath = null;
+        let componentContent = null;
         
-        const fix = await this.generateBackgroundImageFix(issue, enhancedContext, fileContent);
+        for (const ext of componentExtensions) {
+          const testPath = baseName + ext;
+          if (existsSync(testPath)) {
+            componentPath = testPath;
+            componentContent = readFileSync(testPath, 'utf-8');
+            core.info(`Found associated component: ${relative(this.workspaceRoot, componentPath)}`);
+            break;
+          }
+        }
+        
+        // Build enhanced context with both CSS and component
+        const enhancedContext = {
+          cssFile: issue.file,
+          cssContent: cssContent,
+          componentFile: componentPath ? relative(this.workspaceRoot, componentPath) : null,
+          componentContent: componentContent,
+          imagePath: issue.imagePath || '',
+          selector: issue.selector || '',
+        };
+        
+        const fix = await this.generateBackgroundImageFix(issue, enhancedContext, cssContent, componentContent);
         
         if (fix) {
           suggestions.push({
             type: 'css-background-image-fix',
             severity: 'critical',
             file: issue.file,
+            componentFile: componentPath ? relative(this.workspaceRoot, componentPath) : null,
             line: issue.line,
-            title: `Replace background-image with Image component`,
+            title: `Replace background-image with Image component in ${basename(issue.file)}`,
             description: `CSS background-images cannot be lazy loaded. ${fix.explanation}`,
-            originalCode: fix.originalCode,
-            fixedCode: fix.fixedCode,
+            originalCode: fix.originalCSSCode,
+            fixedCSSCode: fix.fixedCSSCode,
+            originalComponentCode: fix.originalComponentCode,
+            fixedComponentCode: fix.fixedComponentCode,
             htmlSuggestion: fix.htmlSuggestion,
             estimatedImpact: 'Enables lazy loading, reduces initial page weight by image size'
           });
@@ -1775,6 +2015,67 @@ export function ${issue.functionName}(field, newState, globals) {
   }
 
   /**
+   * Fix runtime errors in custom functions
+   * Add null/undefined checks to prevent crashes
+   */
+  fixRuntimeErrors = async (customFunctionsResults) => {
+    if (!customFunctionsResults || !customFunctionsResults.newIssues) return [];
+    
+    const runtimeErrorIssues = customFunctionsResults.newIssues.filter(
+      issue => issue.type === 'runtime-error-in-custom-function'
+    );
+    
+    if (runtimeErrorIssues.length === 0) return [];
+    
+    const suggestions = [];
+    
+    for (const issue of runtimeErrorIssues.slice(0, 5)) { // Top 5
+      try {
+        // Extract function code
+        const functionCode = this.extractFunctionCode(issue);
+        const enhancedContext = this.buildEnhancedContext(issue);
+        
+        if (!enhancedContext || !functionCode) {
+          core.warning(`Could not extract context for ${issue.functionName}`);
+          continue;
+        }
+        
+        // Generate AI-powered null-check fix
+        const refactored = await this.generateRuntimeErrorFix(issue, functionCode, enhancedContext);
+        
+        if (refactored && refactored.jsCode) {
+          // Validate AI output
+          const validation = this.validateAIRefactoring(functionCode, refactored.jsCode, issue.functionName, 'runtime');
+          
+          if (!validation.valid) {
+            core.warning(`AI refactoring rejected for ${issue.functionName} (${validation.rulesChecked} rules checked):`);
+            validation.errors.forEach(err => core.warning(`  - ${err}`));
+            continue;
+          }
+          
+          core.info(`AI refactoring validated for ${issue.functionName} (${validation.rulesChecked} rules passed)`);
+          
+          suggestions.push({
+            type: 'custom-function-runtime-error-fix',
+            severity: 'warning',
+            file: issue.file || 'blocks/form/functions.js',
+            functionName: issue.functionName,
+            title: `Add null checks to ${issue.functionName}()`,
+            description: `Function throws ${issue.errorCount} runtime error(s): ${issue.errors && issue.errors[0]}`,
+            refactoredCode: refactored.jsCode,
+            impact: `Prevents ${issue.errorCount} runtime error(s), improves form stability`,
+            testingSteps: refactored.testingSteps || 'Test form submission and field interactions'
+          });
+        }
+      } catch (error) {
+        core.warning(`Error generating runtime error fix for ${issue.functionName}: ${error.message}`);
+      }
+    }
+    
+    return suggestions;
+  }
+
+  /**
    * Fix API calls in initialize events
    * Suggest moving to custom:formViewInitialized event
    */
@@ -1820,6 +2121,105 @@ export function ${issue.functionName}(field, newState, globals) {
     }
     
     return suggestions;
+  }
+
+  /**
+   * Generate recommendations for form validation errors
+   * These are authoring-level issues detected by af-core during form instance creation
+   * Cannot be auto-fixed programmatically - require manual form JSON updates
+   */
+  generateValidationErrorRecommendations = async (ruleCyclesResults) => {
+    if (!ruleCyclesResults || !ruleCyclesResults.after) return [];
+    
+    const { validationErrors, validationErrorCount } = ruleCyclesResults.after;
+    if (!validationErrors || validationErrorCount === 0) return [];
+    
+    const recommendations = [];
+    
+    // 1. DataRef Parsing Errors
+    for (const error of validationErrors.dataRefErrors.slice(0, 10)) { // Limit to top 10
+      recommendations.push({
+        type: 'form-validation-dataref-error',
+        severity: 'warning', // Warning, not critical (form still works, field data just won't export)
+        fieldId: error.fieldId,
+        dataRef: error.dataRef,
+        title: `Invalid dataRef syntax in field "${error.fieldId}"`,
+        description: `Field has invalid JSONPath in \`dataRef\`: "${error.dataRef}". The field's data will not be exported.`,
+        recommendation: `
+**Issue:** The \`dataRef\` property uses invalid JSONPath syntax: \`"${error.dataRef}"\`
+
+**Possible Causes:**
+1. **Missing path prefix** - Should be \`$.${error.dataRef}\` (global) or \`data.${error.dataRef}\` (relative)
+2. **Invalid characters** - Contains special chars like \`@\`, \`[\`, \`"\` without proper escaping
+3. **Unclosed quotes** - JSONPath string literal not properly closed
+
+**Fix in AEM Forms Authoring:**
+1. Open the form in **AEM Forms Editor**
+2. Select field "${error.fieldId}"
+3. In **Properties** panel → **Basic** tab → Find **Data Reference (dataRef)**
+4. Update to valid JSONPath:
+   - For global binding: \`$.${error.dataRef}\`
+   - For relative binding: \`data.${error.dataRef}\`
+   - Or remove \`dataRef\` to use field's \`name\` property instead
+
+**Impact:** Field value won't be included in form submission data until fixed.
+
+**Verification:** After fix, check browser console - error should disappear.
+        `,
+        estimatedImpact: 'Field data will be properly exported in form submissions'
+      });
+    }
+    
+    // 2. Type Conflict Errors
+    for (const error of validationErrors.typeConflicts.slice(0, 10)) { // Limit to top 10
+      recommendations.push({
+        type: 'form-validation-type-conflict',
+        severity: 'warning', // Warning, not critical (form still works, but data consistency issue)
+        fieldId: error.newField,
+        dataRef: error.dataRef,
+        title: `Type conflict: Multiple fields bound to "${error.dataRef}"`,
+        description: `Field "${error.newField}" (type: ${error.newFieldType}) shares dataRef with fields of different types: ${error.conflictingFields}`,
+        recommendation: `
+**Issue:** Multiple fields are mapped to the same data property (\`${error.dataRef}\`) but have different data types.
+
+**Conflicting Fields:**
+- **New field:** ${error.newField} (type: **${error.newFieldType}**)
+- **Existing fields:** ${error.conflictingFields}
+
+**Why This Is a Problem:**
+- The data model can only store ONE value at \`${error.dataRef}\`
+- When multiple fields with different types write to it, type coercion occurs
+- This can cause data loss or unexpected validation errors
+
+**Fix in AEM Forms Authoring:**
+
+**Option A:** Use unique \`dataRef\` for each field
+1. Open form in **AEM Forms Editor**
+2. Select field "${error.newField}"
+3. In **Properties** → **Basic** → Update **Data Reference (dataRef)** to unique value:
+   - Example: \`${error.dataRef}_text\` vs \`${error.dataRef}_number\`
+
+**Option B:** Ensure all fields use the SAME type
+1. Check all fields bound to \`${error.dataRef}\`
+2. Update their \`type\` property to match (e.g., all \`string\` or all \`number\`)
+
+**Option C:** Remove \`dataRef\` from one field
+1. If one field is just for display/calculation, remove its \`dataRef\`
+2. This prevents it from writing to the data model
+
+**Impact:** Consistent data types prevent silent data coercion and validation issues.
+
+**Verification:** After fix, check browser console - conflict warning should disappear.
+        `,
+        estimatedImpact: 'Eliminates data type inconsistencies and potential data loss'
+      });
+    }
+    
+    if (recommendations.length > 0) {
+      core.info(`Generated ${recommendations.length} form validation recommendations (${validationErrors.dataRefErrors.length} dataRef, ${validationErrors.typeConflicts.length} type conflicts)`);
+    }
+    
+    return recommendations;
   }
 
   /**
@@ -1928,45 +2328,53 @@ ${fullFileContent}
   /**
    * Generate background-image fix using AI with enhanced context
    */
-  generateBackgroundImageFix = async (issue, enhancedContext, fullFileContent) => {
-    const relatedFilesInfo = Object.keys(enhancedContext.relatedFiles).length > 0
-      ? `\n\nRelated files available:\n${Object.keys(enhancedContext.relatedFiles).map(f => `- ${f}`).join('\n')}`
-      : '';
+  generateBackgroundImageFix = async (issue, enhancedContext, cssContent, componentContent) => {
+    const hasComponent = !!componentContent;
+    
+    const prompt = `Replace CSS background-image with a lazy-loaded <img> element by refactoring BOTH the CSS and the component.
 
-    // Include related HTML/JS if available for better component suggestions
-    const relatedHTML = enhancedContext.relatedFiles[issue.file.replace('.css', '.html')] || '';
-    const relatedJS = enhancedContext.relatedFiles[issue.file.replace('.css', '.js')] || '';
+**CSS File:** ${enhancedContext.cssFile}
+**Component File:** ${enhancedContext.componentFile || 'Not found'}
+**Image Path:** ${enhancedContext.imagePath || issue.image}
+**Selector:** ${enhancedContext.selector}
 
-    const prompt = `Replace this CSS background-image with a lazy-loaded Image component.
-
-**File:** ${issue.file}
-**Line:** ${issue.line}
-**Image URL:** ${issue.image}
-**File Size:** ${enhancedContext.fileStats.size} (${enhancedContext.fileStats.lines} lines)${relatedFilesInfo}
-
-**Full CSS File:**
+**Current CSS:**
 \`\`\`css
-${fullFileContent}
+${cssContent}
 \`\`\`
 
-${relatedHTML ? `**Related HTML (${issue.file.replace('.css', '.html')}):**
-\`\`\`html
-${relatedHTML.substring(0, 2000)}${relatedHTML.length > 2000 ? '\n... (truncated)' : ''}
-\`\`\`\n` : ''}
+${hasComponent ? `**Current Component Code:**
+\`\`\`javascript
+${componentContent}
+\`\`\`
+` : '**Note:** No component file found. Generate HTML snippet instead.'}
 
-**Task:** Provide practical fix as JSON:
+**Task:** Refactor to use <img> element for better performance.
+
+**Response Format (JSON):**
 {
-  "originalCode": "The CSS background-image rule to replace/remove",
-  "fixedCode": "Updated CSS (remove bg-image, keep other styles)",
-  "htmlSuggestion": "Complete <img> tag with loading='lazy', width, height",
-  "explanation": "Why this improves LCP and enables lazy loading (1 sentence)"
+  "originalCSSCode": "CSS rule with background-image",
+  "fixedCSSCode": "Updated CSS (remove background-image, keep layout styles)",
+  ${hasComponent ? `"originalComponentCode": "Component code section to modify (if applicable)",
+  "fixedComponentCode": "Updated component with <img> tag (if applicable)",` : ''}
+  "htmlSuggestion": "Standalone <img> snippet with loading='lazy'",
+  "explanation": "Why this improves performance (1 sentence)"
 }
 
 **Requirements:**
-- Use loading="lazy" for off-screen images
-- Include width/height attributes to prevent CLS
-- Maintain visual appearance with CSS (object-fit, positioning)
-- Consider responsive images if applicable`;
+1. Remove background-image from CSS, keep other styles (display, width, height, positioning)
+${hasComponent ? `2. Add <img> element in component JSX/HTML with:
+   - src="${enhancedContext.imagePath || issue.image}"
+   - loading="lazy" (for off-screen images)
+   - width and height attributes (to prevent CLS)
+   - alt text for accessibility
+3. Maintain existing component logic and structure` : `2. Generate <img> element with loading="lazy", width, height, and alt`}
+4. Use object-fit CSS if needed to maintain aspect ratio
+
+**Performance Impact:**
+- CSS background-images cannot be lazy loaded
+- <img loading="lazy"> reduces initial page weight
+- width/height attributes prevent Cumulative Layout Shift (CLS)`;
 
     try {
       const response = await this.callAI(prompt, 'Fix CSS background-image');
@@ -1975,6 +2383,242 @@ ${relatedHTML.substring(0, 2000)}${relatedHTML.length > 2000 ? '\n... (truncated
       core.warning(`AI call failed for background-image fix: ${error.message}`);
       return null;
     }
+  }
+
+  /**
+   * Generate runtime error fix by adding null/undefined checks
+   */
+  generateRuntimeErrorFix = async (issue, functionCode, enhancedContext) => {
+    const errorList = issue.errors && issue.errors.length > 0 
+      ? issue.errors.map((err, i) => `${i + 1}. ${err}`).join('\n')
+      : 'Unknown errors';
+    
+    const contextInfo = enhancedContext ? `
+**Function Context:**
+- File: ${enhancedContext.fullFileContent ? `${enhancedContext.fullFileContent.split('\n').length} lines` : 'N/A'}
+- Imports: ${enhancedContext.imports.slice(0, 5).join(', ') || 'None'}
+- Related functions: ${enhancedContext.relatedFunctions.slice(0, 10).join(', ') || 'None'}
+- Helper functions available: ${enhancedContext.helperFunctions.slice(0, 5).map(h => h.name).join(', ') || 'None'}
+- AEM Utilities: ${enhancedContext.aemUtilities.join(', ') || 'None'}
+` : '';
+
+    const userPrompt = `Add defensive null/undefined checks to prevent runtime errors in this custom function.
+
+**Function:** ${issue.functionName}()
+**Error Count:** ${issue.errorCount}
+**Errors Encountered:**
+${errorList}
+${contextInfo}
+
+**Current Implementation:**
+\`\`\`javascript
+${functionCode}
+\`\`\`
+
+${enhancedContext?.fullFileContent && enhancedContext.fullFileContent.length < 15000 ? `
+**Complete File Context (for reference):**
+\`\`\`javascript
+${enhancedContext.fullFileContent}
+\`\`\`
+` : ''}
+
+**Task:** Add proper null/undefined checks to prevent these runtime errors.
+
+**Response Format (JSON ONLY):**
+{
+  "jsCode": "refactored function with null checks",
+  "testingSteps": "how to test the fix"
+}
+
+**CRITICAL RULES:**
+1. ADD null/undefined checks before property access
+2. PRESERVE function signature (parameters, name) exactly
+3. PRESERVE all existing logic and calculations
+4. PRESERVE all setProperty, setVariable, dispatchEvent calls
+5. ADD checks like: if (!obj || !obj.property) { return; }
+6. DO NOT change variable names
+7. DO NOT remove any logic
+8. DO NOT simplify or refactor existing code
+9. ONLY ADD defensive checks where errors occurred
+
+**Example Patterns:**
+- "Cannot read properties of null (reading 'toString')"
+  → Add: if (!value) { return; } before value.toString()
+
+- "Cannot read properties of undefined (reading 'split')"
+  → Add: if (!str || typeof str !== 'string') { return; } before str.split()
+
+- "Cannot read properties of undefined (reading '$value')"
+  → Add: if (!field || !field.$value) { return; } before field.$value
+
+Respond with ONLY the JSON object, no markdown formatting.`;
+
+    try {
+      const parsed = await this.callAzureOpenAI(`You are an expert at adding defensive null checks to JavaScript functions.`, userPrompt);
+      
+      if (parsed && parsed.jsCode && typeof parsed.jsCode === 'string' && parsed.jsCode.trim().length > 0) {
+        // Validate AI output
+        const validation = this.validateAIRefactoring(functionCode, parsed.jsCode, issue.functionName, 'runtime');
+        
+        if (!validation.valid) {
+          core.warning(`Runtime error fix rejected for ${issue.functionName}:`);
+          validation.errors.forEach(err => core.warning(`  - ${err}`));
+          return null;
+        }
+        
+        return {
+          jsCode: parsed.jsCode,
+          testingSteps: parsed.testingSteps || 'Test form with various input scenarios'
+        };
+      }
+    } catch (error) {
+      core.warning(`AI call failed for runtime error fix: ${error.message}`);
+    }
+    
+    return null;
+  }
+
+  /**
+   * Post PR review comments and check annotations with AI suggestions
+   * Uses BOTH:
+   * 1. GitHub Checks API (annotations) - Works for ALL files, even not in PR diff
+   * 2. PR Review Comments - Only works for files in PR diff, but gives "Apply suggestion" button
+   */
+  postPRReviewComments = async (httpDomFixes, octokit, owner, repo, prNumber, commitSha) => {
+    const reviewComments = [];
+    const annotations = [];
+    
+    // 1. Create GitHub Check with annotations (works for ALL files)
+    try {
+      core.info(' Creating GitHub Check with annotations...');
+      
+      const checkAnnotations = httpDomFixes.map(fix => ({
+        path: fix.file,
+        start_line: fix.line || 1,
+        end_line: fix.line || 1,
+        annotation_level: fix.severity === 'critical' ? 'failure' : 'warning',
+        title: fix.title || `${fix.type === 'custom-function-http-fix' ? 'HTTP Request' : 'DOM Access'} in Custom Function`,
+        message: this.buildAnnotationMessage(fix),
+        raw_details: fix.refactoredCode ? `Suggested fix:\n\n${fix.refactoredCode}` : undefined
+      }));
+      
+      await octokit.rest.checks.create({
+        owner,
+        repo,
+        name: 'AEM Forms Performance Analysis',
+        head_sha: commitSha,
+        status: 'completed',
+        conclusion: httpDomFixes.length > 0 ? 'neutral' : 'success',
+        output: {
+          title: `${httpDomFixes.length} Performance Issue(s) Detected`,
+          summary: `Found ${httpDomFixes.length} issue(s) in custom functions. Click each annotation for AI-generated fix suggestions.`,
+          annotations: checkAnnotations.slice(0, 50) // GitHub limit: 50 annotations per check
+        }
+      });
+      
+      core.info(`  Created check with ${checkAnnotations.length} annotation(s)`);
+      annotations.push(...checkAnnotations);
+      
+    } catch (error) {
+      core.warning(` Failed to create GitHub Check: ${error.message}`);
+      core.warning('  This requires "checks: write" permission in workflow');
+    }
+    
+    // 2. Try PR Review Comments for files in PR diff (gives "Apply suggestion" button)
+    for (const fix of httpDomFixes) {
+      try {
+        const commentBody = this.buildPRLineCommentBody(fix);
+        
+        await octokit.rest.pulls.createReviewComment({
+          owner,
+          repo,
+          pull_number: prNumber,
+          body: commentBody,
+          commit_id: commitSha,
+          path: fix.file,
+          line: fix.line || 1,
+          side: 'RIGHT'
+        });
+        
+        core.info(`  Posted review comment on ${fix.file}:${fix.line || 1} (file in PR diff)`);
+        reviewComments.push(fix);
+        
+      } catch (error) {
+        // If file is not in PR diff, GitHub returns 422
+        if (error.status === 422) {
+          core.info(`  File ${fix.file} not in PR diff - annotation in "Checks" tab instead`);
+        } else {
+          core.warning(`  Failed to post comment on ${fix.file}: ${error.message}`);
+        }
+      }
+    }
+    
+    return { reviewComments, annotations };
+  }
+  
+  /**
+   * Build annotation message for GitHub Checks
+   */
+  buildAnnotationMessage = (fix) => {
+    if (fix.type === 'custom-function-http-fix') {
+      return `Function ${fix.functionName}() makes direct HTTP call, bypassing form's request() API. Use Visual Rule Editor to refactor this function to dispatch events instead.`;
+    } else if (fix.type === 'custom-function-dom-fix') {
+      return `Function ${fix.functionName}() accesses DOM directly. Use globals.functions.setProperty() instead to update field properties.`;
+    }
+    return fix.description || 'Performance issue detected';
+  }
+
+  /**
+   * Build PR line comment body with AI suggestion
+   */
+  buildPRLineCommentBody = (fix) => {
+    const lines = [];
+    
+    if (fix.type === 'custom-function-http-fix') {
+      lines.push(`##  HTTP Request in Custom Function`);
+      lines.push('');
+      lines.push(`**Function:** \`${fix.functionName}()\``);
+      lines.push(`**Issue:** Direct HTTP call bypasses form's request() API`);
+      lines.push('');
+      lines.push('**AI-Generated Fix:**');
+      lines.push('Use **Visual Rule Editor** to refactor this function according to the suggestion below:');
+      lines.push('');
+      lines.push('```suggestion');
+      lines.push(fix.refactoredCode || '// AI-generated refactored code');
+      lines.push('```');
+      lines.push('');
+      lines.push('**Testing:** ' + (fix.testingSteps || 'Test form submission and API calls'));
+      lines.push('');
+      lines.push('---');
+      lines.push('* AI-powered suggestion by [AEM Forms Performance Analyzer](https://github.com/rismehta/forms-performance-bot)*');
+      
+    } else if (fix.type === 'custom-function-dom-fix') {
+      lines.push(`##  DOM Access in Custom Function`);
+      lines.push('');
+      lines.push(`**Function:** \`${fix.functionName}()\``);
+      lines.push(`**Issue:** Direct DOM manipulation bypasses form state management`);
+      lines.push('');
+      lines.push('**AI-Generated Fix:**');
+      lines.push('Use **Visual Rule Editor** to refactor this function:');
+      lines.push('');
+      lines.push('```suggestion');
+      lines.push(fix.refactoredCode || '// AI-generated refactored code');
+      lines.push('```');
+      lines.push('');
+      if (fix.componentExample) {
+        lines.push('**Custom Component (if complex UI):**');
+        lines.push('```javascript');
+        lines.push(fix.componentExample);
+        lines.push('```');
+        lines.push('');
+      }
+      lines.push('**Testing:** ' + (fix.testingSteps || 'Test UI interactions'));
+      lines.push('');
+      lines.push('---');
+      lines.push('* AI-powered suggestion by [AEM Forms Performance Analyzer](https://github.com/rismehta/forms-performance-bot)*');
+    }
+    
+    return lines.join('\n');
   }
 
   /**

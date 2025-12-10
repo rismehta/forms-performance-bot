@@ -38,7 +38,7 @@ class TestRunner {
 
     try {
       // Load configuration
-      console.log('📋 Loading configuration...');
+      console.log(' Loading configuration...');
       const config = await loadConfig();
       console.log('');
 
@@ -55,11 +55,11 @@ class TestRunner {
       // Step 1: Fetch URLs
       console.log('📥 Fetching before URL...');
       const beforeData = await urlAnalyzer.analyze(beforeUrl);
-      console.log(`✅ Before URL fetched (${(beforeData.rawSize / 1024).toFixed(2)} KB)`);
+      console.log(` Before URL fetched (${(beforeData.rawSize / 1024).toFixed(2)} KB)`);
 
       console.log('📥 Fetching after URL...');
       const afterData = await urlAnalyzer.analyze(afterUrl);
-      console.log(`✅ After URL fetched (${(afterData.rawSize / 1024).toFixed(2)} KB)\n`);
+      console.log(` After URL fetched (${(afterData.rawSize / 1024).toFixed(2)} KB)\n`);
 
       // Load mock JS/CSS files if provided
       const jsFiles = options.jsFiles || [];
@@ -104,7 +104,7 @@ class TestRunner {
       const formCSSAnalysis = { after: cssAnalysis, newIssues: cssAnalysis.issues, resolvedIssues: [] };
       const customFunctionAnalysis = customFunctionAnalyzer.compare(beforeCustomFunctions, afterCustomFunctions);
       
-      console.log('✅ All analyses completed\n');
+      console.log(' All analyses completed\n');
 
       // Step 3: Compile results
       const results = {
@@ -118,7 +118,7 @@ class TestRunner {
       };
 
       // Step 4: Generate report
-      console.log('📝 Generating PR Comment Report...\n');
+      console.log(' Generating PR Comment Report...\n');
       const reporter = new MockPRReporter();
       const report = reporter.generateReportSync(results, { before: beforeUrl, after: afterUrl });
 
@@ -128,11 +128,11 @@ class TestRunner {
       fs.writeFileSync(outputPath, report);
 
       console.log('═══════════════════════════════════════════════════════════\n');
-      console.log('📊 GENERATED PR COMMENT:\n');
+      console.log(' GENERATED PR COMMENT:\n');
       console.log('═══════════════════════════════════════════════════════════\n');
       console.log(report);
       console.log('\n═══════════════════════════════════════════════════════════\n');
-      console.log(`✅ Report saved to: ${outputPath}\n`);
+      console.log(` Report saved to: ${outputPath}\n`);
 
       // Summary
       this.printSummary(results);
@@ -144,7 +144,7 @@ class TestRunner {
       };
 
     } catch (error) {
-      console.error('❌ Test failed:', error.message);
+      console.error(' Test failed:', error.message);
       console.error(error.stack);
       this.results.failed++;
       this.results.errors.push(error);
@@ -159,11 +159,11 @@ class TestRunner {
    * Print summary of findings
    */
   printSummary(results) {
-    console.log('📊 ANALYSIS SUMMARY:\n');
+    console.log(' ANALYSIS SUMMARY:\n');
 
     // Form Structure
     if (results.formStructure?.after) {
-      console.log('📝 Form Structure:');
+      console.log(' Form Structure:');
       console.log(`  - Components: ${results.formStructure.after.components.total}`);
       console.log(`  - Max Depth: ${results.formStructure.after.components.maxDepth}`);
       console.log(`  - Event Handlers: ${results.formStructure.after.events.total}`);
@@ -174,8 +174,8 @@ class TestRunner {
     // Form Events
     if (results.formEvents?.after) {
       const apiCalls = results.formEvents.after.apiCallsInInitialize?.length || 0;
-      console.log('⚡ Form Events:');
-      console.log(`  - API calls in initialize: ${apiCalls} ${apiCalls > 0 ? '🚨' : '✅'}`);
+      console.log(' Form Events:');
+      console.log(`  - API calls in initialize: ${apiCalls} ${apiCalls > 0 ? '' : ''}`);
       console.log('');
     }
 
@@ -183,7 +183,7 @@ class TestRunner {
     if (results.hiddenFields?.after) {
       console.log('👁️ Hidden Fields:');
       console.log(`  - Total hidden: ${results.hiddenFields.after.totalHiddenFields}`);
-      console.log(`  - Unnecessary: ${results.hiddenFields.after.unnecessaryHiddenFields} ${results.hiddenFields.after.unnecessaryHiddenFields > 0 ? '⚠️' : '✅'}`);
+      console.log(`  - Unnecessary: ${results.hiddenFields.after.unnecessaryHiddenFields} ${results.hiddenFields.after.unnecessaryHiddenFields > 0 ? '' : ''}`);
       console.log('');
     }
 
@@ -191,7 +191,7 @@ class TestRunner {
     if (results.ruleCycles?.after) {
       const cycles = results.ruleCycles.after.cycles || 0;
       console.log('🔄 Rule Cycles:');
-      console.log(`  - Circular dependencies: ${cycles} ${cycles > 0 ? '🚨' : '✅'}`);
+      console.log(`  - Circular dependencies: ${cycles} ${cycles > 0 ? '' : ''}`);
       if (cycles > 0 && results.ruleCycles.after.cycleDetails) {
         results.ruleCycles.after.cycleDetails.forEach((cycle, i) => {
           console.log(`    ${i + 1}. ${cycle.fields.join(' → ')}`);
@@ -204,8 +204,8 @@ class TestRunner {
     if (results.formHTML?.after) {
       console.log('🎨 Form HTML:');
       console.log(`  - Images: ${results.formHTML.after.images.total}`);
-      console.log(`  - Non-lazy images: ${results.formHTML.after.images.nonLazyLoaded} ${results.formHTML.after.images.nonLazyLoaded > 0 ? '⚠️' : '✅'}`);
-      console.log(`  - Blocking scripts: ${results.formHTML.after.scripts.blocking} ${results.formHTML.after.scripts.blocking > 0 ? '🚨' : '✅'}`);
+      console.log(`  - Non-lazy images: ${results.formHTML.after.images.nonLazyLoaded} ${results.formHTML.after.images.nonLazyLoaded > 0 ? '' : ''}`);
+      console.log(`  - Blocking scripts: ${results.formHTML.after.scripts.blocking} ${results.formHTML.after.scripts.blocking > 0 ? '' : ''}`);
       console.log(`  - Issues: ${results.formHTML.after.issues.length}`);
       console.log('');
     }
@@ -214,7 +214,7 @@ class TestRunner {
     if (results.formCSS?.after) {
       console.log('🎨 Form CSS:');
       console.log(`  - Files analyzed: ${results.formCSS.after.filesAnalyzed}`);
-      console.log(`  - Background images: ${results.formCSS.after.summary.backgroundImages} ${results.formCSS.after.summary.backgroundImages > 0 ? '⚠️' : '✅'}`);
+      console.log(`  - Background images: ${results.formCSS.after.summary.backgroundImages} ${results.formCSS.after.summary.backgroundImages > 0 ? '' : ''}`);
       console.log(`  - Total issues: ${results.formCSS.after.issues.length}`);
       console.log('');
     }
@@ -224,7 +224,7 @@ class TestRunner {
       const violations = results.customFunctions.after.violations || 0;
       console.log('⚙️ Custom Functions:');
       console.log(`  - Functions analyzed: ${results.customFunctions.after.functionsAnalyzed}`);
-      console.log(`  - Violations: ${violations} ${violations > 0 ? '🚨' : '✅'}`);
+      console.log(`  - Violations: ${violations} ${violations > 0 ? '' : ''}`);
       console.log('');
     }
   }

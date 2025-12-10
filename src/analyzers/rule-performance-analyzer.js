@@ -126,6 +126,47 @@ export class RulePerformanceAnalyzer {
       let originalExecute = null;
       const that = this; // Capture 'this' for use in callback
       
+      // CAPTURE FORM VALIDATION ERRORS: Intercept console.error to capture af-core validation warnings
+      const validationErrors = {
+        dataRefErrors: [],
+        typeConflicts: []
+      };
+      const originalConsoleError = console.error;
+      console.error = (...args) => {
+        const message = args[0];
+        if (typeof message === 'string') {
+          // Capture dataRef parsing errors
+          if (message.includes('Error parsing dataRef')) {
+            const match = message.match(/Error parsing dataRef "([^"]+)" for field "([^"]+)"/);
+            if (match) {
+              validationErrors.dataRefErrors.push({
+                dataRef: match[1],
+                fieldId: match[2],
+                message: message
+              });
+            }
+          }
+          // Capture type conflict errors
+          else if (message.includes('Type conflict detected')) {
+            const dataRefMatch = message.match(/DataRef:\s*(\S+)/);
+            const newFieldMatch = message.match(/New field '([^']+)'\s*\(([^)]+)\)/);
+            const conflictsMatch = message.match(/conflicts with:\s*(.+?)(?:\.\s*DataRef|$)/);
+            
+            if (newFieldMatch) {
+              validationErrors.typeConflicts.push({
+                dataRef: dataRefMatch ? dataRefMatch[1] : 'unknown',
+                newField: newFieldMatch[1],
+                newFieldType: newFieldMatch[2],
+                conflictingFields: conflictsMatch ? conflictsMatch[1] : '',
+                message: message
+              });
+            }
+          }
+        }
+        // Still call original console.error for logging
+        originalConsoleError(...args);
+      };
+      
       // Use createFormInstanceSync with callback to hook into RuleEngine BEFORE event queue runs
       // This ensures ExecuteRule event completes and dependencies are tracked
       // After this call returns, all rules have executed and _dependents arrays are populated
@@ -233,6 +274,32 @@ export class RulePerformanceAnalyzer {
         });
       }
 
+      // Convert functionFailures Map to array for reporting
+      const runtimeErrors = [];
+      if (functionFailures && functionFailures.size > 0) {
+        for (const [fnName, failure] of functionFailures.entries()) {
+          runtimeErrors.push({
+            functionName: fnName,
+            errorCount: failure.count,
+            errors: Array.from(failure.errors),
+            severity: 'warning', // Runtime errors are warnings, not critical errors
+            type: 'runtime-error-in-custom-function',
+            recommendation: `Function "${fnName}" throws errors during execution. Review function logic to handle missing or null values gracefully.`
+          });
+        }
+      }
+
+      // Restore console.error
+      console.error = originalConsoleError;
+      
+      // Log validation errors if found
+      if (validationErrors.dataRefErrors.length > 0) {
+        core.info(` Found ${validationErrors.dataRefErrors.length} dataRef parsing error(s)`);
+      }
+      if (validationErrors.typeConflicts.length > 0) {
+        core.info(` Found ${validationErrors.typeConflicts.length} type conflict(s)`);
+      }
+
       return {
         totalRules: dependencyGraph.totalRules,
         fieldsWithRules: dependencyGraph.fieldsWithRules,
@@ -246,8 +313,15 @@ export class RulePerformanceAnalyzer {
           cycle: cycle.fields || cycle.path,
           fields: cycle.fields,
         })),
+        runtimeErrors, // NEW: Runtime errors for AI to fix
+        runtimeErrorCount: runtimeErrors.length,
+        validationErrors, // NEW: Form validation errors from af-core
+        validationErrorCount: validationErrors.dataRefErrors.length + validationErrors.typeConflicts.length,
       };
     } catch (error) {
+      // Restore console.error in catch block too
+      console.error = originalConsoleError;
+      
       console.error('Error analyzing rule cycles:', error);
       return {
         totalRules: 0,

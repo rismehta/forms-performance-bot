@@ -11,10 +11,10 @@ try {
   console.log('Note: Missing config values will use CWV-optimized defaults\n');
   const config = await loadConfig();
 
-  console.log('✅ Configuration loaded successfully!\n');
+  console.log(' Configuration loaded successfully!\n');
 
   // Display thresholds
-  console.log('📊 Form Thresholds:');
+  console.log(' Form Thresholds:');
   console.log('  - Max Components:', config.thresholds.form.maxComponents);
   console.log('  - Max Depth:', config.thresholds.form.maxDepth);
   console.log('  - Max Complexity:', config.thresholds.form.maxComplexity);
@@ -24,7 +24,7 @@ try {
   console.log('  - Max Total Rules:', config.thresholds.form.maxTotalRules);
   console.log('  - Max Nested Panels:', config.thresholds.form.maxNestedPanels);
 
-  console.log('\n📊 HTML Thresholds:');
+  console.log('\n HTML Thresholds:');
   console.log('  - Max DOM Size:', config.thresholds.html.maxDOMSize);
   console.log('  - Max DOM Depth:', config.thresholds.html.maxDOMDepth);
   console.log('  - Max Inline Styles:', config.thresholds.html.maxInlineStyles);
@@ -33,14 +33,14 @@ try {
   console.log('  - Require Lazy Loading:', config.thresholds.html.requireLazyLoading);
   console.log('  - Require Image Dimensions:', config.thresholds.html.requireImageDimensions);
 
-  console.log('\n📊 JavaScript Thresholds:');
+  console.log('\n JavaScript Thresholds:');
   console.log('  - Max File Size:', config.thresholds.javascript.maxFileSize, 'bytes');
   console.log('  - Max Function Complexity:', config.thresholds.javascript.maxFunctionComplexity);
   console.log('  - Max Functions Per File:', config.thresholds.javascript.maxFunctionsPerFile);
   console.log('  - Max Lines Per Function:', config.thresholds.javascript.maxLinesPerFunction);
   console.log('  - Block APIs in Initialize:', config.thresholds.javascript.blockingAPIsInInitialize);
 
-  console.log('\n📊 CSS Thresholds:');
+  console.log('\n CSS Thresholds:');
   console.log('  - Max File Size:', config.thresholds.css.maxFileSize, 'bytes');
   console.log('  - Max Selectors Per File:', config.thresholds.css.maxSelectorsPerFile);
   console.log('  - Max Selector Depth:', config.thresholds.css.maxSelectorDepth);
@@ -50,7 +50,7 @@ try {
   console.log('  - Max Inline Data URI Size:', config.thresholds.css.maxInlineDataURISize);
   console.log('  - Prefer CSS Variables:', config.thresholds.css.preferCSSVariables);
 
-  console.log('\n📊 Image Thresholds:');
+  console.log('\n Image Thresholds:');
   console.log('  - Require Lazy Loading:', config.thresholds.images.requireLazyLoading);
   console.log('  - Require Dimensions:', config.thresholds.images.requireDimensions);
   console.log('  - Max Inline Image Size:', config.thresholds.images.maxInlineImageSize);
@@ -75,12 +75,12 @@ try {
   });
 
   console.log('\n═══════════════════════════════════════════════════════════\n');
-  console.log('✅ Configuration test passed!\n');
+  console.log(' Configuration test passed!\n');
   console.log('💡 These thresholds are based on Core Web Vitals research.');
   console.log('   See docs/THRESHOLDS.md for detailed explanations.\n');
 
 } catch (error) {
-  console.error('\n❌ Configuration test failed!');
+  console.error('\n Configuration test failed!');
   console.error('Error:', error.message);
   console.error(error.stack);
   process.exit(1);

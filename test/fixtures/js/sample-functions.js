@@ -37,26 +37,26 @@ function setupForm(globals) {
 }
 
 /**
- * ❌ VIOLATION: This function accesses DOM directly
+ *  VIOLATION: This function accesses DOM directly
  * Custom functions should NOT manipulate DOM
  * Recommendation: Use custom components instead
  */
 function validateUserName(globals) {
-  const input = document.querySelector('#userName');  // ❌ DOM access
+  const input = document.querySelector('#userName');  //  DOM access
   if (input && input.value.length < 3) {
-    alert('Username must be at least 3 characters');  // ❌ DOM manipulation
+    alert('Username must be at least 3 characters');  //  DOM manipulation
     return false;
   }
   return true;
 }
 
 /**
- * ❌ VIOLATION: This function makes HTTP requests
+ *  VIOLATION: This function makes HTTP requests
  * Custom functions should NOT make API calls
  * Recommendation: Use API Tool instead
  */
 function loadUserData(globals) {
-  const xhr = new XMLHttpRequest();  // ❌ HTTP request
+  const xhr = new XMLHttpRequest();  //  HTTP request
   xhr.open('GET', '/api/user', true);
   xhr.onload = function() {
     if (xhr.status === 200) {
@@ -68,7 +68,7 @@ function loadUserData(globals) {
 }
 
 /**
- * ✅ GOOD: This function is fine - no DOM or HTTP
+ *  GOOD: This function is fine - no DOM or HTTP
  */
 function createJourneyId(channel) {
   return 'journey_' + channel + '_' + Date.now();

@@ -4,13 +4,13 @@
 
 | Mode | Network | JS/CSS | Speed | Use Case |
 |------|---------|--------|-------|----------|
-| **1. Offline Unit Test** | ❌ No | ✅ Mock | ⚡ Fastest | Quick analyzer testing |
-| **2. Live URLs (Basic)** | ✅ Yes | ❌ No | 🚀 Fast | Quick form check |
-| **3. Live URLs (Full)** | ✅ Yes | ✅ Local | ⏱️ Complete | Full local validation |
+| **1. Offline Unit Test** |  No |  Mock |  Fastest | Quick analyzer testing |
+| **2. Live URLs (Basic)** |  Yes |  No |  Fast | Quick form check |
+| **3. Live URLs (Full)** |  Yes |  Local |  Complete | Full local validation |
 
 ---
 
-## Test 1: Offline Unit Test ⚡ **Recommended for Development**
+## Test 1: Offline Unit Test  **Recommended for Development**
 
 **No network required! Tests all analyzers with mock data.**
 
@@ -21,7 +21,7 @@ node test/test-analyzers-offline.js
 
 ### What It Tests:
 
-✅ **All 7 Analyzers with Mock Data:**
+ **All 7 Analyzers with Mock Data:**
 1. Form Structure - Component count, depth, events
 2. Form Events - API calls in initialize detection
 3. Hidden Fields - Path matching with mock JS
@@ -33,24 +33,24 @@ node test/test-analyzers-offline.js
 ### Expected Issues Detected:
 
 ```
-✅ 1 API call in initialize (fetch)
-✅ 2 unnecessary hidden fields (unusedField, userId)
-✅ 2 custom function violations (DOM access, HTTP request)
-✅ 1 non-lazy loaded image
-✅ 1 blocking script
-✅ 4+ CSS issues
+ 1 API call in initialize (fetch)
+ 2 unnecessary hidden fields (unusedField, userId)
+ 2 custom function violations (DOM access, HTTP request)
+ 1 non-lazy loaded image
+ 1 blocking script
+ 4+ CSS issues
 ```
 
 ### Benefits:
 
-- ⚡ **Super fast** (~1-2 seconds)
+-  **Super fast** (~1-2 seconds)
 - 🔒 **No network needed**
 - 🎯 **Tests exact patterns** you care about
 - 🐛 **Easy debugging** - controlled data
 
 ---
 
-## Test 2: Live URLs (Basic) 🚀 **Quick Form Check**
+## Test 2: Live URLs (Basic)  **Quick Form Check**
 
 **Tests with real form URLs, but no JS/CSS analysis.**
 
@@ -63,15 +63,15 @@ cd /Users/rismehta/performance-bot
 
 ### What It Tests:
 
-- ✅ Form JSON extraction from real page
-- ✅ Form structure (components, depth)
-- ✅ Form events (API in initialize)
-- ✅ Form HTML (images, scripts)
-- ⚠️ Hidden fields (**inaccurate** - marks all as unnecessary)
-- ⚠️ Custom functions (finds nothing - no JS)
-- ⚠️ CSS (finds nothing - no CSS)
+-  Form JSON extraction from real page
+-  Form structure (components, depth)
+-  Form events (API in initialize)
+-  Form HTML (images, scripts)
+-  Hidden fields (**inaccurate** - marks all as unnecessary)
+-  Custom functions (finds nothing - no JS)
+-  CSS (finds nothing - no CSS)
 
-### ⚠️ Limitations:
+###  Limitations:
 
 ```
 Mock JS files: 0
@@ -106,30 +106,30 @@ node test-local-with-files.js \
 
 ### What It Tests:
 
-- ✅ Form JSON from real page
-- ✅ Form structure
-- ✅ Form events
-- ✅ **Hidden fields (accurate!)** - checks against your JS files
-- ✅ **Custom functions** - analyzes your actual functions
-- ✅ Form HTML
-- ✅ **CSS** - analyzes your stylesheets
+-  Form JSON from real page
+-  Form structure
+-  Form events
+-  **Hidden fields (accurate!)** - checks against your JS files
+-  **Custom functions** - analyzes your actual functions
+-  Form HTML
+-  **CSS** - analyzes your stylesheets
 
 ### Example Output:
 
 ```
 📂 Loading JavaScript files from: /Users/rismehta/forms-engine/blocks/form
-✅ Loaded 45 JavaScript files
+ Loaded 45 JavaScript files
 
 📂 Loading CSS files from: /Users/rismehta/forms-engine/styles
-✅ Loaded 12 CSS files
+ Loaded 12 CSS files
 
 👁️ Hidden Fields:
   - Total hidden: 70
-  - Unnecessary: 5 ✅ (Actually accurate!)
+  - Unnecessary: 5  (Actually accurate!)
 
 ⚙️ Custom Functions:
   - Functions analyzed: 12
-  - Violations: 2 🚨 (DOM access detected)
+  - Violations: 2  (DOM access detected)
 ```
 
 ### Use Case:
@@ -235,9 +235,9 @@ The analyzer now matches by **both full path AND field name**:
 ```
 
 This correctly handles:
-- ✅ Simple forms with unique field names
-- ✅ Complex forms with duplicate field names
-- ✅ Nested panels with same-named fields
+-  Simple forms with unique field names
+-  Complex forms with duplicate field names
+-  Nested panels with same-named fields
 
 ---
 
@@ -255,11 +255,11 @@ This correctly handles:
 
 ## Next Steps
 
-1. ✅ Run offline test first: `node test/test-analyzers-offline.js`
-2. ✅ Test with your form URL: `./test-local.sh <url> <url>`
-3. ✅ Full test with your code: `node test-local-with-files.js --js-dir ... --css-dir ...`
-4. ✅ Review output: `cat test/output/pr-comment.md`
-5. ✅ Deploy to GitHub Actions when confident
+1.  Run offline test first: `node test/test-analyzers-offline.js`
+2.  Test with your form URL: `./test-local.sh <url> <url>`
+3.  Full test with your code: `node test-local-with-files.js --js-dir ... --css-dir ...`
+4.  Review output: `cat test/output/pr-comment.md`
+5.  Deploy to GitHub Actions when confident
 
 ---
 

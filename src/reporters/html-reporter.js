@@ -422,7 +422,7 @@ export class HTMLReporter {
       ${apiCalls.map(call => `
         <div class="issue-item">
           <h4>${call.field} <code>${call.path}</code></h4>
-          <p><strong>Type:</strong> ${call.type}</p>
+          <p><strong>Type:</strong> ${call.apiCallType || 'API call'}</p>
           <p><strong>Expression:</strong></p>
           <pre><code>${call.expression.substring(0, 150)}...</code></pre>
         </div>
@@ -545,10 +545,11 @@ export class HTMLReporter {
     const data = results.customFunctions?.after;
     if (!data) return '';
 
-    const httpIssues = data.issues?.filter(i => i.type === 'http-request') || [];
-    const domIssues = data.issues?.filter(i => i.type === 'dom-access') || [];
+    const httpIssues = data.issues?.filter(i => i.type === 'http-request-in-custom-function') || [];
+    const domIssues = data.issues?.filter(i => i.type === 'dom-access-in-custom-function') || [];
+    const runtimeErrors = data.issues?.filter(i => i.type === 'runtime-error-in-custom-function') || [];
 
-    if (httpIssues.length === 0 && domIssues.length === 0) {
+    if (httpIssues.length === 0 && domIssues.length === 0 && runtimeErrors.length === 0) {
       return `<div class="section"><h2> Custom Functions</h2><p>${data.functionsAnalyzed || 0} functions analyzed, no violations</p></div>`;
     }
 
@@ -573,6 +574,18 @@ export class HTMLReporter {
           <div class="issue-item">
             <h4>${issue.functionName}() in <code>${issue.file}</code></h4>
             <p>Direct DOM manipulation bypasses form state</p>
+          </div>
+        `).join('')}
+      ` : ''}
+      
+      ${runtimeErrors.length > 0 ? `
+        <h3>Runtime Errors (${runtimeErrors.length})</h3>
+        <p class="info">Functions encountered errors during execution. These can be auto-fixed by AI to add proper null/undefined checks.</p>
+        ${runtimeErrors.map(issue => `
+          <div class="issue-item">
+            <h4>${issue.functionName}() - ${issue.errorCount} error(s)</h4>
+            <p><strong>Error:</strong> ${issue.errors && issue.errors.length > 0 ? issue.errors[0] : 'Unknown error'}</p>
+            <p>${issue.recommendation}</p>
           </div>
         `).join('')}
       ` : ''}

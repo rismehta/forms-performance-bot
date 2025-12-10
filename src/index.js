@@ -43,6 +43,26 @@ async function run() {
     const { owner, repo } = context.repo;
 
     core.info(`Analyzing PR #${prNumber} in ${owner}/${repo}`);
+    
+    // LOOP PREVENTION: Skip if last commit was made by the bot
+    try {
+      const lastCommitAuthor = context.payload.pull_request.head.user.login;
+      const lastCommitMessage = context.payload.after 
+        ? (await octokit.rest.repos.getCommit({ owner, repo, ref: context.payload.after })).data.commit.message
+        : '';
+      
+      const botCommitPrefixes = ['[bot]', '[performance-bot]', 'chore: Auto-fix performance'];
+      const isBotCommit = botCommitPrefixes.some(prefix => lastCommitMessage.startsWith(prefix));
+      
+      if (isBotCommit || lastCommitAuthor === 'github-actions[bot]') {
+        core.info(' Skipping analysis - last commit was made by the bot (loop prevention)');
+        core.info(`   Last commit: "${lastCommitMessage.substring(0, 60)}..."`);
+        return;
+      }
+    } catch (error) {
+      core.warning(`Could not check last commit author: ${error.message}`);
+      // Continue with analysis if we can't determine the author
+    }
 
     // Extract before/after URLs from PR description
     const prBody = context.payload.pull_request.body || '';
@@ -197,6 +217,26 @@ async function run() {
     
     core.info(' All analyses completed');
 
+    // Merge runtime errors from rule cycle analysis into custom functions
+    if (ruleCycleAnalysis?.after?.runtimeErrors && ruleCycleAnalysis.after.runtimeErrors.length > 0) {
+      core.info(`Merging ${ruleCycleAnalysis.after.runtimeErrors.length} runtime error(s) into custom functions`);
+      
+      // Add runtime errors as issues to custom functions
+      if (!customFunctionAnalysis.after.issues) {
+        customFunctionAnalysis.after.issues = [];
+      }
+      customFunctionAnalysis.after.issues.push(...ruleCycleAnalysis.after.runtimeErrors);
+      
+      // Add to newIssues for reporting
+      if (!customFunctionAnalysis.newIssues) {
+        customFunctionAnalysis.newIssues = [];
+      }
+      customFunctionAnalysis.newIssues.push(...ruleCycleAnalysis.after.runtimeErrors);
+      
+      // Track runtime error count
+      customFunctionAnalysis.after.runtimeErrorCount = ruleCycleAnalysis.after.runtimeErrorCount;
+    }
+
     const results = {
       formStructure: formStructureAnalysis,
       formEvents: formEventsAnalysis,
@@ -225,29 +265,28 @@ async function run() {
       }
     }
     
-    // CREATE AUTO-FIX PR (if there are trivial fixes to apply)
-    let autoFixPR = null;
+    // APPLY AUTO-FIXES TO CURRENT PR (commit directly to the same PR)
+    let autoFixCommit = null;
     if (autoFixSuggestions.enabled && autoFixSuggestions.suggestions.length > 0) {
-      core.info(' Creating Auto-Fix PR with trivial fixes...');
+      core.info(' Applying auto-fixes to current PR...');
       try {
-        autoFixPR = await aiAutoFixAnalyzer.createAutoFixPR(
+        autoFixCommit = await aiAutoFixAnalyzer.applyFixesToCurrentPR(
           autoFixSuggestions.suggestions,
           octokit,
           owner,
           repo,
-          prBranch,  // Target user's feature branch
-          prNumber
+          prBranch  // Commit to the feature branch itself
         );
         
-        if (autoFixPR) {
-          core.info(` Auto-fix PR created: #${autoFixPR.number}`);
-          core.info(`  URL: ${autoFixPR.url}`);
-          core.info(`  Fixes: ${autoFixPR.filesChanged} file(s) changed`);
+        if (autoFixCommit) {
+          core.info(` Auto-fixes committed: ${autoFixCommit.sha.substring(0, 7)}`);
+          core.info(`  Files changed: ${autoFixCommit.filesChanged}`);
+          core.info(`  Commit message: "${autoFixCommit.message}"`);
         } else {
-          core.info(' No trivial fixes available for auto-fix PR');
+          core.info(' No trivial fixes available to auto-commit');
         }
       } catch (error) {
-        core.warning(` Could not create auto-fix PR: ${error.message}`);
+        core.warning(` Could not apply auto-fixes: ${error.message}`);
       }
     }
     
@@ -308,9 +347,34 @@ async function run() {
       beforeData, // Include performance metrics
       afterData,  // Include performance metrics
       autoFixSuggestions, // Include AI-generated fix suggestions
-      autoFixPR, // Include auto-fix PR details
+      autoFixCommit, // Include auto-fix commit details
       gistUrl, // Direct browser link to HTML report
     }, prNumber, `${owner}/${repo}`);
+    
+    // Post PR review comments on specific lines for HTTP/DOM fixes
+    if (autoFixSuggestions?.enabled && autoFixSuggestions.suggestions.length > 0) {
+      const httpDomFixes = autoFixSuggestions.suggestions.filter(s =>
+        s.type === 'custom-function-http-fix' || s.type === 'custom-function-dom-fix'
+      );
+      
+      if (httpDomFixes.length > 0) {
+        core.info(` Posting ${httpDomFixes.length} line-level PR review comment(s)...`);
+        try {
+          await aiAutoFixAnalyzer.postPRReviewComments(
+            httpDomFixes,
+            octokit,
+            owner,
+            repo,
+            prNumber,
+            context.payload.pull_request.head.sha
+          );
+          core.info(` Posted ${httpDomFixes.length} line-level suggestion(s) on PR`);
+        } catch (error) {
+          core.warning(` Failed to post PR review comments: ${error.message}`);
+          core.warning('Suggestions are still visible in main PR comment');
+        }
+      }
+    }
 
     // Fail the build if critical issues are detected
     if (criticalIssues.hasCritical) {

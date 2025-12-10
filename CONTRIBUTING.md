@@ -354,5 +354,5 @@ Feel free to open an issue for any questions about contributing!
 
 ---
 
-Thank you for making Performance Bot better! 🚀
+Thank you for making Performance Bot better! 
 

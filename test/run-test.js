@@ -26,7 +26,7 @@ program
 const options = program.opts();
 
 async function main() {
-  console.log('🚀 Performance Bot Test Runner\n');
+  console.log(' Performance Bot Test Runner\n');
   console.log('═══════════════════════════════════════════════════════════\n');
 
   const runner = new TestRunner();
@@ -53,13 +53,13 @@ async function main() {
       process.exit(1);
     }
 
-    console.log('✅ Test completed successfully!');
+    console.log(' Test completed successfully!');
     console.log('');
     console.log('📄 Output saved to: test/output/pr-comment.md');
     console.log('');
 
   } catch (error) {
-    console.error('❌ Test failed:');
+    console.error(' Test failed:');
     console.error(error);
     process.exit(1);
   }

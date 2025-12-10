@@ -5,14 +5,14 @@ A GitHub Action that analyzes Adaptive Form performance by comparing before/afte
 ## Features
 
 - 🔍 **Form Structure Analysis**: Analyzes component count, nesting depth, and complexity
-- ⚡ **Form Events Analysis**: Detects blocking API calls in initialize events
+-  **Form Events Analysis**: Detects blocking API calls in initialize events
 - 👁️ **Hidden Fields Detection**: Identifies unnecessary hidden fields bloating the DOM
 - 🔄 **Rule Cycle Detection**: Finds circular dependencies in form rules using @aemforms/af-core
 - ⚙️ **Custom Function Validation**: Detects DOM access and HTTP requests in custom functions
 - 🎨 **Form HTML Analysis**: Checks lazy loading, image dimensions, blocking scripts
-- 📝 **CSS Analysis**: Detects architectural issues like background-image, @import, deep selectors
-- 🤖 **AI Auto-Fix PR**: Automatically creates a PR with fixes for CSS issues, ready to merge into your branch (Azure OpenAI GPT-4.1)
-- 📊 **CWV-Optimized Reports**: Actionable insights with Core Web Vitals impact
+-  **CSS Analysis**: Detects architectural issues like background-image, @import, deep selectors
+-  **AI Auto-Fix PR**: Automatically creates a PR with fixes for CSS issues, ready to merge into your branch (Azure OpenAI GPT-4.1)
+-  **CWV-Optimized Reports**: Actionable insights with Core Web Vitals impact
 - ⚙️ **Configurable Thresholds**: Smart defaults, fully customizable
 
 ## Quick Start
@@ -77,9 +77,9 @@ Create `.performance-bot.json` in your project root:
 1. Go to **GitHub → Settings → Developer Settings → Personal Access Tokens → Tokens (classic)**
 2. Click **Generate new token (classic)**
 3. **Scopes required:**
-   - ✅ `repo` (Full repository access)
-   - ✅ `workflow` (Update workflows)
-   - ✅ `gist` (Create gists for inline report viewing) ← **NEW!**
+   -  `repo` (Full repository access)
+   -  `workflow` (Update workflows)
+   -  `gist` (Create gists for inline report viewing) ← **NEW!**
 4. Click **Generate token** and copy it
 5. Go to your repository → **Settings → Secrets → Actions**
 6. Add secret: `PAT_TOKEN` with the token value
@@ -158,16 +158,16 @@ To enable AI-powered auto-fix suggestions with Codex, add Azure OpenAI credentia
 | `AZURE_OPENAI_API_VERSION` | Azure API version | `2024-12-01-preview` |
 
 **What AI Auto-Fix Does:**
-- 🤖 **Creates Auto-Fix PR** with fixes and annotations applied
-- 🔧 **CSS Fixes:**
+-  **Creates Auto-Fix PR** with fixes and annotations applied
+-  **CSS Fixes:**
   - Comments out @import statements (with bundling guidance)
   - Comments out background-image (with lazy-load guidance)
-- 🔧 **JS Fixes with GitHub Suggestions:**
+-  **JS Fixes with GitHub Suggestions:**
   - Generates refactored code for HTTP requests → custom events
   - Generates refactored code for DOM access → setProperty()
   - **One-click "Apply suggestion" button** in PR comment
   - AI-powered code generation using Azure OpenAI GPT-4.1
-- 🔧 **JS Annotations in Auto-Fix PR:**
+-  **JS Annotations in Auto-Fix PR:**
   - Flags problematic functions with warning comments
 - 💡 **Detailed Suggestions** for complex issues:
   - Hidden fields → setVariable() migration
@@ -294,18 +294,18 @@ node test/test-analyzers-offline.js
 ```
 
 **What it tests:**
-- ✅ Form structure analysis
-- ✅ Hidden fields detection with mock JS
-- ✅ Rule cycle detection (circular dependencies)
-- ✅ Custom function violations (DOM access, HTTP requests)
-- ✅ Form HTML analysis
-- ✅ CSS architectural issues
+-  Form structure analysis
+-  Hidden fields detection with mock JS
+-  Rule cycle detection (circular dependencies)
+-  Custom function violations (DOM access, HTTP requests)
+-  Form HTML analysis
+-  CSS architectural issues
 
 **Use when:** Quick validation during development
 
 ---
 
-### 2. 🚀 Remote URLs (Basic)
+### 2.  Remote URLs (Basic)
 
 Tests with **live form URLs** but no local code analysis
 
@@ -316,13 +316,13 @@ Tests with **live form URLs** but no local code analysis
 ```
 
 **What it tests:**
-- ✅ JSON extraction from real pages
-- ✅ Form structure
-- ✅ Form events (API in initialize)
-- ✅ Form HTML
-- ⚠️ Hidden fields (inaccurate - no JS files)
-- ⚠️ Custom functions (none found - no JS files)
-- ⚠️ CSS (none found - no CSS files)
+-  JSON extraction from real pages
+-  Form structure
+-  Form events (API in initialize)
+-  Form HTML
+-  Hidden fields (inaccurate - no JS files)
+-  Custom functions (none found - no JS files)
+-  CSS (none found - no CSS files)
 
 **Use when:** Quick sanity check of form structure
 
@@ -341,14 +341,14 @@ node test-local-with-files.js \
 ```
 
 **What it tests:**
-- ✅ Form JSON from real page
-- ✅ Form structure
-- ✅ Form events
-- ✅ **Hidden fields (accurate!)** - checks against your JS files
-- ✅ **Custom functions** - analyzes your actual functions
-- ✅ **Rule cycles** - detects circular dependencies using af-core
-- ✅ Form HTML
-- ✅ **CSS** - analyzes your stylesheets
+-  Form JSON from real page
+-  Form structure
+-  Form events
+-  **Hidden fields (accurate!)** - checks against your JS files
+-  **Custom functions** - analyzes your actual functions
+-  **Rule cycles** - detects circular dependencies using af-core
+-  Form HTML
+-  **CSS** - analyzes your stylesheets
 
 **Use when:** Complete pre-PR validation
 
@@ -370,11 +370,11 @@ This shows **exactly** what would appear in a GitHub PR comment.
 Total Issues Detected: 24
   - Form Structure: 0
   - Form Events: 0
-  - Hidden Fields: 6 ⚠️
-  - Rule Cycles: 1 🚨 (fieldA → fieldB → fieldC → fieldA)
-  - Custom Functions: 2 ⚠️
+  - Hidden Fields: 6 
+  - Rule Cycles: 1  (fieldA → fieldB → fieldC → fieldA)
+  - Custom Functions: 2 
   - Form HTML: 0
-  - CSS: 16 ⚠️
+  - CSS: 16 
 ```
 
 **📖 See [`test/README.md`](test/README.md) for detailed testing documentation.**

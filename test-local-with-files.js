@@ -97,7 +97,7 @@ async function loadCSSFiles(dirPath) {
 }
 
 async function main() {
-  console.log('🚀 Performance Bot Test Runner (with local files)\n');
+  console.log(' Performance Bot Test Runner (with local files)\n');
   console.log('═══════════════════════════════════════════════════════════\n');
 
   const runner = new TestRunner();
@@ -108,9 +108,9 @@ async function main() {
     if (options.jsDir) {
       console.log(`📂 Loading JavaScript files from: ${options.jsDir}`);
       jsFiles = await loadJSFiles(options.jsDir);
-      console.log(`✅ Loaded ${jsFiles.length} JavaScript files\n`);
+      console.log(` Loaded ${jsFiles.length} JavaScript files\n`);
     } else {
-      console.log('⚠️  No --js-dir provided. Hidden field and custom function analysis will be limited.\n');
+      console.log('  No --js-dir provided. Hidden field and custom function analysis will be limited.\n');
     }
 
     // Load CSS files if directory provided
@@ -118,9 +118,9 @@ async function main() {
     if (options.cssDir) {
       console.log(`📂 Loading CSS files from: ${options.cssDir}`);
       cssFiles = await loadCSSFiles(options.cssDir);
-      console.log(`✅ Loaded ${cssFiles.length} CSS files\n`);
+      console.log(` Loaded ${cssFiles.length} CSS files\n`);
     } else {
-      console.log('⚠️  No --css-dir provided. CSS analysis will be skipped.\n');
+      console.log('  No --css-dir provided. CSS analysis will be skipped.\n');
     }
 
     // Run test with loaded files
@@ -129,13 +129,13 @@ async function main() {
       cssFiles
     });
 
-    console.log('✅ Test completed successfully!');
+    console.log(' Test completed successfully!');
     console.log('');
     console.log('📄 Output saved to: test/output/pr-comment.md');
     console.log('');
 
   } catch (error) {
-    console.error('❌ Test failed:');
+    console.error(' Test failed:');
     console.error(error);
     process.exit(1);
   }

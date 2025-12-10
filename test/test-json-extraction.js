@@ -30,17 +30,17 @@ console.log('──────────────────────�
 const extractor = new JSONExtractor();
 const result = extractor.extract(testHTML);
 
-console.log('✅ Extraction Results:');
+console.log(' Extraction Results:');
 console.log('  - Found JSON:', !!result.formJson);
 console.log('  - Errors:', result.errors.length);
 
 if (result.errors.length > 0) {
-  console.log('\n❌ Errors found:');
+  console.log('\n Errors found:');
   result.errors.forEach(err => console.log('  -', err.message));
 }
 
 if (result.formJson) {
-  console.log('\n📋 Form JSON Structure:');
+  console.log('\n Form JSON Structure:');
   console.log('  - ID:', result.formJson.id);
   console.log('  - Field Type:', result.formJson.fieldType);
   console.log('  - Title:', result.formJson.title);
@@ -64,7 +64,7 @@ if (result.formJson) {
       event.includes('XMLHttpRequest') ||
       event.includes('axios(')
     );
-    console.log('  - Has API call in initialize:', hasAPICall ? '⚠️  YES (Performance Issue!)' : '✅ NO');
+    console.log('  - Has API call in initialize:', hasAPICall ? '  YES (Performance Issue!)' : ' NO');
   }
   
   console.log('\n═══════════════════════════════════════════════════════════\n');
@@ -76,7 +76,7 @@ if (result.formJson) {
   const analyzer = new FormAnalyzer();
   const analysis = analyzer.analyze(result.formJson);
   
-  console.log('📊 Component Statistics:');
+  console.log(' Component Statistics:');
   console.log('  - Total Components:', analysis.components.total);
   console.log('  - Max Depth:', analysis.components.maxDepth);
   console.log('  - Nested Panels:', analysis.components.nestedPanels);
@@ -89,7 +89,7 @@ if (result.formJson) {
     console.log(`  - ${type}: ${count}`);
   });
   
-  console.log('\n⚡ Complexity Analysis:');
+  console.log('\n Complexity Analysis:');
   console.log('  - Score:', analysis.complexity.score);
   console.log('  - Rating:', analysis.complexity.rating);
   console.log('  - Factors:');
@@ -107,19 +107,19 @@ if (result.formJson) {
   });
   
   if (analysis.issues.length > 0) {
-    console.log('\n⚠️  Detected Issues:');
+    console.log('\n  Detected Issues:');
     analysis.issues.forEach(issue => {
       console.log(`  - [${issue.severity.toUpperCase()}] ${issue.message}`);
     });
   } else {
-    console.log('\n✅ No performance issues detected');
+    console.log('\n No performance issues detected');
   }
   
   console.log('\n═══════════════════════════════════════════════════════════\n');
-  console.log('✅ All Tests Passed!\n');
+  console.log(' All Tests Passed!\n');
   
 } else {
-  console.log('\n❌ Failed to extract JSON - cannot proceed with analysis');
+  console.log('\n Failed to extract JSON - cannot proceed with analysis');
   process.exit(1);
 }
 

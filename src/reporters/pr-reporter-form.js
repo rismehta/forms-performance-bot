@@ -41,10 +41,11 @@ export class FormPRReporter {
     
     sections.push(` **${critical} Critical** | **${warnings} Warnings** | **Load: ${loadStatus}**\n`);
 
-    // Auto-Fix PR (if available)
-    if (urls.autoFixPR) {
-      sections.push(`### Auto-Fix PR Ready\n`);
-      sections.push(`[**PR #${urls.autoFixPR.number}**](${urls.autoFixPR.url}) contains ${urls.autoFixPR.filesChanged} automated fix(es) → **Review & Merge**\n`);
+    // Auto-Fix Commit (if applied)
+    if (urls.autoFixCommit) {
+      sections.push(`### Auto-Fixes Applied\n`);
+      sections.push(` **${urls.autoFixCommit.filesChanged} file(s)** auto-fixed in commit [\`${urls.autoFixCommit.sha.substring(0, 7)}\`](https://github.com/${repo}/commit/${urls.autoFixCommit.sha})\n`);
+      sections.push(`**Files:** ${urls.autoFixCommit.files.join(', ')}\n`);
       sections.push('---\n');
     }
 
@@ -83,26 +84,26 @@ export class FormPRReporter {
   /**
    * Build AI Auto-Fix Suggestions section
    */
-  buildAutoFixSuggestionsSection(autoFixData, autoFixPR) {
+  buildAutoFixSuggestionsSection(autoFixData, autoFixCommit) {
     if (!autoFixData || !autoFixData.enabled || autoFixData.suggestions.length === 0) {
       return '';
     }
 
     const lines = ['### AI Auto-Fix Suggestions\n'];
     
-    // AUTO-FIX PR LINK (show prominently at top if available)
-    if (autoFixPR) {
-      lines.push(`> ### Auto-Fix PR Created: [#${autoFixPR.number}](${autoFixPR.url})\n`);
-      lines.push(`> **${autoFixPR.filesChanged} file(s) automatically annotated** — Comments and warnings added to flag issues\n`);
-      lines.push('**Auto-applied annotations:**');
-      autoFixPR.fixes.forEach((fix, i) => {
-        lines.push(`${i + 1}. ${fix}`);
+    // AUTO-FIX COMMIT INFO (show prominently at top if applied)
+    if (autoFixCommit) {
+      lines.push(`> ### Auto-Fixes Applied to Current PR\n`);
+      lines.push(`> **${autoFixCommit.filesChanged} file(s)** fixed in commit [\`${autoFixCommit.sha.substring(0, 7)}\`]\n`);
+      lines.push('**Auto-applied fixes:**');
+      autoFixCommit.files.forEach((file, i) => {
+        lines.push(`${i + 1}. ${file}`);
       });
       lines.push('');
-      lines.push('**How to use:**');
-      lines.push('1. Review the annotations in [Auto-Fix PR #' + autoFixPR.number + '](' + autoFixPR.url + ')');
-      lines.push('2. Merge the PR to add warning comments to your code');
-      lines.push('3. Follow the detailed refactoring guides below for each issue\n');
+      lines.push('**Next Steps:**');
+      lines.push('1. Pull the latest changes from your PR branch');
+      lines.push('2. Test your form with the applied fixes');
+      lines.push('3. Review the AI-generated code changes for correctness\n');
       lines.push('---\n');
     } else {
       lines.push(`> **${autoFixData.suggestions.length} performance improvement${autoFixData.suggestions.length > 1 ? 's' : ''} identified** — Review and apply to optimize your form\n`);
@@ -147,19 +148,21 @@ export class FormPRReporter {
       lines.push(`**Impact:** ${suggestion.estimatedImpact}\n`);
     }
     
-    // JS Refactored Code (HTTP/DOM fixes) - MANUAL APPLICATION REQUIRED
-    if (suggestion.refactoredCode) {
-      lines.push(`**File:** \`${suggestion.file}:${suggestion.line || 1}\`\n`);
-      lines.push(`**Suggested Refactor** (requires manual review):\n`);
+    // JS Refactored Code (HTTP/DOM fixes) - SHOW AS PR COMMENT SUGGESTION
+    if (suggestion.refactoredCode && (suggestion.type === 'custom-function-http-fix' || suggestion.type === 'custom-function-dom-fix')) {
+      lines.push(`**File:** \`${suggestion.file}\`\n`);
+      lines.push(`**Function:** \`${suggestion.functionName}()\`\n`);
+      lines.push(`**Issue:** ${suggestion.description}\n`);
+      lines.push(`**Action Required:** Use **Visual Rule Editor** to refactor this function according to AI suggestion below.\n`);
       
-      // Show refactored code (manual application required)
-      lines.push('```javascript');
+      // GitHub suggestion syntax for one-click apply
+      lines.push('```suggestion');
       lines.push(suggestion.refactoredCode);
       lines.push('```\n');
       
       // Add form JSON if applicable (HTTP fixes)
       if (suggestion.formJsonSnippet) {
-        lines.push(`**Step 2: Add to Form JSON (Form Editor or JSON)**\n`);
+        lines.push(`**Step 2: Add to Form JSON via Visual Rule Editor**\n`);
         lines.push('```json');
         lines.push(suggestion.formJsonSnippet);
         lines.push('```\n');
@@ -173,12 +176,14 @@ export class FormPRReporter {
         lines.push('```\n');
       }
       
-      // Add testing steps
-      if (suggestion.testingSteps) {
-        lines.push(`**Testing:**\n`);
-        lines.push(suggestion.testingSteps);
-        lines.push('\n');
-      }
+      lines.push(`**Note:** This suggestion is AI-generated. Review carefully before applying. File/line reference may not match PR diff but indicates the location in your branch.\n`);
+    }
+    // Runtime error fixes - APPLIED TO FILES
+    else if (suggestion.refactoredCode && suggestion.type === 'custom-function-runtime-error-fix') {
+      lines.push(`**File:** \`${suggestion.file}\`\n`);
+      lines.push(`**Function:** \`${suggestion.functionName}()\`\n`);
+      lines.push(`**Applied:** AI-generated null checks added automatically\n`);
+      lines.push(`**Impact:** ${suggestion.impact}\n`);
     }
     // CSS Fixes with code
     else if (suggestion.file && suggestion.originalCode && suggestion.fixedCode) {
@@ -341,7 +346,7 @@ export class FormPRReporter {
       });
       
       lines.push('');
-      lines.push('** Recommendation:** Move API calls to custom events triggered **after** render, or use lazy loading. Initialize should only set up initial state, not fetch data.\n');
+      lines.push('**Recommendation:** Use **Visual Rule Editor** to move API calls from `initialize` event to `custom:formViewInitialized` event (triggered after form renders). Initialize events should only set up initial state, not fetch data.\n');
     }
 
     // Resolved issues
@@ -403,7 +408,7 @@ export class FormPRReporter {
         lines.push('\n</details>\n');
       }
       
-      lines.push('** Recommendation:** Remove these fields from the form JSON and store as Form variables instead. Hidden fields that are never shown bloat the DOM (each adds ~50-100 bytes) and slow down rendering.\n');
+      lines.push('**Recommendation:** Use **Visual Rule Editor** to replace hidden fields with Form Variables (`setVariable()` instead of field-based storage). Remove the hidden fields from form JSON. Hidden fields that are never shown bloat the DOM (each adds ~50-100 bytes) and slow down rendering. Configure state management via the rule editor\'s variable actions.\n');
     }
 
     // Resolved issues
@@ -494,6 +499,66 @@ export class FormPRReporter {
       lines.push(' No circular dependencies detected.\n');
     }
 
+    return lines.join('\n');
+  }
+
+  /**
+   * Build form validation errors section
+   * Shows dataRef parsing errors and type conflicts from af-core
+   */
+  buildFormValidationSection(ruleCycles) {
+    const lines = ['### Form Validation Warnings\n'];
+    
+    const { after } = ruleCycles || {};
+    
+    if (!after || !after.validationErrors || after.validationErrorCount === 0) {
+      lines.push(' No form validation warnings.\n');
+      return lines.join('\n');
+    }
+    
+    const { validationErrors } = after;
+    const { dataRefErrors, typeConflicts } = validationErrors;
+    
+    // DataRef Parsing Errors
+    if (dataRefErrors && dataRefErrors.length > 0) {
+      lines.push(`#### Invalid dataRef Syntax (${dataRefErrors.length})\n`);
+      lines.push(`**Issue:** Fields have invalid JSONPath in \`dataRef\` property. Their data won't be exported in form submissions.\n`);
+      
+      // Show first 3 errors
+      const displayErrors = dataRefErrors.slice(0, 3);
+      displayErrors.forEach(error => {
+        lines.push(`- Field \`${error.fieldId}\` → Invalid dataRef: \`"${error.dataRef}"\``);
+      });
+      
+      if (dataRefErrors.length > 3) {
+        lines.push(`- ... and ${dataRefErrors.length - 3} more\n`);
+      } else {
+        lines.push('');
+      }
+      
+      lines.push('**Fix in AEM Forms Editor:** Update \`dataRef\` to valid JSONPath (e.g., \`$.${error.dataRef}\` or \`data.${error.dataRef}\`) or remove it to use field \`name\` instead.\n');
+    }
+    
+    // Type Conflict Errors
+    if (typeConflicts && typeConflicts.length > 0) {
+      lines.push(`#### Data Type Conflicts (${typeConflicts.length})\n`);
+      lines.push(`**Issue:** Multiple fields are mapped to the same \`dataRef\` but have different data types. This causes type coercion and potential data loss.\n`);
+      
+      // Show first 3 conflicts
+      const displayConflicts = typeConflicts.slice(0, 3);
+      displayConflicts.forEach(conflict => {
+        lines.push(`- \`${conflict.dataRef}\` → Field \`${conflict.newField}\` (${conflict.newFieldType}) conflicts with: ${conflict.conflictingFields}`);
+      });
+      
+      if (typeConflicts.length > 3) {
+        lines.push(`- ... and ${typeConflicts.length - 3} more\n`);
+      } else {
+        lines.push('');
+      }
+      
+      lines.push('**Fix in AEM Forms Editor:** Either use unique \`dataRef\` for each field, or ensure all fields bound to the same \`dataRef\` have matching types.\n');
+    }
+    
     return lines.join('\n');
   }
 
@@ -639,6 +704,7 @@ export class FormPRReporter {
       
       const domAccessIssues = newIssues.filter(i => i.type === 'dom-access-in-custom-function');
       const httpRequestIssues = newIssues.filter(i => i.type === 'http-request-in-custom-function');
+      const runtimeErrorIssues = newIssues.filter(i => i.type === 'runtime-error-in-custom-function');
 
       if (httpRequestIssues.length > 0) {
         lines.push(`** ${httpRequestIssues.length} HTTP Request(s) in Custom Functions:**\n`);
@@ -656,6 +722,17 @@ export class FormPRReporter {
           lines.push(`  - ${issue.recommendation}`);
         });
         lines.push('');
+      }
+
+      if (runtimeErrorIssues.length > 0) {
+        lines.push(`**${runtimeErrorIssues.length} Runtime Error(s) in Custom Functions:**\n`);
+        lines.push('Functions encountered errors during execution (likely due to missing null checks):\n');
+        runtimeErrorIssues.forEach(issue => {
+          const errorSummary = issue.errors && issue.errors.length > 0 ? issue.errors[0] : 'Unknown error';
+          lines.push(`- \`${issue.functionName}()\` - ${issue.errorCount} error(s): ${errorSummary}`);
+        });
+        lines.push('');
+        lines.push('**Recommendation:** Add null/undefined checks before accessing properties. These errors occur when functions don\'t handle missing data gracefully. Can be auto-fixed by AI.\n');
       }
     }
 
@@ -993,6 +1070,10 @@ export class FormPRReporter {
     }
     if (results.formHTML?.after?.issues?.filter(i => i.severity === 'warning').length) {
       count += results.formHTML.after.issues.filter(i => i.severity === 'warning').length;
+    }
+    // Form validation errors (dataRef + type conflicts)
+    if (results.ruleCycles?.after?.validationErrorCount) {
+      count += results.ruleCycles.after.validationErrorCount;
     }
     return count;
   }

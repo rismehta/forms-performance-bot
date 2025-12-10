@@ -81,7 +81,7 @@ async function runTests() {
     const { mockFormJSON, mockHTML, mockJSFiles, mockCSSFiles } = loadFixtures();
     
     // Load config
-    console.log('📋 Loading configuration...\n');
+    console.log(' Loading configuration...\n');
     const config = await loadConfig();
 
     // Initialize analyzers
@@ -131,7 +131,7 @@ async function runTests() {
     console.log('Fields Found:', hiddenFields.hiddenFields.map(f => f.name).join(', '));
     console.log('\nVisibility Changes in JS:');
     Object.entries(hiddenFields.fieldVisibilityChanges).forEach(([key, change]) => {
-      console.log(`  - ${key}: ${change.madeVisible ? '✅ Made visible' : '❌ Never shown'}`);
+      console.log(`  - ${key}: ${change.madeVisible ? ' Made visible' : ' Never shown'}`);
     });
     console.log('\nUnnecessary Hidden Fields:', hiddenFields.unnecessaryHiddenFields);
     if (hiddenFields.issues.length > 0) {
@@ -158,7 +158,7 @@ async function runTests() {
         console.log(`  ${index + 1}. ${cyclePath.join(' → ')}`);
       });
     } else if (ruleCycles.error) {
-      console.log('⚠️ Error:', ruleCycles.error);
+      console.log(' Error:', ruleCycles.error);
     }
     console.log('Issues Found:', ruleCycles.issues?.length || 0);
 
@@ -209,7 +209,7 @@ async function runTests() {
     }
 
     console.log('\n═══════════════════════════════════════════════════════════\n');
-    console.log('📊 TEST SUMMARY\n');
+    console.log(' TEST SUMMARY\n');
     console.log('───────────────────────────────────────────────────────────\n');
 
     const totalIssues = 
@@ -221,7 +221,7 @@ async function runTests() {
       htmlAnalysis.issues.length +
       cssAnalysis.issues.length;
 
-    console.log('✅ All analyzers tested successfully!\n');
+    console.log(' All analyzers tested successfully!\n');
     console.log('Total Issues Detected:', totalIssues);
     console.log('  - Form Structure:', formStructure.issues.length);
     console.log('  - Form Events:', formEvents.issues.length);
@@ -232,14 +232,14 @@ async function runTests() {
     console.log('  - CSS:', cssAnalysis.issues.length);
 
     console.log('\n💡 Expected Issues (from fixtures):');
-    console.log('  - ✅ 6 unnecessary hidden fields (hiddenPanel, unusedField, dataStorage, userId, sessionId, email)');
-    console.log('  - ✅ 1 circular rule dependency (fieldA → fieldB → fieldC → fieldA)');
-    console.log('  - ✅ 1 custom function violation (validateUserName: DOM access)');
-    console.log('  - ✅ 2 background-images in CSS (CRITICAL)');
-    console.log('  - ✅ 1 @import statement in CSS (CRITICAL - blocks rendering)');
-    console.log('  - ✅ 13+ deep selectors in CSS');
-    console.log('  - ✅ Additional CSS issues (hardcoded colors, duplicate selectors, !important)');
-    console.log('\n📝 Notes:');
+    console.log('  -  6 unnecessary hidden fields (hiddenPanel, unusedField, dataStorage, userId, sessionId, email)');
+    console.log('  -  1 circular rule dependency (fieldA → fieldB → fieldC → fieldA)');
+    console.log('  -  1 custom function violation (validateUserName: DOM access)');
+    console.log('  -  2 background-images in CSS (CRITICAL)');
+    console.log('  -  1 @import statement in CSS (CRITICAL - blocks rendering)');
+    console.log('  -  13+ deep selectors in CSS');
+    console.log('  -  Additional CSS issues (hardcoded colors, duplicate selectors, !important)');
+    console.log('\n Notes:');
     console.log('  - Form Events Analyzer: 0 detected (API calls removed to prevent runtime crashes in offline tests)');
     console.log('  - For API call detection testing, use live URLs with test-local-with-files.sh');
     console.log('  - HTML analyzer detects images/scripts but may not flag as issues depending on thresholds');
@@ -264,7 +264,7 @@ async function runTests() {
     
     // Generate PR Comment Report to verify actionability
     console.log('═══════════════════════════════════════════════════════════\n');
-    console.log('📝 GENERATING PR COMMENT (Actionability Check)\n');
+    console.log(' GENERATING PR COMMENT (Actionability Check)\n');
     console.log('───────────────────────────────────────────────────────────\n');
     
     const { FormPRReporter } = await import('../src/reporters/pr-reporter-form.js');
@@ -331,13 +331,13 @@ async function runTests() {
     const prCommentPath = path.join(__dirname, 'output', 'offline-pr-comment.md');
     fs.writeFileSync(prCommentPath, prComment);
     
-    console.log('✅ PR Comment generated!\n');
+    console.log(' PR Comment generated!\n');
     console.log('📄 Saved to:', prCommentPath);
     console.log('\n🔍 Review the PR comment to verify actionable insights!\n');
-    console.log('✅ All tests passed!\n');
+    console.log(' All tests passed!\n');
 
   } catch (error) {
-    console.error('\n❌ Test failed:', error.message);
+    console.error('\n Test failed:', error.message);
     console.error(error.stack);
     process.exit(1);
   }
