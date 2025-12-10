@@ -202,7 +202,7 @@ export class HTMLReporter {
 <body>
   <div class="container">
     <header>
-      <h1>🔍 Performance Analysis Report</h1>
+      <h1> Performance Analysis Report</h1>
       <div class="meta">
         <strong>PR #${prNumber}</strong> | ${repo} | ${new Date(this.timestamp).toLocaleString()}
       </div>
@@ -309,12 +309,12 @@ export class HTMLReporter {
     }
 
     if (criticalIssues.length === 0) {
-      return '<div class="section"><h2>✅ No Critical Issues</h2><p>All checks passed!</p></div>';
+      return '<div class="section"><h2> No Critical Issues</h2><p>All checks passed!</p></div>';
     }
 
     return `
     <div class="section">
-      <h2>⚠️ Critical Issues</h2>
+      <h2> Critical Issues</h2>
       ${criticalIssues.map(issue => `
         <div class="issue-item">
           <h4><span class="badge critical">${issue.count}</span>${issue.title}</h4>
@@ -338,7 +338,7 @@ export class HTMLReporter {
 
     return `
     <div class="section">
-      <h2>⏱️ Form Load Performance</h2>
+      <h2> Form Load Performance</h2>
       <table>
         <tr>
           <th>Metric</th>
@@ -380,7 +380,7 @@ export class HTMLReporter {
 
     return `
     <div class="section">
-      <h2>📊 Form Structure</h2>
+      <h2> Form Structure</h2>
       <table>
         <tr>
           <th>Metric</th>
@@ -413,12 +413,12 @@ export class HTMLReporter {
   buildFormEventsSection(results) {
     const apiCalls = results.formEvents?.after?.apiCallsInInitialize || [];
     if (apiCalls.length === 0) {
-      return '<div class="section"><h2>✅ Form Events</h2><p>No API calls in initialize events</p></div>';
+      return '<div class="section"><h2> Form Events</h2><p>No API calls in initialize events</p></div>';
     }
 
     return `
     <div class="section">
-      <h2>🚫 Form Events (${apiCalls.length} API Calls in Initialize)</h2>
+      <h2> Form Events (${apiCalls.length} API Calls in Initialize)</h2>
       ${apiCalls.map(call => `
         <div class="issue-item">
           <h4>${call.field} <code>${call.path}</code></h4>
@@ -434,7 +434,7 @@ export class HTMLReporter {
   buildHiddenFieldsSection(results) {
     const data = results.hiddenFields?.after;
     if (!data || data.unnecessaryHiddenFields === 0) {
-      return '<div class="section"><h2>✅ Hidden Fields</h2><p>No unnecessary hidden fields detected</p></div>';
+      return '<div class="section"><h2> Hidden Fields</h2><p>No unnecessary hidden fields detected</p></div>';
     }
 
     const fields = data.issues || [];
@@ -442,7 +442,7 @@ export class HTMLReporter {
 
     return `
     <div class="section">
-      <h2>👁️ Hidden Fields (${data.unnecessaryHiddenFields} Unnecessary)</h2>
+      <h2> Hidden Fields (${data.unnecessaryHiddenFields} Unnecessary)</h2>
       <p><strong>Total Hidden:</strong> ${data.totalHiddenFields} | <strong>Unnecessary:</strong> ${data.unnecessaryHiddenFields}</p>
       
       <button class="collapsible">View Field Names (${fields.length})</button>
@@ -460,14 +460,14 @@ export class HTMLReporter {
     if (!data) return '';
 
     if (data.cycles === 0) {
-      return `<div class="section"><h2>✅ Rule Performance</h2><p>${data.totalRules} rules analyzed, no circular dependencies</p></div>`;
+      return `<div class="section"><h2> Rule Performance</h2><p>${data.totalRules} rules analyzed, no circular dependencies</p></div>`;
     }
 
     const cycles = data.cycleDetails || [];
 
     return `
     <div class="section">
-      <h2>🔄 Rule Cycles (${data.cycles} Detected)</h2>
+      <h2> Rule Cycles (${data.cycles} Detected)</h2>
       ${cycles.map((cycle, idx) => `
         <div class="issue-item">
           <h4>Cycle ${idx + 1}: ${cycle.fields.join(' → ')}</h4>
@@ -480,12 +480,12 @@ export class HTMLReporter {
   buildFormHTMLSection(results) {
     const data = results.formHTML?.after;
     if (!data || !data.issues || data.issues.length === 0) {
-      return '<div class="section"><h2>✅ Form HTML</h2><p>No rendering issues detected</p></div>';
+      return '<div class="section"><h2> Form HTML</h2><p>No rendering issues detected</p></div>';
     }
 
     return `
     <div class="section">
-      <h2>🎨 Form HTML & Rendering</h2>
+      <h2> Form HTML & Rendering</h2>
       ${data.issues.slice(0, 10).map(issue => `
         <div class="issue-item ${issue.severity === 'error' ? '' : 'warning'}">
           <h4>${issue.message}</h4>
@@ -499,7 +499,7 @@ export class HTMLReporter {
   buildFormCSSSection(results) {
     const data = results.formCSS?.after;
     if (!data || !data.issues || data.issues.length === 0) {
-      return '<div class="section"><h2>✅ CSS Analysis</h2><p>No CSS issues detected</p></div>';
+      return '<div class="section"><h2> CSS Analysis</h2><p>No CSS issues detected</p></div>';
     }
 
     const critical = data.issues.filter(i => i.severity === 'error');
@@ -507,7 +507,7 @@ export class HTMLReporter {
 
     return `
     <div class="section">
-      <h2>🎨 CSS Analysis</h2>
+      <h2> CSS Analysis</h2>
       
       ${critical.length > 0 ? `
         <h3>Critical Issues (${critical.length})</h3>
@@ -543,12 +543,12 @@ export class HTMLReporter {
     const domIssues = data.issues?.filter(i => i.type === 'dom-access') || [];
 
     if (httpIssues.length === 0 && domIssues.length === 0) {
-      return `<div class="section"><h2>✅ Custom Functions</h2><p>${data.analyzed} functions analyzed, no violations</p></div>`;
+      return `<div class="section"><h2> Custom Functions</h2><p>${data.analyzed} functions analyzed, no violations</p></div>`;
     }
 
     return `
     <div class="section">
-      <h2>🔌 Custom Functions</h2>
+      <h2> Custom Functions</h2>
       <p><strong>Analyzed:</strong> ${data.analyzed} functions</p>
       
       ${httpIssues.length > 0 ? `
@@ -579,7 +579,7 @@ export class HTMLReporter {
 
     return `
     <div class="section">
-      <h2>💡 Recommendations</h2>
+      <h2> Recommendations</h2>
       <ol>
         ${recommendations.map(rec => `<li>${rec}</li>`).join('')}
       </ol>

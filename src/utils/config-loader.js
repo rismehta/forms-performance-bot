@@ -105,10 +105,10 @@ export class ConfigLoader {
         const content = await readFile(configPath, 'utf-8');
         const customConfig = JSON.parse(content);
         this.config = this.mergeConfig(DEFAULT_CONFIG, customConfig);
-        console.log('✅ Loaded custom configuration from:', configPath);
+        console.log(' Loaded custom configuration from:', configPath);
         return this.config;
       } catch (error) {
-        console.warn(`⚠️  Failed to load config from ${configPath}: ${error.message}`);
+        console.warn(`  Failed to load config from ${configPath}: ${error.message}`);
         console.log('Using default configuration');
       }
     }
@@ -125,7 +125,7 @@ export class ConfigLoader {
         const content = await readFile(path, 'utf-8');
         const customConfig = JSON.parse(content);
         this.config = this.mergeConfig(DEFAULT_CONFIG, customConfig);
-        console.log('✅ Loaded configuration from:', path);
+        console.log(' Loaded configuration from:', path);
         return this.config;
       } catch (error) {
         // Continue to next path
@@ -134,7 +134,7 @@ export class ConfigLoader {
 
     // No custom config found, use defaults
     this.config = DEFAULT_CONFIG;
-    console.log('📋 Using default configuration (no custom config file found)');
+    console.log(' Using default configuration (no custom config file found)');
     return this.config;
   }
 
