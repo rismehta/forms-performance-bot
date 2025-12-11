@@ -49,7 +49,8 @@
 ### AI Fix Strategy
 ```
 Auto-Commit (Safe, Validated):
-  ✓ CSS @import inlining (merges content, resolves paths)
+  ✓ CSS @import inlining (local: merges content, resolves paths)
+  ✓ CSS @import external (Google Fonts, CDNs: moves to head.html)
   ✓ Runtime error fixes (targeted null checks via stack trace)
   ✓ CSS background-image (comments out CSS only)
 
@@ -85,7 +86,8 @@ PR Comments (Requires Review):
 | **API Calls in Initialize** | CRITICAL | Fails build | PR Comment | Move to `custom:formViewInitialized` event |
 | **Rule Cycles (Circular Dependencies)** | CRITICAL | Fails build | Manual | Break dependency chain |
 | **Slow Rules (>50ms)** | CRITICAL | Fails build | PR Comment | Optimize rule logic |
-| **CSS @import Statements** | CRITICAL | Fails build | Auto-commit | Inline CSS content |
+| **CSS @import Statements (Local)** | CRITICAL | Fails build | Auto-commit | Inline CSS content |
+| **CSS @import Statements (External)** | CRITICAL | Fails build | Auto-commit + head.html | Move to optimized `<link>` in head.html |
 | **CSS background-image** | CRITICAL | Fails build | Auto-commit + Component refactor | Replace with `<img loading="lazy">` |
 | **HTTP in Custom Functions** | CRITICAL | Fails build | PR Comment | Use form-level `request()` API |
 | **DOM Access in Custom Functions** | CRITICAL | Fails build | PR Comment | Use `setProperty()` instead |
@@ -110,10 +112,10 @@ PR Comments (Requires Review):
 | Metric | Value |
 |--------|-------|
 | **Analysis Time** | 20-30 seconds per PR |
-| **Critical Issues** | 9 types (all fail build) |
+| **Critical Issues** | 10 types (all fail build) |
 | **Warning Issues** | 2 types (reported only) |
 | **Info Issues** | 1 type (best practice) |
-| **AI Auto-Commit Fixes** | 3 types (CSS, runtime errors, background-images) |
+| **AI Auto-Commit Fixes** | 4 types (CSS local, CSS external, runtime errors, background-images) |
 | **AI PR Comment Fixes** | 5 types (API calls, HTTP, DOM, hidden fields, scripts) |
 | **Lines of Code** | ~10,000 (bot itself) |
 | **False Positives** | Near zero (heavily validated) |
@@ -137,9 +139,10 @@ After: https://branch--project.aem.live/form
 ```
 Performance Analysis Complete
 
-Critical Issues (9) - Build Failed
+Critical Issues (10) - Build Failed
 - 3 API calls in initialize events
-- 2 CSS @import statements (blocking render)
+- 1 CSS @import (local, blocks render)
+- 1 CSS @import (external URL, blocks render)
 - 1 circular dependency in rules
 - 2 HTTP requests in custom functions
 - 1 DOM access in custom function
@@ -152,16 +155,21 @@ Critical Issues (9) - Build Failed
 [bot] chore: Auto-fix 6 performance issue(s)
 
 Files changed:
-- blocks/form/consent.css (inlined @import)
+- blocks/form/consent.css (inlined local @import)
+- styles/styles.css (moved external @import to head.html)
 - blocks/form/functions.js (added null checks to 4 functions)
+
+Additional files modified:
+- head.html (added optimized <link> tags for Google Fonts)
 ```
 
 **C) GitHub Check (in "Checks" Tab)**
 ```
 AEM Forms Performance Analysis - FAILED
 
-Annotations (9):
-  consent.css:10 - CSS @import blocks rendering
+Annotations (10):
+  consent.css:10 - CSS @import blocks rendering (local)
+  styles.css:13 - CSS @import blocks rendering (external URL)
   functions.js:316 - HTTP request in fetchData()
   functions.js:428 - DOM access in updateUI()
   form.json:1 - Circular dependency: fieldA → fieldB → fieldA
@@ -230,13 +238,20 @@ field.dispatchEvent(new CustomEvent('custom:fetchData'));
 
 ## Key Innovations
 
-### 1. **Non-Destructive CSS Inlining**
+### 1. **Smart CSS @import Handling**
 ```css
-/* Before: Bot commented out @import → Styling broke */
-/* @import url('../buttons.css'); */
+/* LOCAL IMPORTS: Inline content */
+@import url('../buttons.css');
+→ .btn-primary { color: blue; }  /* Inlined */
 
-/* After: Bot inlines content → Styling preserved */
-.btn-primary { color: blue; }  /* Inlined from ../buttons.css */
+/* EXTERNAL IMPORTS: Move to head.html with optimized loading */
+@import url('https://fonts.googleapis.com/css2?family=Roboto...');
+→ Removed from CSS + Added to head.html:
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preload" as="style" href="https://fonts.googleapis.com/...">
+  <link rel="stylesheet" href="..." media="print" onload="this.media='all'">
+  
+Result: Eliminates render-blocking, improves FCP by 200-500ms
 ```
 
 ### 2. **Stack Trace-Guided Fixes**
@@ -265,11 +280,8 @@ function format(phone) {
 
 ## Future Enhancements
 
-- Real-time performance monitoring dashboard
-- Historical trend analysis
-- Custom rule templates for enterprise policies
-- Integration with Core Web Vitals (CWV) APIs
-- Multi-form comparison reports
+
+- Multi-form comparison reports (validate AI fixes by comparing form rendering before/after)
 
 ---
 

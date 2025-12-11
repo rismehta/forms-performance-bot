@@ -1042,6 +1042,7 @@ export function myDOMFunction(value, targetField, globals) {
 
       // Apply fixes to files
       const filesChanged = [];
+      const additionalFilesModified = new Set(); // Track additional files like head.html
       
       for (const fix of trivialFixes) {
         try {
@@ -1051,6 +1052,15 @@ export function myDOMFunction(value, targetField, globals) {
             git.stageFile(result.filePath);
             filesChanged.push(result);
             core.info(` Applied fix to ${result.filePath}`);
+            
+            // Track additional files (e.g., head.html for external imports)
+            if (result.additionalFiles) {
+              result.additionalFiles.forEach(f => {
+                additionalFilesModified.add(f);
+                git.stageFile(f);
+                core.info(` Also modified: ${f}`);
+              });
+            }
           }
           
           // For background-image fixes, also apply component file refactoring
@@ -1084,11 +1094,14 @@ export function myDOMFunction(value, targetField, globals) {
 
       // Create commit with bot-identifiable message prefix (for loop prevention)
       const hasAIRefactoring = filesChanged.some(f => f.description.includes('AI-generated'));
+      const additionalFilesNote = additionalFilesModified.size > 0 
+        ? `\n\nAdditional files modified:\n${Array.from(additionalFilesModified).map(f => `- ${f}`).join('\n')}`
+        : '';
       
       const commitMessage = `[bot] chore: Auto-fix ${filesChanged.length} performance issue(s)
 
 ${hasAIRefactoring ? '  WARNING: This commit contains AI-generated code refactoring\n  REQUIRED: Thorough testing and code review before merging\n  AI Model: Azure OpenAI GPT-5.1-codex\n\n' : ''}Performance fixes applied:
-${filesChanged.map((f, i) => `${i + 1}. ${f.description}`).join('\n')}
+${filesChanged.map((f, i) => `${i + 1}. ${f.description}`).join('\n')}${additionalFilesNote}
 
 Impact:
 ${filesChanged.map(f => `- ${f.impact}`).join('\n')}
@@ -1381,7 +1394,7 @@ ${hasAIRefactoring ? '\n REVIEW CHECKLIST:\n- [ ] Test all affected functions\n-
 
     // Apply fix based on type
     if (fix.type === 'css-import-fix') {
-      // Replace @import with inlined CSS content
+      // Replace @import with inlined CSS content OR move to head.html
       const originalLine = fix.originalCode;
       const inlinedCSS = fix.fixedCode;
       
@@ -1392,8 +1405,28 @@ ${hasAIRefactoring ? '\n REVIEW CHECKLIST:\n- [ ] Test all affected functions\n-
       }
       
       content = content.replace(originalLine, inlinedCSS);
-      description = `Inline CSS from ${fix.title}`;
-      impact = 'Eliminates render-blocking CSS import, preserves all styling';
+      
+      // Check if this fix also modified head.html (for external imports)
+      const isExternalImport = fix.metadata?.htmlFileUpdated;
+      const htmlFile = fix.metadata?.htmlFilePath;
+      
+      if (isExternalImport && htmlFile) {
+        description = `Move external CSS to ${htmlFile} from ${fix.title}`;
+        impact = `Eliminates render-blocking CSS @import, loads via optimized <link> in HTML <head>`;
+        
+        // Return success with additional file info
+        writeFileSync(filePath, content, 'utf-8');
+        return { 
+          success: true, 
+          filePath, 
+          description, 
+          impact,
+          additionalFiles: [htmlFile] // Track that head.html was also modified
+        };
+      } else {
+        description = `Inline CSS from ${fix.title}`;
+        impact = 'Eliminates render-blocking CSS import, preserves all styling';
+      }
       
     } else if (fix.type === 'css-background-image-fix') {
       // Apply AI-generated CSS and component refactoring
@@ -1602,17 +1635,32 @@ ${hasAIRefactoring ? '\n REVIEW CHECKLIST:\n- [ ] Test all affected functions\n-
         const inlineResult = await this.inlineImportedCSS(issue, fileContent);
         
         if (inlineResult) {
+          // Check if this is an external import that was moved to head.html
+          const isExternalImport = inlineResult.htmlFileUpdated;
+          const title = isExternalImport 
+            ? `Move external CSS to head.html (${basename(inlineResult.importedFile)})` 
+            : `Inline CSS from ${basename(inlineResult.importedFile || issue.importUrl)}`;
+          const description = isExternalImport
+            ? `External CSS @import blocks rendering. Moved to ${inlineResult.htmlFilePath} with optimized preconnect.`
+            : `CSS @import blocks rendering. Inlined ${inlineResult.importedLines} lines from ${inlineResult.importedFile}.`;
+          
           suggestions.push({
             type: 'css-import-fix',
             severity: 'critical',
             file: issue.file,
             line: issue.line,
-            title: `Inline CSS from ${basename(inlineResult.importedFile || issue.importUrl)}`,
-            description: `CSS @import blocks rendering. Inlined ${inlineResult.importedLines} lines from ${inlineResult.importedFile}.`,
+            title,
+            description,
             originalCode: inlineResult.originalImportLine,
             fixedCode: inlineResult.inlinedCSS,
             alternativeFix: inlineResult.alternativeFix,
-            estimatedImpact: 'Eliminates render-blocking @import, improves FCP by 100-300ms'
+            estimatedImpact: isExternalImport 
+              ? 'Eliminates render-blocking @import, loads via optimized HTML <link>, improves FCP by 200-500ms'
+              : 'Eliminates render-blocking @import, improves FCP by 100-300ms',
+            metadata: {
+              htmlFileUpdated: inlineResult.htmlFileUpdated,
+              htmlFilePath: inlineResult.htmlFilePath
+            }
           });
         }
       } catch (error) {
@@ -2460,9 +2508,9 @@ export function ${issue.functionName}(field, newState, globals) {
       // @import '../shared/buttons.css';
       // @import 'buttons.css';
       if (importedFilePath.startsWith('http://') || importedFilePath.startsWith('https://')) {
-        // External URLs cannot be inlined
-        core.warning(`Cannot inline external URL: ${importedFilePath}`);
-        return null;
+        // External URLs cannot be inlined - provide HTML <link> alternative instead
+        core.info(`Generating HTML <link> alternative for external URL: ${importedFilePath}`);
+        return this.generateExternalImportFix(issue, importedFilePath, parentFileContent);
       }
       
       // Resolve relative path
@@ -2572,6 +2620,126 @@ ${processedContent}
       
     } catch (error) {
       core.warning(`Error inlining CSS for ${issue.file}: ${error.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Generate fix for external @import (e.g., Google Fonts)
+   * Strategy:
+   * 1. Remove @import from CSS
+   * 2. Add optimized <link> tags to head.html
+   * 3. Commit both changes together
+   */
+  generateExternalImportFix = async (issue, externalUrl, parentFileContent) => {
+    try {
+      // Find the exact @import line
+      const importPattern = new RegExp(
+        `@import\\s+(?:url\\()?['"]?${externalUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}['"]?(?:\\))?\\s*;?`,
+        'i'
+      );
+      const match = parentFileContent.match(importPattern);
+      const originalImportLine = match ? match[0] : `@import url('${externalUrl}');`;
+      
+      // Detect if it's a font import (most common case)
+      const isFontImport = /fonts\.(googleapis|gstatic)|font/.test(externalUrl);
+      const domain = new URL(externalUrl).hostname;
+      
+      // Generate optimized HTML <link> tags
+      let htmlLinks = '';
+      if (isFontImport) {
+        // Optimized font loading pattern
+        htmlLinks = `<!-- Performance: Moved from CSS @import in ${issue.file} -->
+<link rel="preconnect" href="https://${domain}" crossorigin>
+<link rel="preload" as="style" href="${externalUrl}">
+<link rel="stylesheet" href="${externalUrl}" media="print" onload="this.media='all'">
+<noscript><link rel="stylesheet" href="${externalUrl}"></noscript>`;
+      } else {
+        // Generic external stylesheet
+        htmlLinks = `<!-- Performance: Moved from CSS @import in ${issue.file} -->
+<link rel="preconnect" href="https://${domain}" crossorigin>
+<link rel="stylesheet" href="${externalUrl}" media="print" onload="this.media='all'">
+<noscript><link rel="stylesheet" href="${externalUrl}"></noscript>`;
+      }
+      
+      // Try to find and update head.html (common AEM pattern)
+      const headHtmlPath = resolve(this.workspaceRoot, 'head.html');
+      let htmlFileUpdated = false;
+      
+      if (existsSync(headHtmlPath)) {
+        try {
+          const headContent = readFileSync(headHtmlPath, 'utf-8');
+          
+          // Check if this URL is already in head.html
+          if (headContent.includes(externalUrl)) {
+            core.info(`  External URL already in head.html: ${externalUrl}`);
+            // Just remove from CSS, don't duplicate in HTML
+            return {
+              originalImportLine,
+              inlinedCSS: `/* Removed @import - already loaded in head.html */`,
+              importedFile: externalUrl,
+              importedLines: 0,
+              alternativeFix: `Already optimized in head.html`,
+              htmlFileUpdated: false
+            };
+          }
+          
+          // Add links before the first existing <link> or <script> tag
+          let updatedHead = headContent;
+          const insertMarkers = [
+            { regex: /(<link[^>]*>)/i, position: 'before' },
+            { regex: /(<script[^>]*>)/i, position: 'before' },
+            { regex: /(<\/head>)/i, position: 'before' },
+          ];
+          
+          let inserted = false;
+          for (const marker of insertMarkers) {
+            if (marker.regex.test(updatedHead)) {
+              updatedHead = updatedHead.replace(marker.regex, `${htmlLinks}\n$1`);
+              inserted = true;
+              break;
+            }
+          }
+          
+          // Fallback: append at the end
+          if (!inserted) {
+            updatedHead = `${headContent.trimEnd()}\n${htmlLinks}\n`;
+          }
+          
+          // Write updated head.html
+          writeFileSync(headHtmlPath, updatedHead, 'utf-8');
+          htmlFileUpdated = true;
+          core.info(`  ✓ Added external CSS link to head.html`);
+          
+        } catch (htmlError) {
+          core.warning(`Failed to update head.html: ${htmlError.message}`);
+        }
+      } else {
+        core.warning(`head.html not found at: ${headHtmlPath}`);
+      }
+      
+      // Remove the @import from CSS (clean removal, no comment)
+      const cleanRemoval = htmlFileUpdated 
+        ? `/* Performance: External CSS moved to head.html (${relative(this.workspaceRoot, headHtmlPath)}) */`
+        : `/* ${originalImportLine} */
+/* Performance: External CSS should be loaded via HTML <link> tag */
+/* MANUAL FIX: Add the following to your HTML <head>: */
+${htmlLinks.split('\n').map(line => `/* ${line} */`).join('\n')}`;
+      
+      return {
+        originalImportLine,
+        inlinedCSS: cleanRemoval,
+        importedFile: externalUrl,
+        importedLines: 0,
+        alternativeFix: htmlFileUpdated 
+          ? `Moved to head.html with optimized preconnect` 
+          : `Add <link rel="stylesheet" href="${externalUrl}"> to HTML <head> with preconnect for optimal performance.`,
+        htmlFileUpdated,
+        htmlFilePath: htmlFileUpdated ? relative(this.workspaceRoot, headHtmlPath) : null
+      };
+      
+    } catch (error) {
+      core.warning(`Error generating external import fix: ${error.message}`);
       return null;
     }
   }
