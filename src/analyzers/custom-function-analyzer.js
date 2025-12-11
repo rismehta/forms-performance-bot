@@ -30,12 +30,47 @@ export class CustomFunctionAnalyzer {
     if (customFunctionsPath) {
       const normalizedPath = customFunctionsPath.replace(/^\/+/, '');
       core.info(`[CustomFunctions] Form specifies custom functions path: ${normalizedPath}`);
+      core.info(`[CustomFunctions] Searching among ${jsFiles.length} JS files`);
+      
+      // Debug: Show first few file paths to understand format
+      if (jsFiles.length > 0 && jsFiles.length <= 10) {
+        jsFiles.forEach(f => core.info(`[CustomFunctions]   Available: ${f.filename}`));
+      } else if (jsFiles.length > 10) {
+        jsFiles.slice(0, 3).forEach(f => core.info(`[CustomFunctions]   Available: ${f.filename}`));
+        core.info(`[CustomFunctions]   ... and ${jsFiles.length - 3} more files`);
+      }
       
       // Find files that match the custom functions path (suffix matching)
+      // Match if the file path ends with the normalized path (handles prefix directories like 'eds-li/')
       filteredJsFiles = jsFiles.filter(file => {
-        const filePathNormalized = file.filename.replace(/\\/g, '/');
-        return filePathNormalized.endsWith(normalizedPath) || 
-               filePathNormalized.includes(normalizedPath);
+        const filePathNormalized = file.filename.replace(/\\/g, '/').replace(/^\/+/, '');
+        
+        // Check if path ends with target (handles cases like 'eds-li/liabilities/.../functions.js')
+        if (filePathNormalized.endsWith(normalizedPath)) {
+          return true;
+        }
+        
+        // Also check if just the filename matches (fallback)
+        const targetFilename = normalizedPath.split('/').pop();
+        const actualFilename = filePathNormalized.split('/').pop();
+        if (actualFilename === targetFilename) {
+          // Further verify that parent directories match
+          const targetDirs = normalizedPath.split('/').slice(0, -1);
+          const actualDirs = filePathNormalized.split('/');
+          
+          // Check if all target directory segments exist in actual path in order
+          let matchIndex = 0;
+          for (const dir of actualDirs) {
+            if (targetDirs[matchIndex] === dir) {
+              matchIndex++;
+              if (matchIndex === targetDirs.length) {
+                return true; // All segments matched
+              }
+            }
+          }
+        }
+        
+        return false;
       });
       
       if (filteredJsFiles.length > 0) {

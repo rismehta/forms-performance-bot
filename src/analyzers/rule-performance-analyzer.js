@@ -525,9 +525,14 @@ export class RulePerformanceAnalyzer {
       
       // Remove ALL export statements to make it executable in non-ESM context
       sourceCode = sourceCode
-        .replace(/export\s+function\s+/g, 'function ')  // export function -> function
-        .replace(/export\s*\{[^}]+\}/gs, '')             // remove export { ... }
-        .replace(/export\s+default\s+/g, '');            // export default (if any)
+        .replace(/export\s+async\s+function\s+/g, 'async function ')  // export async function
+        .replace(/export\s+function\s+/g, 'function ')                // export function
+        .replace(/export\s+const\s+/g, 'const ')                      // export const
+        .replace(/export\s+let\s+/g, 'let ')                          // export let
+        .replace(/export\s+var\s+/g, 'var ')                          // export var
+        .replace(/export\s+class\s+/g, 'class ')                      // export class
+        .replace(/export\s*\{[^}]+\}/gs, '')                           // remove export { ... }
+        .replace(/export\s+default\s+/g, '');                          // export default
       
       // Create sandbox with browser globals
       const sandbox = {
