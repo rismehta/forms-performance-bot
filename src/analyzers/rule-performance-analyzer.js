@@ -201,10 +201,41 @@ export class RulePerformanceAnalyzer {
             if (match) {
               // Find the field and build ancestor chain
               // Search from root formJson which handles both Sites Model and Form Model
-              const fieldInfo = findFieldWithAncestors(formJson, match[2]);
+              let fieldInfo = findFieldWithAncestors(formJson, match[2]);
+              
+              // If not found in raw JSON, try to get from instantiated form
+              // (handles repeatable panels, dynamically generated fields)
+              if (!fieldInfo && form) {
+                try {
+                  const field = form.getElement(match[2]);
+                  if (field) {
+                    core.info(`[dataRef] Field ${match[2]} found in instantiated form (may be in repeatable panel)`);
+                    // We have the field but not the ancestor chain from JSON
+                    // Report it with limited info
+                    fieldInfo = {
+                      field: { id: field.id, name: field.name, fieldType: field.fieldType },
+                      ancestors: [] // Can't build ancestor chain from instantiated form easily
+                    };
+                  }
+                } catch (e) {
+                  // Field doesn't exist in form either
+                }
+              }
               
               if (!fieldInfo) {
-                core.warning(`[dataRef] Could not find field ${match[2]} in form JSON`);
+                core.warning(`[dataRef] Could not find field ${match[2]} in form JSON or instantiated form`);
+                core.warning(`[dataRef] This field may be in a fragment or conditional structure`);
+                core.warning(`[dataRef] dataRef error: "${match[1]}"`);
+                // Still report the error without ancestor info
+                
+                validationErrors.dataRefErrors.push({
+                  fieldId: match[2],
+                  dataRef: match[1],
+                  rootCause: 'field_not_found',
+                  message: `Error parsing dataRef "${match[1]}" for field "${match[2]}"`,
+                  ancestorChain: [],
+                  nullAncestor: null
+                });
                 return;
               }
               
