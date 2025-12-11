@@ -685,17 +685,27 @@ async function loadFilesFromWorkspace() {
   
   scanDirectory(workspaceRoot);
   
+  // Prioritize functions.js files so they're always included even if we hit the limit
+  // Sort to put functions.js files first
+  jsFiles.sort((a, b) => {
+    const aIsFunctions = a.filename.includes('functions.js');
+    const bIsFunctions = b.filename.includes('functions.js');
+    if (aIsFunctions && !bIsFunctions) return -1;
+    if (!aIsFunctions && bIsFunctions) return 1;
+    return 0;
+  });
+  
   // Limit to reasonable numbers (same as API approach)
   const jsFilesLimited = jsFiles.slice(0, 50);
   const cssFilesLimited = cssFiles.slice(0, 30);
   
   core.info(`Found ${jsFiles.length} JS files (analyzing ${jsFilesLimited.length}), ${cssFiles.length} CSS files (analyzing ${cssFilesLimited.length})`);
   
-  // Log first few JS files to verify functions.js is included
-  const functionsJsIncluded = jsFilesLimited.some(f => f.filename.includes('functions.js'));
-  core.info(`functions.js included: ${functionsJsIncluded}`);
-  if (jsFilesLimited.length > 0) {
-    core.info(`Sample JS files: ${jsFilesLimited.slice(0, 5).map(f => f.filename).join(', ')}`);
+  // Log functions.js files to verify they're included
+  const functionsFiles = jsFilesLimited.filter(f => f.filename.includes('functions.js'));
+  core.info(`functions.js files included (${functionsFiles.length}): ${functionsFiles.map(f => f.filename).join(', ')}`);
+  if (jsFilesLimited.length > 0 && functionsFiles.length === 0) {
+    core.warning(`No functions.js files found in first ${jsFilesLimited.length} files!`);
   }
   
   return {

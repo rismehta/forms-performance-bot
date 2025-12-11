@@ -191,102 +191,27 @@ export class RulePerformanceAnalyzer {
         dataRefErrors: [],
         typeConflicts: []
       };
+      
+      // Collect raw errors during instantiation (defer processing until form is ready)
+      const rawDataRefErrors = [];
+      const rawTypeConflicts = [];
+      
       const originalConsoleError = console.error;
       console.error = (...args) => {
         const message = args[0];
         if (typeof message === 'string') {
-          // Capture dataRef parsing errors
+          // Capture dataRef parsing errors (don't process - fields not yet instantiated)
           if (message.includes('Error parsing dataRef')) {
             const match = message.match(/Error parsing dataRef "([^"]+)" for field "([^"]+)"/);
             if (match) {
-              // Find the field and build ancestor chain
-              // Search from root formJson which handles both Sites Model and Form Model
-              let fieldInfo = findFieldWithAncestors(formJson, match[2]);
-              
-              // If not found in raw JSON, try to get from instantiated form
-              // (handles repeatable panels, dynamically generated fields)
-              if (!fieldInfo && form) {
-                try {
-                  const field = form.getElement(match[2]);
-                  if (field) {
-                    core.info(`[dataRef] Field ${match[2]} found in instantiated form (may be in repeatable panel)`);
-                    // We have the field but not the ancestor chain from JSON
-                    // Report it with limited info
-                    fieldInfo = {
-                      field: { id: field.id, name: field.name, fieldType: field.fieldType },
-                      ancestors: [] // Can't build ancestor chain from instantiated form easily
-                    };
-                  }
-                } catch (e) {
-                  // Field doesn't exist in form either
-                }
-              }
-              
-              if (!fieldInfo) {
-                core.warning(`[dataRef] Could not find field ${match[2]} in form JSON or instantiated form`);
-                core.warning(`[dataRef] This field may be in a fragment or conditional structure`);
-                core.warning(`[dataRef] dataRef error: "${match[1]}"`);
-                // Still report the error without ancestor info
-                
-                validationErrors.dataRefErrors.push({
-                  fieldId: match[2],
-                  dataRef: match[1],
-                  rootCause: 'field_not_found',
-                  message: `Error parsing dataRef "${match[1]}" for field "${match[2]}"`,
-                  ancestorChain: [],
-                  nullAncestor: null
-                });
-                return;
-              }
-              
-              // Build full ancestor chain for reporting
-              const ancestorChain = fieldInfo.ancestors.map(a => ({
-                id: a.id,
-                name: a.name || a.id,
-                dataRef: a.dataRef
-              }));
-              
-              // Find which ancestor has dataRef: null
-              const nullAncestor = findNullDataRefAncestor(fieldInfo.ancestors);
-              
-              // Log for debugging
-              if (nullAncestor) {
-                core.info(`[dataRef] Field "${fieldInfo.field.name}" fails due to ancestor "${nullAncestor.ancestor.name || nullAncestor.ancestor.id}" with dataRef: null (${nullAncestor.depth} levels up)`);
-              } else {
-                core.warning(`[dataRef] Field "${fieldInfo.field.name}" fails but NO ancestor has dataRef: null. Ancestor chain: ${ancestorChain.map(a => `${a.name}(${a.dataRef === null ? 'NULL' : a.dataRef || 'undefined'})`).join(' > ')}`);
-              }
-              
-              validationErrors.dataRefErrors.push({
-                dataRef: match[1],
-                fieldId: match[2],
-                fieldName: fieldInfo.field.name || 'unknown',
-                message: message,
-                nullAncestor: nullAncestor ? {
-                  id: nullAncestor.ancestor.id || 'unknown',
-                  name: nullAncestor.ancestor.name || 'unknown',
-                  depth: nullAncestor.depth,
-                  path: nullAncestor.path
-                } : null,
-                ancestorChain,
-                rootCause: nullAncestor ? 'ancestor_null_dataref' : 'no_null_ancestor_found'
-              });
+              rawDataRefErrors.push({ dataRef: match[1], fieldId: match[2], message });
+              return; // Process after form instantiation
             }
           }
-          // Capture type conflict errors
+          // Capture type conflict errors (don't process - collect for later)
           else if (message.includes('Type conflict detected')) {
-            const dataRefMatch = message.match(/DataRef:\s*(\S+)/);
-            const newFieldMatch = message.match(/New field '([^']+)'\s*\(([^)]+)\)/);
-            const conflictsMatch = message.match(/conflicts with:\s*(.+?)(?:\.\s*DataRef|$)/);
-            
-            if (newFieldMatch) {
-              validationErrors.typeConflicts.push({
-                dataRef: dataRefMatch ? dataRefMatch[1] : 'unknown',
-                newField: newFieldMatch[1],
-                newFieldType: newFieldMatch[2],
-                conflictingFields: conflictsMatch ? conflictsMatch[1] : '',
-                message: message
-              });
-            }
+            rawTypeConflicts.push({ message });
+            return; // Process after form instantiation
           }
         }
         // Still call original console.error for logging
@@ -419,9 +344,91 @@ export class RulePerformanceAnalyzer {
       // Restore console.error
       console.error = originalConsoleError;
       
-      // Log validation errors if found
+      // NOW process the collected errors (form is fully instantiated, fields are available)
+      core.info(`Processing ${rawDataRefErrors.length} dataRef error(s) and ${rawTypeConflicts.length} type conflict(s)...`);
+      
+      // Process dataRef errors
+      for (const raw of rawDataRefErrors) {
+        let fieldInfo = findFieldWithAncestors(formJson, raw.fieldId);
+        
+        // If not found in raw JSON, try instantiated form
+        if (!fieldInfo && form) {
+          try {
+            const field = form.getElement(raw.fieldId);
+            if (field) {
+              fieldInfo = {
+                field: { id: field.id, name: field.name, fieldType: field.fieldType },
+                ancestors: []
+              };
+            }
+          } catch (e) {
+            // Ignore
+          }
+        }
+        
+        if (!fieldInfo) {
+          // Field not found - likely in fragment/conditional
+          validationErrors.dataRefErrors.push({
+            fieldId: raw.fieldId,
+            dataRef: raw.dataRef,
+            rootCause: 'field_not_found',
+            message: raw.message,
+            ancestorChain: [],
+            nullAncestor: null
+          });
+          continue;
+        }
+        
+        // Build ancestor chain
+        const ancestorChain = fieldInfo.ancestors.map(a => ({
+          id: a.id,
+          name: a.name || a.id,
+          dataRef: a.dataRef
+        }));
+        
+        // Find null ancestor
+        const nullAncestor = findNullDataRefAncestor(fieldInfo.ancestors);
+        
+        validationErrors.dataRefErrors.push({
+          dataRef: raw.dataRef,
+          fieldId: raw.fieldId,
+          fieldName: fieldInfo.field.name || 'unknown',
+          message: raw.message,
+          nullAncestor: nullAncestor ? {
+            id: nullAncestor.ancestor.id || 'unknown',
+            name: nullAncestor.ancestor.name || 'unknown',
+            depth: nullAncestor.depth,
+            path: nullAncestor.path
+          } : null,
+          ancestorChain,
+          rootCause: nullAncestor ? 'ancestor_null_dataref' : 'no_null_ancestor_found'
+        });
+      }
+      
+      // Process type conflicts
+      for (const raw of rawTypeConflicts) {
+        const dataRefMatch = raw.message.match(/DataRef:\s*(\S+)/);
+        const newFieldMatch = raw.message.match(/New field '([^']+)'\s*\(([^)]+)\)/);
+        const conflictsMatch = raw.message.match(/conflicts with:\s*(.+?)(?:\.\s*DataRef|$)/);
+        
+        if (newFieldMatch) {
+          validationErrors.typeConflicts.push({
+            dataRef: dataRefMatch ? dataRefMatch[1] : 'unknown',
+            newField: newFieldMatch[1],
+            newFieldType: newFieldMatch[2],
+            conflictingFields: conflictsMatch ? conflictsMatch[1] : '',
+            message: raw.message
+          });
+        }
+      }
+      
+      // Log summary (not individual fields - too verbose)
       if (validationErrors.dataRefErrors.length > 0) {
         core.info(` Found ${validationErrors.dataRefErrors.length} dataRef parsing error(s)`);
+        const notFound = validationErrors.dataRefErrors.filter(e => e.rootCause === 'field_not_found').length;
+        if (notFound > 0) {
+          core.info(`   ${notFound} field(s) not found (may be in fragments/conditional panels)`);
+        }
       }
       if (validationErrors.typeConflicts.length > 0) {
         core.info(` Found ${validationErrors.typeConflicts.length} type conflict(s)`);
