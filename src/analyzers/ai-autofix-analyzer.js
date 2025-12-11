@@ -92,16 +92,23 @@ Respond ONLY with valid JSON:
       
       if (parsed && parsed.jsCode && typeof parsed.jsCode === 'string' && parsed.jsCode.trim().length > 0) {
         
-      // CRITICAL: Validate AI output before accepting it
-      const validation = this.validateAIRefactoring(functionCode, parsed.jsCode, issue.functionName, issueType);
-      if (!validation.valid) {
-        core.warning(`AI refactoring rejected for ${issue.functionName} (${validation.rulesChecked} rules checked):`);
-        validation.errors.forEach(err => core.warning(`  - ${err}`));
-        core.warning('Falling back to safe comment-only approach');
-        return this.getDefaultRefactoredCode(issue, issueType);
+      // Validate AI output (skip for DOM/HTTP since they're comment-only anyway)
+      if (issueType === 'dom' || issueType === 'http') {
+        // DOM/HTTP fixes are ALWAYS comment-only (never auto-applied)
+        // Developer will review before applying, so validation is less critical
+        core.info(`AI suggestion generated for ${issue.functionName} (${parsed.jsCode.length} chars, will be shown in PR comment)`);
+      } else {
+        // For auto-applied fixes (runtime, CSS), strict validation required
+        const validation = this.validateAIRefactoring(functionCode, parsed.jsCode, issue.functionName, issueType);
+        if (!validation.valid) {
+          core.warning(`AI refactoring rejected for ${issue.functionName} (${validation.rulesChecked} rules checked):`);
+          validation.errors.forEach(err => core.warning(`  - ${err}`));
+          core.warning('Fix will be skipped due to validation failure');
+          return this.getDefaultRefactoredCode(issue, issueType);
+        }
+        
+        core.info(`AI refactoring validated for ${issue.functionName} (${validation.rulesChecked} rules passed)`);
       }
-      
-      core.info(`AI refactoring validated for ${issue.functionName} (${validation.rulesChecked} rules passed)`);
       
       return {
         jsCode: parsed.jsCode,
@@ -114,8 +121,20 @@ Respond ONLY with valid JSON:
       return this.getDefaultRefactoredCode(issue, issueType);
     }
     } catch (error) {
-      core.warning(`AI refactoring failed for ${issue.functionName}: ${error.message}`);
-      return this.getDefaultRefactoredCode(issue, issueType);
+      // Provide specific error context
+      if (error.message.includes('too large')) {
+        core.warning(`AI refactoring skipped for ${issue.functionName}: Function too large (${functionCode.length} chars)`);
+        core.warning('  Suggestion: Manually refactor or split into smaller functions');
+      } else if (error.message.includes('content filter')) {
+        core.warning(`AI refactoring skipped for ${issue.functionName}: Content filtered by API`);
+        core.warning('  Suggestion: Manually review function for sensitive operations');
+      } else {
+        core.warning(`AI refactoring failed for ${issue.functionName}: ${error.message}`);
+      }
+      
+      // Return generic guidance (for comment/annotation)
+      // Pass error context so default code can be more helpful
+      return this.getDefaultRefactoredCode(issue, issueType, error.message);
     }
   }
 
@@ -882,8 +901,27 @@ export function myDOMFunction(value, targetField, globals) {
 
   /**
    * Get default refactored code (fallback)
+   * @param {Object} issue - The issue object
+   * @param {string} issueType - 'http' or 'dom'
+   * @param {string} errorMsg - Optional error message for context
    */
-  getDefaultRefactoredCode = (issue, issueType) => {
+  getDefaultRefactoredCode = (issue, issueType, errorMsg = '') => {
+    // If function is too large, provide manual guidance instead of template
+    if (errorMsg.includes('too large')) {
+      return {
+        jsCode: `// Function ${issue.functionName}() is too large for automated AI refactoring.
+// Manual refactoring required:
+// 1. Extract ${issueType === 'http' ? 'HTTP calls' : 'DOM manipulation'} to separate function
+// 2. Use ${issueType === 'http' ? 'custom events + form-level request()' : 'globals.functions.setProperty()'}
+// 3. Test thoroughly in browser
+// 
+// See AEM Forms documentation for best practices.`,
+        formJsonSnippet: issueType === 'http' ? `// Add form-level event handler in Visual Rule Editor` : null,
+        testingSteps: 'Manual refactoring required - function too large for AI'
+      };
+    }
+    
+    // Default template for other failures
     if (issueType === 'http') {
       return {
         jsCode: `export function ${issue.functionName}(field, globals) {
@@ -3537,17 +3575,25 @@ Focus on performance impact and Core Web Vitals (FCP, LCP, TBT, INP).`;
     if (!content) {
       core.warning(`No content in API response. Keys: ${Object.keys(data).join(', ')}`);
       
+      // Check for incomplete response (function too large)
+      if (data.status === 'incomplete' && data.incomplete_details?.reason === 'max_output_tokens') {
+        core.warning(`  Function too large for AI refactoring (exceeded max_output_tokens)`);
+        throw new Error('Function too large for AI refactoring');
+      }
+      
       // Check for content filter blocks
       if (data.content_filters) {
         core.warning(`  Content filtered: ${JSON.stringify(data.content_filters)}`);
+        throw new Error('AI response blocked by content filter');
       }
       
       // Check for explicit error
       if (data.error) {
         core.warning(`  API error: ${JSON.stringify(data.error)}`);
+        throw new Error('AI API error');
       }
       
-      // Check for incomplete details
+      // Check for other incomplete reasons
       if (data.incomplete_details) {
         core.warning(`  Incomplete: ${JSON.stringify(data.incomplete_details)}`);
       }
