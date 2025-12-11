@@ -87,6 +87,7 @@ export class RulePerformanceAnalyzer {
       let realFunctions = {};
       let loadedCount = 0;
       let functionFailures = null;
+      let customFunctionsFilePath = null; // Track the actual file path for runtime errors
       
       if (customFunctionsPath) {
         const result = await this.loadCustomFunctions(customFunctionsPath);
@@ -94,6 +95,7 @@ export class RulePerformanceAnalyzer {
           realFunctions = result.functions;
           loadedCount = result.count;
           functionFailures = result.failureTracker;
+          customFunctionsFilePath = result.filePath; // Store actual file path
         }
       }
       
@@ -332,6 +334,7 @@ export class RulePerformanceAnalyzer {
         for (const [fnName, failure] of functionFailures.entries()) {
           runtimeErrors.push({
             functionName: fnName,
+            file: customFunctionsFilePath, // Add the actual file path (e.g., eds-li/blocks/form/functions.js)
             errorCount: failure.count,
             errors: Array.from(failure.errors),
             severity: 'warning', // Runtime errors are warnings, not critical errors
@@ -665,7 +668,19 @@ export class RulePerformanceAnalyzer {
       }
       
       core.info(`Successfully loaded ${loadedCount} real function(s)`);
-      return { functions, count: loadedCount, failureTracker: functionFailures };
+      
+      // Make path relative to workspace root for consistency
+      const workspaceRoot = process.cwd();
+      const relativePath = absolutePath.startsWith(workspaceRoot) 
+        ? absolutePath.substring(workspaceRoot.length + 1) 
+        : absolutePath;
+      
+      return { 
+        functions, 
+        count: loadedCount, 
+        failureTracker: functionFailures,
+        filePath: relativePath // Return workspace-relative path (e.g., eds-li/blocks/form/functions.js)
+      };
       
     } catch (error) {
       core.warning(`Could not load custom functions: ${error.message}`);
