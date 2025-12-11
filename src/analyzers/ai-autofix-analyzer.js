@@ -3576,7 +3576,30 @@ Focus on performance impact and Core Web Vitals (FCP, LCP, TBT, INP).`;
     try {
       return JSON.parse(cleanContent);
     } catch (error) {
-      core.warning(`Failed to parse AI response as JSON: ${cleanContent.substring(0, 200)}...`);
+      // If JSON.parse fails, try to extract code from malformed response
+      // AI sometimes returns literal newlines instead of escaped \n
+      core.warning(`Failed to parse AI response as JSON (trying fallback extraction)`);
+      core.warning(`Error: ${error.message}`);
+      
+      // Try to extract jsCode using regex (handles literal newlines)
+      const jsCodeMatch = cleanContent.match(/"jsCode"\s*:\s*"([\s\S]*?)"\s*[,}]/);
+      const reasonMatch = cleanContent.match(/"reason"\s*:\s*"([^"]*?)"/);
+      
+      if (jsCodeMatch) {
+        const extractedCode = jsCodeMatch[1]
+          .replace(/\\n/g, '\n')        // Unescape \n
+          .replace(/\\"/g, '"')         // Unescape \"
+          .replace(/\\\\/g, '\\');      // Unescape \\
+        
+        core.info(`Extracted ${extractedCode.length} chars of code via fallback`);
+        
+        return {
+          jsCode: extractedCode,
+          reason: reasonMatch ? reasonMatch[1] : 'Extracted via fallback'
+        };
+      }
+      
+      core.warning(`Fallback extraction also failed. Response preview: ${cleanContent.substring(0, 200)}...`);
       throw new Error('AI response was not valid JSON');
     }
   }

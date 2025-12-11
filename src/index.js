@@ -247,16 +247,18 @@ async function run() {
       core.info(`Merging ${ruleCycleAnalysis.after.runtimeErrors.length} runtime error(s) into custom functions`);
       
       // Add runtime errors as issues to custom functions
-      // IMPORTANT: Match with custom function analysis to get file paths
+      // Runtime errors already have the correct file path from RulePerformanceAnalyzer
       const runtimeErrorsWithFiles = ruleCycleAnalysis.after.runtimeErrors.map(error => {
-        // Find the function in custom function analysis to get its file path
+        // Find the function in custom function analysis to get line number
         const functionInfo = customFunctionAnalysis.after.analysis?.find(
           fn => fn.functionName === error.functionName
         );
         
         return {
           ...error,
-          file: functionInfo?.file || 'blocks/form/functions.js', // Use actual file or fallback
+          // error.file already has the correct path from RulePerformanceAnalyzer
+          // If not present, try to get from customFunctionAnalysis
+          file: error.file || functionInfo?.file || 'unknown',
           line: functionInfo?.line || 1
         };
       });
