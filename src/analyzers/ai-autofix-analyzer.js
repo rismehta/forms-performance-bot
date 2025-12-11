@@ -350,7 +350,12 @@ Respond ONLY with valid JSON:
               /\?\.(?!\.)$/m,                      // Optional chaining
               /\?\?/,                              // Nullish coalescing  
               /try\s*\{/,                          // Try-catch
-              /if\s*\([^)]*!\s*\w+\s*\)/          // if (!variable)
+              /if\s*\([^)]*!\s*\w+\s*\)/,         // if (!variable)
+              /\w+\s*\?\s*[^:]+\s*:\s*/,          // Ternary operator (condition ? true : false)
+              /!=\s*null/,                         // != null check
+              /!==\s*null/,                        // !== null check
+              /!=\s*undefined/,                    // != undefined check
+              /!==\s*undefined/                    // !== undefined check
             ];
             
             // Just check if refactored code has ANY defensive pattern
