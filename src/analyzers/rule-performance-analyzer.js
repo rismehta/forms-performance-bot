@@ -1,7 +1,7 @@
 import { createFormInstance, createFormInstanceSync, FunctionRuntime } from '@aemforms/af-core';
 import * as core from '@actions/core';
-import { resolve } from 'path';
-import { existsSync, readFileSync } from 'fs';
+import { resolve, join, relative } from 'path';
+import { existsSync, readFileSync, readdirSync, statSync } from 'fs';
 import nodeCrypto from 'crypto';
 import vm from 'vm';
 
@@ -129,12 +129,22 @@ export class RulePerformanceAnalyzer {
       // Helper: Find field and build ancestor chain
       const findFieldWithAncestors = (items, fieldId, ancestors = []) => {
         if (!items) return null;
-        for (const item of items) {
+        
+        // Handle both array (items) and object (:items) formats
+        const itemsArray = Array.isArray(items) ? items : 
+                          items[':items'] ? Object.values(items[':items']) : 
+                          Object.values(items);
+        
+        for (const item of itemsArray) {
+          if (!item || typeof item !== 'object') continue;
+          
           if (item.id === fieldId) {
             return { field: item, ancestors };
           }
-          if (item.items || item[':items']) {
-            const childItems = item.items || item[':items'];
+          
+          // Recursively check children (prefer .items array, fallback to :items object)
+          const childItems = item.items || item[':items'];
+          if (childItems) {
             const found = findFieldWithAncestors(childItems, fieldId, [...ancestors, item]);
             if (found) return found;
           }
@@ -235,6 +245,7 @@ export class RulePerformanceAnalyzer {
       // Use createFormInstanceSync with callback to hook into RuleEngine BEFORE event queue runs
       // This ensures ExecuteRule event completes and dependencies are tracked
       // After this call returns, all rules have executed and _dependents arrays are populated
+      // Note: af-core internally calls sitesModelToFormModel() to handle :items/:itemsOrder transformation
       let form;
       try {
         core.info('Creating form instance with af-core (profiling rule execution)...');
@@ -409,18 +420,75 @@ export class RulePerformanceAnalyzer {
    * @param {string} customFunctionsPath - Path like "/blocks/form/functions.js"
    * @returns {Promise<Object|null>} {functions: {...}, count: number} or null
    */
+  /**
+   * Recursively search for a file matching the given path suffix
+   * @param {string} dir - Directory to search in
+   * @param {string} targetPath - Path suffix to match (e.g., "liabilities/insta_savings_journey/functions.js")
+   * @param {number} maxDepth - Maximum recursion depth
+   * @returns {string|null} Absolute path to the file or null
+   */
+  findFileByPathSuffix(dir, targetPath, maxDepth = 5) {
+    if (maxDepth <= 0) return null;
+    
+    try {
+      const entries = readdirSync(dir, { withFileTypes: true });
+      
+      for (const entry of entries) {
+        // Skip common directories we don't want to search
+        if (entry.name === 'node_modules' || entry.name === 'dist' || entry.name === '.git') {
+          continue;
+        }
+        
+        const fullPath = join(dir, entry.name);
+        
+        if (entry.isDirectory()) {
+          // Check if this directory + remaining path forms a match
+          const relativePath = relative(dir, fullPath);
+          if (targetPath.startsWith(relativePath) || targetPath.startsWith(entry.name)) {
+            // Recursively search
+            const found = this.findFileByPathSuffix(fullPath, targetPath, maxDepth - 1);
+            if (found) return found;
+          }
+        } else if (entry.isFile()) {
+          // Check if the full path ends with our target path
+          const relativePath = relative(dir, fullPath);
+          if (relativePath.endsWith(targetPath) || fullPath.endsWith(targetPath)) {
+            return fullPath;
+          }
+        }
+      }
+    } catch (error) {
+      // Ignore permission errors, etc.
+      return null;
+    }
+    
+    return null;
+  }
+
   async loadCustomFunctions(customFunctionsPath) {
     if (!customFunctionsPath) {
       return null;
     }
 
     try {
+      // Try specified path first
       const normalizedPath = customFunctionsPath.replace(/^\/+/, '');
-      const absolutePath = resolve(process.cwd(), normalizedPath);
+      let absolutePath = resolve(process.cwd(), normalizedPath);
       
+      // If not found, search for the file in the repository
       if (!existsSync(absolutePath)) {
-        core.info(`Custom functions file not found: ${absolutePath}`);
-        return null;
+        core.info(`Custom functions file not found at specified path: ${absolutePath}`);
+        core.info(`Searching repository for file matching: ${normalizedPath}`);
+        
+        const foundPath = this.findFileByPathSuffix(process.cwd(), normalizedPath);
+        
+        if (foundPath) {
+          absolutePath = foundPath;
+          core.info(`Found custom functions at: ${absolutePath}`);
+        } else {
+          core.info(`Custom functions file not found: ${normalizedPath}`);
+          return null;
+        }
       }
       
       core.info(`Loading custom functions from: ${absolutePath}`);
