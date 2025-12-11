@@ -63,6 +63,11 @@ export class URLAnalyzer {
         timeout: 30000,
       });
 
+      // IMPORTANT: Capture initial HTML immediately (before form JS runs)
+      // The <pre> tag with JSON gets removed after form renders
+      const initialHTML = await page.content();
+      console.log('Captured initial HTML (with <pre> tag for JSON extraction)');
+
       // Wait for form to actually render (not just the container)
       // AEM forms render fields dynamically, so wait for first input field
       const FORM_TIMEOUT_MS = 15000;
@@ -97,12 +102,12 @@ export class URLAnalyzer {
         } : {};
       });
 
-      // Get rendered HTML (after JavaScript execution)
+      // Get rendered HTML (after JavaScript execution) for HTML analysis
       const renderedHTML = await page.content();
 
-      // Extract JSON data from rendered page (supports both EDS and Core Components)
+      // Extract JSON data from INITIAL HTML (before form JS removes <pre> tag)
       // Pass page object for Core Components to use authenticated session
-      const jsonData = await this.jsonExtractor.extract(renderedHTML, url, page);
+      const jsonData = await this.jsonExtractor.extract(initialHTML, url, page);
 
       await browser.close();
       browser = null;
