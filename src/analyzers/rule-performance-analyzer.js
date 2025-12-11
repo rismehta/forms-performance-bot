@@ -127,28 +127,47 @@ export class RulePerformanceAnalyzer {
       const that = this; // Capture 'this' for use in callback
       
       // Helper: Find field and build ancestor chain
-      const findFieldWithAncestors = (items, fieldId, ancestors = []) => {
-        if (!items) return null;
+      const findFieldWithAncestors = (node, fieldId, ancestors = []) => {
+        if (!node || typeof node !== 'object') return null;
         
-        // Handle both array (items) and object (:items) formats
-        const itemsArray = Array.isArray(items) ? items : 
-                          items[':items'] ? Object.values(items[':items']) : 
-                          Object.values(items);
+        // Check if this node itself is the field we're looking for
+        if (node.id === fieldId) {
+          return { field: node, ancestors };
+        }
         
-        for (const item of itemsArray) {
-          if (!item || typeof item !== 'object') continue;
-          
-          if (item.id === fieldId) {
-            return { field: item, ancestors };
-          }
-          
-          // Recursively check children (prefer .items array, fallback to :items object)
-          const childItems = item.items || item[':items'];
-          if (childItems) {
-            const found = findFieldWithAncestors(childItems, fieldId, [...ancestors, item]);
+        // Recursively search children
+        // Handle both array format (items) and object format (:items)
+        
+        // Array format: node.items = [...]
+        if (Array.isArray(node.items)) {
+          for (const child of node.items) {
+            const found = findFieldWithAncestors(child, fieldId, [...ancestors, node]);
             if (found) return found;
           }
         }
+        
+        // Object format: node[':items'] = {key1: {...}, key2: {...}}
+        if (node[':items'] && typeof node[':items'] === 'object' && !Array.isArray(node[':items'])) {
+          for (const key of Object.keys(node[':items'])) {
+            const child = node[':items'][key];
+            const found = findFieldWithAncestors(child, fieldId, [...ancestors, node]);
+            if (found) return found;
+          }
+        }
+        
+        // If node is a plain object (like the root :items container), search its values
+        // This handles the case where we're starting at formJson[':items']
+        if (!node.id && !node.fieldType && !Array.isArray(node)) {
+          for (const key of Object.keys(node)) {
+            if (key === 'id' || key === 'fieldType' || key.startsWith(':') || key === 'items') continue;
+            const child = node[key];
+            if (child && typeof child === 'object') {
+              const found = findFieldWithAncestors(child, fieldId, ancestors);
+              if (found) return found;
+            }
+          }
+        }
+        
         return null;
       };
       
@@ -181,7 +200,8 @@ export class RulePerformanceAnalyzer {
             const match = message.match(/Error parsing dataRef "([^"]+)" for field "([^"]+)"/);
             if (match) {
               // Find the field and build ancestor chain
-              const fieldInfo = findFieldWithAncestors(formJson[':items'] || formJson.items, match[2]);
+              // Search from root formJson which handles both Sites Model and Form Model
+              const fieldInfo = findFieldWithAncestors(formJson, match[2]);
               
               if (!fieldInfo) {
                 core.warning(`[dataRef] Could not find field ${match[2]} in form JSON`);
@@ -442,17 +462,13 @@ export class RulePerformanceAnalyzer {
         const fullPath = join(dir, entry.name);
         
         if (entry.isDirectory()) {
-          // Check if this directory + remaining path forms a match
-          const relativePath = relative(dir, fullPath);
-          if (targetPath.startsWith(relativePath) || targetPath.startsWith(entry.name)) {
-            // Recursively search
-            const found = this.findFileByPathSuffix(fullPath, targetPath, maxDepth - 1);
-            if (found) return found;
-          }
+          // Recursively search all directories
+          const found = this.findFileByPathSuffix(fullPath, targetPath, maxDepth - 1);
+          if (found) return found;
         } else if (entry.isFile()) {
-          // Check if the full path ends with our target path
-          const relativePath = relative(dir, fullPath);
-          if (relativePath.endsWith(targetPath) || fullPath.endsWith(targetPath)) {
+          // Check if the relative path from repo root ends with our target path
+          const relativePath = relative(process.cwd(), fullPath);
+          if (relativePath.endsWith(targetPath)) {
             return fullPath;
           }
         }

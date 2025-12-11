@@ -23,14 +23,38 @@ export class CustomFunctionAnalyzer {
       return { error: 'No form JSON provided' };
     }
 
-    core.info(`[CustomFunctions] Starting analysis with ${jsFiles.length} JS file(s)`);
+    // Filter jsFiles to only the custom functions file specified in form JSON
+    const customFunctionsPath = formJson.properties?.customFunctionsPath;
+    let filteredJsFiles = jsFiles;
+    
+    if (customFunctionsPath) {
+      const normalizedPath = customFunctionsPath.replace(/^\/+/, '');
+      core.info(`[CustomFunctions] Form specifies custom functions path: ${normalizedPath}`);
+      
+      // Find files that match the custom functions path (suffix matching)
+      filteredJsFiles = jsFiles.filter(file => {
+        const filePathNormalized = file.filename.replace(/\\/g, '/');
+        return filePathNormalized.endsWith(normalizedPath) || 
+               filePathNormalized.includes(normalizedPath);
+      });
+      
+      if (filteredJsFiles.length > 0) {
+        core.info(`[CustomFunctions] Found ${filteredJsFiles.length} file(s) matching custom functions path`);
+        filteredJsFiles.forEach(f => core.info(`[CustomFunctions]   - ${f.filename}`));
+      } else {
+        core.warning(`[CustomFunctions] No files found matching ${normalizedPath}, analyzing all ${jsFiles.length} JS files as fallback`);
+        filteredJsFiles = jsFiles;
+      }
+    } else {
+      core.info(`[CustomFunctions] No customFunctionsPath specified, analyzing all ${jsFiles.length} JS file(s)`);
+    }
 
     // Step 1: Extract function names from form JSON
     const functionNames = this.extractFunctionNames(formJson);
     core.info(`[CustomFunctions] Extracted ${functionNames.length} custom function(s) from form JSON`);
 
-    // Step 2: Find and analyze these functions in JS files
-    const functionAnalyses = this.analyzeFunctionsInJS(functionNames, jsFiles);
+    // Step 2: Find and analyze these functions in the filtered JS files
+    const functionAnalyses = this.analyzeFunctionsInJS(functionNames, filteredJsFiles);
     core.info(`[CustomFunctions] Found ${functionAnalyses.length} function definition(s) in JS files`);
 
     // Step 3: Detect violations
