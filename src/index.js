@@ -266,13 +266,28 @@ async function run() {
       if (!customFunctionAnalysis.after.issues) {
         customFunctionAnalysis.after.issues = [];
       }
-      customFunctionAnalysis.after.issues.push(...runtimeErrorsWithFiles);
       
-      // Add to newIssues for reporting
+      // Deduplicate - don't add if already exists (by functionName)
+      const existingFunctionNames = new Set(
+        customFunctionAnalysis.after.issues
+          .filter(i => i.type === 'runtime-error-in-custom-function')
+          .map(i => i.functionName)
+      );
+      
+      const newRuntimeErrors = runtimeErrorsWithFiles.filter(
+        err => !existingFunctionNames.has(err.functionName)
+      );
+      
+      if (newRuntimeErrors.length > 0) {
+        customFunctionAnalysis.after.issues.push(...newRuntimeErrors);
+        core.info(`  Added ${newRuntimeErrors.length} new runtime error(s) (${runtimeErrorsWithFiles.length - newRuntimeErrors.length} already present)`);
+      }
+      
+      // Add to newIssues for reporting (only new ones)
       if (!customFunctionAnalysis.newIssues) {
         customFunctionAnalysis.newIssues = [];
       }
-      customFunctionAnalysis.newIssues.push(...runtimeErrorsWithFiles);
+      customFunctionAnalysis.newIssues.push(...newRuntimeErrors);
       
       // Track runtime error count
       customFunctionAnalysis.after.runtimeErrorCount = ruleCycleAnalysis.after.runtimeErrorCount;

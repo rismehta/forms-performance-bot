@@ -705,8 +705,16 @@ export class HTMLReporter {
           let errorMessage = 'Unknown error';
           if (issue.errors && issue.errors.length > 0) {
             const fullError = issue.errors[0];
-            // Split by newline and take first line (the actual error message)
-            errorMessage = fullError.split('\n')[0].trim();
+            
+            // Try to parse if it's a JSON string
+            try {
+              const parsedError = JSON.parse(fullError);
+              errorMessage = parsedError.message || 'Unknown error';
+            } catch (e) {
+              // Not JSON, treat as plain string
+              // Split by newline and take first line (the actual error message)
+              errorMessage = fullError.split('\n')[0].trim();
+            }
           }
           
           return `
