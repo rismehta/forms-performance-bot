@@ -41,6 +41,7 @@
 ```
 ✓ Rule cycle detection using af-core's dependency graph
 ✓ Stack trace-guided error fixes (AI knows EXACTLY where to add checks)
+✓ dataRef ancestor chain analysis (walks entire hierarchy to find null ancestor)
 ✓ Hero image detection (multi-factor heuristic for LCP optimization)
 ✓ Crypto function skip (avoids Azure OpenAI content filters)
 ✓ AEM runtime guarantees (no checks on globals.*, globals.form)
@@ -276,6 +277,36 @@ function format(phone) {
 ✓ if (!panNumber) return '';
 ```
 
+### 4. **Intelligent dataRef Ancestor Analysis**
+```
+Problem: Form validation errors like "Error parsing dataRef" were generic
+Solution: Bot walks entire form JSON hierarchy to find root cause
+
+BEFORE (Generic):
+  "15 fields have dataRef parsing errors"
+  "Check if parent has dataRef: null"
+  
+AFTER (Specific):
+  "15 fields fail because ancestor 'wizardPanel' has dataRef: null"
+  
+  Ancestor: wizardPanel (ID: panel_123)
+  Depth: 3 levels up from affected fields
+  Current dataRef: null ← This breaks data binding
+  
+  Affected descendants (15):
+  • firstName (path: wizardPanel > step1 > personalInfo > firstName)
+  • lastName (path: wizardPanel > step1 > personalInfo > lastName)
+  ... and 13 more
+  
+  FIX: In AEM Forms Editor
+    1. Select ancestor "wizardPanel"
+    2. Properties → "Data Reference"
+    3. Remove null OR set to valid path
+    4. Save → All 15 descendants bind correctly
+
+Result: One fix resolves all descendant issues
+```
+
 ---
 
 ## Future Enhancements
@@ -297,7 +328,7 @@ function format(phone) {
 > [Live demo of PR comment, auto-fixes, GitHub checks]
 
 **Slide 4: Technical Innovation**
-> "Stack trace-guided AI fixes, parallel processing, non-destructive CSS inlining."
+> "Stack trace-guided AI fixes, intelligent dataRef ancestor analysis, parallel processing, non-destructive CSS inlining."
 
 **Slide 5: Impact**
 > "15+ performance issues caught per PR. 40% average performance improvement."
@@ -309,7 +340,7 @@ function format(phone) {
 - **Full-stack solution** (GitHub Actions + AI + Web rendering)
 - **Production-ready** (comprehensive testing + validation)
 - **Developer-friendly** (zero config, works out-of-box)
-- **Innovative AI use** (context-aware, validated fixes)
+- **Innovative AI use** (context-aware fixes, intelligent form structure analysis)
 - **Real business value** (improves form performance before production)
 
 ---

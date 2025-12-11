@@ -1092,6 +1092,48 @@ export function myDOMFunction(value, targetField, globals) {
         return null;
       }
 
+      // BEFORE COMMITTING: Remove previous bot commits to avoid duplicates
+      core.info(` Checking for previous bot commits...`);
+      let removedBotCommits = false;
+      try {
+        // Get recent commit log (last 10 commits)
+        const logOutput = git.exec('git log --oneline -10 --format="%H %s"');
+        const commits = logOutput.split('\n').filter(line => line.trim());
+        
+        // Find consecutive bot commits at HEAD
+        const botCommits = [];
+        for (const line of commits) {
+          const [sha, ...messageParts] = line.split(' ');
+          const message = messageParts.join(' ');
+          if (message.includes('[bot]')) {
+            botCommits.push(sha);
+          } else {
+            // Stop at first non-bot commit
+            break;
+          }
+        }
+        
+        if (botCommits.length > 0) {
+          core.info(`  Found ${botCommits.length} consecutive bot commit(s) at HEAD`);
+          core.info(`  Removing previous bot commits to apply fresh fixes...`);
+          
+          // Reset to the commit BEFORE the first bot commit
+          // Using --soft to keep both working dir and staged changes (our new fixes)
+          const lastNonBotCommit = commits[botCommits.length].split(' ')[0];
+          git.exec(`git reset --soft ${lastNonBotCommit}`);
+          core.info(`  Reset to ${lastNonBotCommit.substring(0, 7)} (last non-bot commit)`);
+          
+          // Our changes are still staged (thanks to --soft), so we're ready to commit
+          removedBotCommits = true;
+          core.info(`  Previous bot commits removed, new fixes ready to commit`);
+        } else {
+          core.info(`  No previous bot commits found at HEAD`);
+        }
+      } catch (checkError) {
+        core.warning(`  Could not check for previous bot commits: ${checkError.message}`);
+        // Continue anyway - not a critical failure
+      }
+      
       // Create commit with bot-identifiable message prefix (for loop prevention)
       const hasAIRefactoring = filesChanged.some(f => f.description.includes('AI-generated'));
       const additionalFilesNote = additionalFilesModified.size > 0 
@@ -1110,25 +1152,34 @@ ${hasAIRefactoring ? '\n REVIEW CHECKLIST:\n- [ ] Test all affected functions\n-
 
       git.commit(commitMessage);
 
-      // Pull latest changes from remote before pushing (handle race conditions)
-      core.info(` Pulling latest changes from ${currentBranch}...`);
-      try {
-        git.exec(`git pull --rebase origin ${currentBranch}`);
-        core.info(`  Rebased successfully`);
-      } catch (pullError) {
-        // If pull fails, try force push with lease (safer than --force)
-        core.warning(`  Pull failed: ${pullError.message}`);
-        core.info(`  Will use --force-with-lease for safe force push`);
-      }
-
       // Push to the same branch (current PR branch)
       core.info(` Pushing changes to ${currentBranch}...`);
-      try {
-        git.push(currentBranch, false); // Try normal push first
-      } catch (pushError) {
-        // If normal push fails, use --force-with-lease (safer than --force)
-        core.warning(`  Normal push failed, using --force-with-lease`);
+      
+      if (removedBotCommits) {
+        // We removed previous bot commits, so history was rewritten
+        // Must use force push (--force-with-lease for safety)
+        core.info(`  Using --force-with-lease (history was rewritten to remove old bot commits)`);
         git.exec(`git push origin HEAD:${currentBranch} --force-with-lease`);
+      } else {
+        // Normal push flow
+        try {
+          // Try rebase first (to handle any new commits from other sources)
+          core.info(` Pulling latest changes from ${currentBranch}...`);
+          git.exec(`git pull --rebase origin ${currentBranch}`);
+          core.info(`  Rebased successfully`);
+        } catch (pullError) {
+          // If pull fails, we'll try force push with lease
+          core.warning(`  Pull failed: ${pullError.message}`);
+          core.info(`  Will use --force-with-lease for safe force push`);
+        }
+        
+        try {
+          git.push(currentBranch, false); // Try normal push first
+        } catch (pushError) {
+          // If normal push fails, use --force-with-lease (safer than --force)
+          core.warning(`  Normal push failed, using --force-with-lease`);
+          git.exec(`git push origin HEAD:${currentBranch} --force-with-lease`);
+        }
       }
 
       const commitSHA = git.getCurrentSHA();

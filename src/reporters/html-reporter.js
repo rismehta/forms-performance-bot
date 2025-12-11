@@ -5,12 +5,69 @@
 export class HTMLReporter {
   constructor() {
     this.timestamp = new Date().toISOString();
+    this.autoFixCommit = null; // Will be set in generateReport
+    this.repoUrl = null; // Will be set in generateReport
+  }
+
+  /**
+   * Check if a specific file was auto-fixed
+   */
+  isFileFixed(filename) {
+    if (!this.autoFixCommit || !this.autoFixCommit.files) return false;
+    return this.autoFixCommit.files.some(f => f.includes(filename));
+  }
+
+  /**
+   * Generate "Fixed" badge HTML with commit link
+   */
+  getFixedBadgeHTML() {
+    if (!this.autoFixCommit || !this.repoUrl) return '';
+    const commitUrl = `https://github.com/${this.repoUrl}/commit/${this.autoFixCommit.sha}`;
+    return `<a href="${commitUrl}" class="fixed-badge" target="_blank" title="View auto-fix commit">FIXED</a>`;
+  }
+
+  /**
+   * Generate auto-fix banner (success or failure)
+   */
+  buildAutoFixBanner() {
+    // No banner if auto-fix wasn't attempted
+    if (!this.autoFixCommit && !this.autoFixFailureReason) return '';
+    
+    // Success banner
+    if (this.autoFixCommit && this.autoFixCommit.sha) {
+      const commitUrl = `https://github.com/${this.repoUrl}/commit/${this.autoFixCommit.sha}`;
+      const shortSha = this.autoFixCommit.sha.substring(0, 7);
+      return `
+      <div class="autofix-banner success">
+        <h3>✓ Auto-Fix Applied Successfully</h3>
+        <p><strong>${this.autoFixCommit.filesChanged}</strong> file(s) were automatically fixed and committed to this PR.</p>
+        <p>Commit: <a href="${commitUrl}" target="_blank" style="color: #fff; text-decoration: underline;">${shortSha}</a> - ${this.autoFixCommit.message}</p>
+        <p><em>Look for green "FIXED" badges below to see which issues were resolved.</em></p>
+      </div>`;
+    }
+    
+    // Failure banner
+    if (this.autoFixFailureReason) {
+      return `
+      <div class="autofix-banner">
+        <h3>⚠ Auto-Fix Not Applied</h3>
+        <p><strong>Reason:</strong> ${this.autoFixFailureReason}</p>
+        <p>The bot identified fixable issues but could not commit the changes automatically. Please review the issues below and apply fixes manually.</p>
+      </div>`;
+    }
+    
+    return '';
   }
 
   /**
    * Generate full HTML report
    */
-  generateReport(results, urls, prNumber, repo) {
+  generateReport(results, urls, prNumber, repo, autoFixCommit = null, autoFixFailureReason = null) {
+    // Store for use in helper methods
+    this.autoFixCommit = autoFixCommit;
+    this.repoUrl = repo;
+    this.autoFixFailureReason = autoFixFailureReason;
+    
     const html = `
 <!DOCTYPE html>
 <html lang="en">
@@ -111,10 +168,16 @@ export class HTMLReporter {
       padding: 15px;
       margin: 10px 0;
       border-radius: 4px;
+      position: relative;
     }
     .issue-item.warning { border-left-color: #d29922; }
+    .issue-item.fixed { 
+      border-left-color: #238636; 
+      opacity: 0.7;
+    }
     .issue-item h4 { margin-bottom: 8px; color: #f85149; }
     .issue-item.warning h4 { color: #d29922; }
+    .issue-item.fixed h4 { color: #238636; }
     .issue-item code {
       background: #161b22;
       padding: 2px 6px;
@@ -122,6 +185,25 @@ export class HTMLReporter {
       font-family: 'Courier New', monospace;
       font-size: 0.9em;
       color: #79c0ff;
+    }
+    .fixed-badge {
+      display: inline-block;
+      background: #238636;
+      color: #fff;
+      padding: 2px 8px;
+      border-radius: 12px;
+      font-size: 0.75em;
+      font-weight: 600;
+      margin-left: 10px;
+      text-decoration: none;
+      transition: background 0.2s;
+    }
+    .fixed-badge:hover {
+      background: #2ea043;
+      text-decoration: none;
+    }
+    .fixed-badge::before {
+      content: '✓ ';
     }
     
     .badge {
@@ -136,6 +218,32 @@ export class HTMLReporter {
     .badge.warning { background: #d29922; color: #000; }
     .badge.success { background: #3fb950; color: #000; }
     .badge.info { background: #58a6ff; color: #000; }
+    
+    .autofix-banner {
+      background: #d29922;
+      border: 2px solid #bb8009;
+      border-radius: 8px;
+      padding: 15px 20px;
+      margin-bottom: 20px;
+      color: #000;
+    }
+    .autofix-banner h3 {
+      margin: 0 0 8px 0;
+      color: #000;
+      font-size: 1.1em;
+    }
+    .autofix-banner p {
+      margin: 0;
+      line-height: 1.5;
+    }
+    .autofix-banner.success {
+      background: #238636;
+      border-color: #2ea043;
+      color: #fff;
+    }
+    .autofix-banner.success h3 {
+      color: #fff;
+    }
     
     pre {
       background: #0d1117;
@@ -208,6 +316,7 @@ export class HTMLReporter {
       </div>
     </header>
 
+    ${this.buildAutoFixBanner()}
     ${this.buildSummaryCards(results)}
     ${this.buildCriticalIssuesSection(results)}
     ${this.buildFormLoadSection(urls)}
@@ -517,13 +626,19 @@ export class HTMLReporter {
       
       ${critical.length > 0 ? `
         <h3>Critical Issues (${critical.length})</h3>
-        ${critical.map(issue => `
-          <div class="issue-item">
-            <h4>${issue.type}</h4>
+        ${critical.map(issue => {
+          const isFixed = this.isFileFixed(issue.file);
+          const fixedClass = isFixed ? 'fixed' : '';
+          const fixedBadge = isFixed ? this.getFixedBadgeHTML() : '';
+          return `
+          <div class="issue-item ${fixedClass}">
+            <h4>${issue.type}${fixedBadge}</h4>
             <p><code>${issue.file}:${issue.line}</code></p>
             <p>${issue.message}</p>
+            ${isFixed ? '<p><em>This issue was automatically fixed by the bot</em></p>' : ''}
           </div>
-        `).join('')}
+        `;
+        }).join('')}
       ` : ''}
       
       ${warnings.length > 0 ? `
@@ -581,13 +696,28 @@ export class HTMLReporter {
       ${runtimeErrors.length > 0 ? `
         <h3>Runtime Errors (${runtimeErrors.length})</h3>
         <p class="info">Functions encountered errors during execution. These can be auto-fixed by AI to add proper null/undefined checks.</p>
-        ${runtimeErrors.map(issue => `
-          <div class="issue-item">
-            <h4>${issue.functionName}() - ${issue.errorCount} error(s)</h4>
-            <p><strong>Error:</strong> ${issue.errors && issue.errors.length > 0 ? issue.errors[0] : 'Unknown error'}</p>
+        ${runtimeErrors.map(issue => {
+          const isFixed = this.isFileFixed(issue.file);
+          const fixedClass = isFixed ? 'fixed' : '';
+          const fixedBadge = isFixed ? this.getFixedBadgeHTML() : '';
+          
+          // Extract only the error message (first line), remove stack trace
+          let errorMessage = 'Unknown error';
+          if (issue.errors && issue.errors.length > 0) {
+            const fullError = issue.errors[0];
+            // Split by newline and take first line (the actual error message)
+            errorMessage = fullError.split('\n')[0].trim();
+          }
+          
+          return `
+          <div class="issue-item ${fixedClass}">
+            <h4>${issue.functionName}() - ${issue.errorCount} error(s)${fixedBadge}</h4>
+            <p><strong>Error:</strong> ${errorMessage}</p>
             <p>${issue.recommendation}</p>
+            ${isFixed ? '<p><em>This issue was automatically fixed by the bot</em></p>' : ''}
           </div>
-        `).join('')}
+        `;
+        }).join('')}
       ` : ''}
     </div>`;
   }
@@ -608,24 +738,129 @@ export class HTMLReporter {
       <p class="warning-message">These are form authoring issues detected by af-core. They require fixes in AEM Forms Editor, not code changes.</p>
       
       ${dataRefErrors.length > 0 ? `
-      <h3>Invalid dataRef Syntax (${dataRefErrors.length})</h3>
-      <p><strong>Issue:</strong> Fields have invalid JSONPath in <code>dataRef</code> property. Their data won't be exported in form submissions.</p>
-      <div class="issue-list">
-        ${dataRefErrors.slice(0, 10).map(error => `
-          <div class="issue-item">
-            <h4>Field: <code>${error.fieldId}</code></h4>
-            <p><strong>Invalid dataRef:</strong> <code>"${error.dataRef}"</code></p>
-            <p><strong>Possible causes:</strong></p>
-            <ul>
-              <li>Missing path prefix - Should be <code>$.${error.dataRef}</code> (global) or <code>data.${error.dataRef}</code> (relative)</li>
-              <li>Invalid characters - Contains special chars without proper escaping</li>
-              <li>Unclosed quotes - JSONPath string literal not properly closed</li>
-            </ul>
-            <p><strong>Fix:</strong> Open form in AEM Forms Editor → Select field → Update "Data Reference (dataRef)" in Properties panel</p>
-          </div>
-        `).join('')}
-        ${dataRefErrors.length > 10 ? `<p>... and ${dataRefErrors.length - 10} more. See action logs for full list.</p>` : ''}
-      </div>
+      <h3>dataRef Parsing Issues (${dataRefErrors.length})</h3>
+      <p><strong>Issue:</strong> af-core failed to parse dataRef for ${dataRefErrors.length} field(s). Data binding will fail and these field values won't be exported in form submission.</p>
+      
+      ${(() => {
+        // Group by root cause
+        const ancestorNullIssues = dataRefErrors.filter(e => e.rootCause === 'ancestor_null_dataref');
+        const noNullFoundIssues = dataRefErrors.filter(e => e.rootCause === 'no_null_ancestor_found');
+        const parsingIssues = dataRefErrors.filter(e => e.rootCause === 'parsing_error');
+        
+        let html = '';
+        
+        // Ancestor null dataRef issues (most common)
+        if (ancestorNullIssues.length > 0) {
+          // Group by the ancestor that has dataRef: null
+          const byAncestor = {};
+          ancestorNullIssues.forEach(error => {
+            const ancestorId = error.nullAncestor?.id || 'unknown';
+            if (!byAncestor[ancestorId]) {
+              byAncestor[ancestorId] = {
+                ancestor: error.nullAncestor,
+                fields: []
+              };
+            }
+            byAncestor[ancestorId].fields.push(error);
+          });
+          
+          html += '<div class="issue-item">';
+          html += '<h4>Root Cause: Ancestor Panel/Container has <code>dataRef: null</code></h4>';
+          html += `<p><strong>${ancestorNullIssues.length} field(s)</strong> are descendants of panel(s)/container(s) with <code>dataRef: null</code>. When an ancestor has null binding, all descendants lose their data context and cannot use dataRef.</p>`;
+          
+          Object.values(byAncestor).forEach(group => {
+            html += '<div style="margin-left: 20px; margin-bottom: 15px; border-left: 3px solid #d29922; padding-left: 15px; background: rgba(210, 153, 34, 0.1); padding: 15px; border-radius: 4px;">';
+            html += `<p><strong>⚠ Problem Ancestor:</strong> <code>${group.ancestor?.name || group.ancestor?.id}</code> (ID: <code>${group.ancestor?.id}</code>)</p>`;
+            html += `<p><strong>Depth:</strong> ${group.ancestor?.depth} level(s) up from affected fields</p>`;
+            html += `<p><strong>Current dataRef:</strong> <code>null</code> ← This breaks data binding for all descendants</p>`;
+            html += `<p><strong>Affected descendant fields (${group.fields.length}):</strong></p>`;
+            html += '<ul>';
+            group.fields.slice(0, 10).forEach(error => {
+              // Show the path from ancestor to field
+              const pathFromAncestor = error.nullAncestor?.path ? `${error.nullAncestor.path} > ${error.fieldName}` : error.fieldName;
+              html += `<li><code>${error.fieldName}</code> (dataRef: <code>${error.dataRef}</code>)`;
+              if (error.nullAncestor?.depth > 1) {
+                html += `<br><em style="font-size: 0.9em; color: #8b949e;">Path: ${pathFromAncestor}</em>`;
+              }
+              html += '</li>';
+            });
+            if (group.fields.length > 10) {
+              html += `<li><em>... and ${group.fields.length - 10} more descendant fields</em></li>`;
+            }
+            html += '</ul>';
+            html += '<hr style="border: 0; border-top: 1px solid #30363d; margin: 10px 0;">';
+            html += `<p><strong>✓ ACTIONABLE FIX:</strong></p>`;
+            html += '<ol style="margin-left: 20px;">';
+            html += `<li>Open form in <strong>AEM Forms Editor (Visual Rule Editor)</strong></li>`;
+            html += `<li>Select ancestor "<strong>${group.ancestor?.name || group.ancestor?.id}</strong>" in the component tree</li>`;
+            html += `<li>In Properties panel → Find "Data Reference (dataRef)" field</li>`;
+            html += `<li><strong>Change from <code>null</code> to:</strong>`;
+            html += '<ul style="margin-top: 5px;">';
+            html += `<li><strong>Option A (Recommended):</strong> Remove the dataRef property entirely → Use name binding (default behavior)</li>`;
+            html += `<li><strong>Option B:</strong> Set to valid path like <code>${group.ancestor?.name || 'container'}</code></li>`;
+            html += '</ul></li>';
+            html += `<li>Save form → All ${group.fields.length} descendant field(s) will now bind correctly</li>`;
+            html += '</ol>';
+            html += '</div>';
+          });
+          html += '</div>';
+        }
+        
+        // No null ancestor found (unexpected - should investigate)
+        if (noNullFoundIssues.length > 0) {
+          html += '<div class="issue-item">';
+          html += '<h4>Root Cause: Unknown (No Null Ancestor Found)</h4>';
+          html += `<p><strong>${noNullFoundIssues.length} field(s)</strong> failed dataRef parsing, but the bot could not find an ancestor with <code>dataRef: null</code>.</p>`;
+          html += '<p><em>This is unexpected since dataRef parsing errors typically come from null ancestor bindings. The ancestor chain is shown below for investigation.</em></p>';
+          html += '<ul>';
+          noNullFoundIssues.slice(0, 5).forEach(error => {
+            html += `<li><code>${error.fieldName}</code> (dataRef: <code>${error.dataRef}</code>)`;
+            if (error.ancestorChain && error.ancestorChain.length > 0) {
+              html += '<br><details style="margin-top: 5px;"><summary style="cursor: pointer; color: #58a6ff;">View ancestor chain</summary>';
+              html += '<ul style="margin-top: 5px; font-size: 0.9em;">';
+              error.ancestorChain.forEach((ancestor, idx) => {
+                const dataRefDisplay = ancestor.dataRef === null ? '<code style="color: #f85149;">null</code>' : 
+                                       ancestor.dataRef === undefined ? '<em>undefined</em>' : 
+                                       `<code>${ancestor.dataRef}</code>`;
+                html += `<li>Level ${idx + 1}: ${ancestor.name} - dataRef: ${dataRefDisplay}</li>`;
+              });
+              html += '</ul></details>';
+            }
+            html += '</li>';
+          });
+          if (noNullFoundIssues.length > 5) {
+            html += `<li><em>... and ${noNullFoundIssues.length - 5} more (see action logs for details)</em></li>`;
+          }
+          html += '</ul>';
+          html += '<p><strong>Suggested Actions:</strong></p>';
+          html += '<ol>';
+          html += '<li>Check action logs for detailed ancestor chain analysis</li>';
+          html += '<li>Manually inspect form JSON for these field IDs to see their ancestor hierarchy</li>';
+          html += '<li>Look for ancestors with <code>dataRef: null</code> that might not be captured</li>';
+          html += '<li>If issue persists, this may indicate a bug in the bot\'s analysis - please report with form JSON</li>';
+          html += '</ol>';
+          html += '</div>';
+        }
+        
+        // Parsing errors (syntax issues - rare, usually caught by Forms Editor)
+        if (parsingIssues.length > 0) {
+          html += '<div class="issue-item">';
+          html += '<h4>Root Cause: dataRef Syntax Error (Rare)</h4>';
+          html += `<p><strong>${parsingIssues.length} field(s)</strong> have malformed dataRef syntax that af-core cannot parse. This is unusual as Forms Editor usually validates syntax.</p>`;
+          html += '<ul>';
+          parsingIssues.slice(0, 10).forEach(error => {
+            html += `<li><code>${error.fieldName}</code> - dataRef: <code>${error.dataRef}</code></li>`;
+          });
+          if (parsingIssues.length > 10) {
+            html += `<li><em>... and ${parsingIssues.length - 10} more</em></li>`;
+          }
+          html += '</ul>';
+          html += '<p><strong>✓ Fix:</strong> Open form in <strong>AEM Forms Editor</strong> → Visual Rule Editor validates dataRef syntax automatically. Re-open each field\'s properties to trigger validation and see the exact syntax error.</p>';
+          html += '</div>';
+        }
+        
+        return html;
+      })()}
       ` : ''}
       
       ${typeConflicts.length > 0 ? `

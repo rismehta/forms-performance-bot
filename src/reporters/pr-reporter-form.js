@@ -44,15 +44,15 @@ export class FormPRReporter {
     // Auto-Fix Commit (if applied)
     if (urls.autoFixCommit) {
       sections.push(`### Auto-Fixes Applied\n`);
-      sections.push(` **${urls.autoFixCommit.filesChanged} file(s)** auto-fixed in commit [\`${urls.autoFixCommit.sha.substring(0, 7)}\`](https://github.com/${repo}/commit/${urls.autoFixCommit.sha})\n`);
-      sections.push(`**Files:** ${urls.autoFixCommit.files.join(', ')}\n`);
+      sections.push(`**${urls.autoFixCommit.filesChanged} file(s)** auto-fixed in commit [\`${urls.autoFixCommit.sha.substring(0, 7)}\`](https://github.com/${repo}/commit/${urls.autoFixCommit.sha})\n`);
+      sections.push('*Fixed issues are marked with ✓ below*\n');
       sections.push('---\n');
     }
 
-    // Top 3-5 Critical Actions (if any)
+    // All Critical Actions (showing which are fixed)
     const topActions = this.buildTopActionsSection(results, urls);
     if (topActions) {
-      sections.push('### Top Priority Actions\n');
+      sections.push('### Critical Issues\n');
       sections.push(topActions);
       sections.push('---\n');
     }
@@ -1111,37 +1111,83 @@ export class FormPRReporter {
   buildTopActionsSection(results, urls) {
     const actions = [];
     let actionNum = 1;
+    
+    // Check what was auto-fixed
+    const fixedFiles = new Set(urls.autoFixCommit?.files || []);
+    const isFileFixed = (filename) => {
+      return Array.from(fixedFiles).some(f => f.includes(filename));
+    };
 
-    // API calls in initialize
+    // CSS critical issues (CSS imports, background-image)
+    const cssCritical = results.formCSS?.after?.issues?.filter(i => i.severity === 'error') || [];
+    if (cssCritical.length > 0) {
+      const cssFilesWithIssues = [...new Set(cssCritical.map(i => i.file))];
+      const cssFixed = cssFilesWithIssues.some(f => isFileFixed(f));
+      const status = cssFixed ? '**✓ FIXED**' : '**[Action Required]**';
+      actions.push(`${actionNum}. ${status} **CSS Critical** → ${cssCritical.length} issue(s) blocking render (CSS @import, background-image)`);
+      actionNum++;
+    }
+
+    // API calls in initialize events
     const apiCalls = results.formEvents?.after?.apiCallsInInitialize || [];
     if (apiCalls.length > 0) {
-      actions.push(`${actionNum}. **Fix API Blocking** → ${apiCalls.length} initialize call(s) blocking render [See full report]`);
+      actions.push(`${actionNum}. **[Action Required]** **API Blocking** → ${apiCalls.length} initialize call(s) blocking render (move to events)`);
       actionNum++;
     }
 
-    // HTTP in custom functions
+    // HTTP requests in custom functions
     const httpCount = results.customFunctions?.after?.httpRequestCount || 0;
     if (httpCount > 0) {
-      actions.push(`${actionNum}. **Fix HTTP Calls** → ${httpCount} function(s) bypassing form API [See full report]`);
+      actions.push(`${actionNum}. **[Action Required]** **HTTP in Functions** → ${httpCount} function(s) bypassing form API (use request())`);
       actionNum++;
     }
 
-    // Form load failure
+    // DOM access in custom functions
+    const domCount = results.customFunctions?.after?.domAccessCount || 0;
+    if (domCount > 0) {
+      actions.push(`${actionNum}. **[Action Required]** **DOM Access** → ${domCount} function(s) directly manipulating DOM (use setProperty)`);
+      actionNum++;
+    }
+
+    // Runtime errors in custom functions
+    const runtimeErrors = results.customFunctions?.after?.runtimeErrorCount || 0;
+    if (runtimeErrors > 0) {
+      const runtimeFixed = isFileFixed('functions.js');
+      const status = runtimeFixed ? '**✓ FIXED**' : '**[Action Required]**';
+      actions.push(`${actionNum}. ${status} **Runtime Errors** → ${runtimeErrors} function(s) throwing errors (null/undefined checks needed)`);
+      actionNum++;
+    }
+
+    // Rule cycles (circular dependencies)
+    if (results.ruleCycles?.after?.cycles > 0) {
+      actions.push(`${actionNum}. **[Action Required]** **Rule Cycles** → ${results.ruleCycles.after.cycles} circular dependenc${results.ruleCycles.after.cycles > 1 ? 'ies' : 'y'} detected (break dependency chain)`);
+      actionNum++;
+    }
+
+    // Slow rules (performance)
+    const slowRules = results.ruleCycles?.after?.slowRuleCount || 0;
+    if (slowRules > 0) {
+      actions.push(`${actionNum}. **[Action Required]** **Slow Rules** → ${slowRules} rule(s) taking >50ms (optimize rule logic)`);
+      actionNum++;
+    }
+
+    // Non-lazy loaded images
+    const nonLazyImages = results.formHTML?.after?.issues?.filter(i => i.type === 'images-not-lazy-loaded') || [];
+    if (nonLazyImages.length > 0) {
+      actions.push(`${actionNum}. **[Action Required]** **Non-Lazy Images** → ${nonLazyImages.length} image(s) not lazy loaded (add loading="lazy")`);
+      actionNum++;
+    }
+
+    // Blocking scripts
+    const blockingScripts = results.formHTML?.after?.issues?.filter(i => i.type === 'blocking-scripts') || [];
+    if (blockingScripts.length > 0) {
+      actions.push(`${actionNum}. **[Action Required]** **Blocking Scripts** → ${blockingScripts.length} script(s) blocking render (add defer/async)`);
+      actionNum++;
+    }
+
+    // Form load failure (always show if present)
     if (urls.afterData?.performanceMetrics && !urls.afterData.performanceMetrics.formRendered) {
-      actions.push(`${actionNum}. **Investigate Timeout** → Form failed to load in 15s [Check logs]`);
-      actionNum++;
-    }
-
-    // CSS critical
-    const cssCritical = results.formCSS?.after?.issues?.filter(i => i.severity === 'error') || [];
-    if (cssCritical.length > 0 && actionNum <= 5) {
-      actions.push(`${actionNum}. **Fix CSS Critical** → ${cssCritical.length} issue(s) blocking render [See full report]`);
-      actionNum++;
-    }
-
-    // Rule cycles
-    if (results.ruleCycles?.after?.cycles > 0 && actionNum <= 5) {
-      actions.push(`${actionNum}. **Fix Rule Cycles** → ${results.ruleCycles.after.cycles} circular dependenc${results.ruleCycles.after.cycles > 1 ? 'ies' : 'y'} detected [See full report]`);
+      actions.push(`${actionNum}. **[Action Required]** **Form Timeout** → Form failed to load in 15s (check browser console for errors)`);
       actionNum++;
     }
 

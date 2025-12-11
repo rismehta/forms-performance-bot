@@ -126,6 +126,37 @@ export class RulePerformanceAnalyzer {
       let originalExecute = null;
       const that = this; // Capture 'this' for use in callback
       
+      // Helper: Find field and build ancestor chain
+      const findFieldWithAncestors = (items, fieldId, ancestors = []) => {
+        if (!items) return null;
+        for (const item of items) {
+          if (item.id === fieldId) {
+            return { field: item, ancestors };
+          }
+          if (item.items || item[':items']) {
+            const childItems = item.items || item[':items'];
+            const found = findFieldWithAncestors(childItems, fieldId, [...ancestors, item]);
+            if (found) return found;
+          }
+        }
+        return null;
+      };
+      
+      // Helper: Find the ancestor with dataRef: null
+      const findNullDataRefAncestor = (ancestors) => {
+        // Walk from closest to farthest ancestor
+        for (let i = ancestors.length - 1; i >= 0; i--) {
+          if (ancestors[i].dataRef === null) {
+            return {
+              ancestor: ancestors[i],
+              depth: ancestors.length - i, // How many levels up
+              path: ancestors.slice(i).map(a => a.name || a.id).join(' > ')
+            };
+          }
+        }
+        return null;
+      };
+
       // CAPTURE FORM VALIDATION ERRORS: Intercept console.error to capture af-core validation warnings
       const validationErrors = {
         dataRefErrors: [],
@@ -139,10 +170,44 @@ export class RulePerformanceAnalyzer {
           if (message.includes('Error parsing dataRef')) {
             const match = message.match(/Error parsing dataRef "([^"]+)" for field "([^"]+)"/);
             if (match) {
+              // Find the field and build ancestor chain
+              const fieldInfo = findFieldWithAncestors(formJson[':items'] || formJson.items, match[2]);
+              
+              if (!fieldInfo) {
+                core.warning(`[dataRef] Could not find field ${match[2]} in form JSON`);
+                return;
+              }
+              
+              // Build full ancestor chain for reporting
+              const ancestorChain = fieldInfo.ancestors.map(a => ({
+                id: a.id,
+                name: a.name || a.id,
+                dataRef: a.dataRef
+              }));
+              
+              // Find which ancestor has dataRef: null
+              const nullAncestor = findNullDataRefAncestor(fieldInfo.ancestors);
+              
+              // Log for debugging
+              if (nullAncestor) {
+                core.info(`[dataRef] Field "${fieldInfo.field.name}" fails due to ancestor "${nullAncestor.ancestor.name || nullAncestor.ancestor.id}" with dataRef: null (${nullAncestor.depth} levels up)`);
+              } else {
+                core.warning(`[dataRef] Field "${fieldInfo.field.name}" fails but NO ancestor has dataRef: null. Ancestor chain: ${ancestorChain.map(a => `${a.name}(${a.dataRef === null ? 'NULL' : a.dataRef || 'undefined'})`).join(' > ')}`);
+              }
+              
               validationErrors.dataRefErrors.push({
                 dataRef: match[1],
                 fieldId: match[2],
-                message: message
+                fieldName: fieldInfo.field.name || 'unknown',
+                message: message,
+                nullAncestor: nullAncestor ? {
+                  id: nullAncestor.ancestor.id || 'unknown',
+                  name: nullAncestor.ancestor.name || 'unknown',
+                  depth: nullAncestor.depth,
+                  path: nullAncestor.path
+                } : null,
+                ancestorChain,
+                rootCause: nullAncestor ? 'ancestor_null_dataref' : 'no_null_ancestor_found'
               });
             }
           }

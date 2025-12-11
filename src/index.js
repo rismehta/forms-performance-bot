@@ -306,6 +306,7 @@ async function run() {
     
     // APPLY AUTO-FIXES TO CURRENT PR (commit directly to the same PR)
     let autoFixCommit = null;
+    let autoFixFailureReason = null;
     if (autoFixSuggestions.enabled && autoFixSuggestions.suggestions.length > 0) {
       core.info(' Applying auto-fixes to current PR...');
       try {
@@ -323,9 +324,20 @@ async function run() {
           core.info(`  Commit message: "${autoFixCommit.message}"`);
         } else {
           core.info(' No trivial fixes available to auto-commit');
+          autoFixFailureReason = 'No auto-fixable issues (HTTP/DOM fixes require manual review)';
         }
       } catch (error) {
         core.warning(` Could not apply auto-fixes: ${error.message}`);
+        autoFixFailureReason = error.message;
+        
+        // Distinguish between different failure types
+        if (error.message.includes('rebase') || error.message.includes('conflict')) {
+          autoFixFailureReason = 'Push failed due to rebase conflict. Please manually merge and re-run.';
+        } else if (error.message.includes('permission') || error.message.includes('authentication')) {
+          autoFixFailureReason = 'Push failed due to permission issues. Check PAT_TOKEN configuration.';
+        } else if (error.message.includes('protected branch')) {
+          autoFixFailureReason = 'Cannot auto-commit to protected branch (main/master).';
+        }
       }
     }
     
@@ -337,7 +349,7 @@ async function run() {
       after: urls.after,
       beforeData,
       afterData
-    }, prNumber, `${owner}/${repo}`);
+    }, prNumber, `${owner}/${repo}`, autoFixCommit, autoFixFailureReason);
     
     // Save HTML report to file (will be uploaded as artifact)
     const reportPath = join(process.cwd(), 'performance-report.html');
