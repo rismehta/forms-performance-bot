@@ -7,6 +7,73 @@ import * as cheerio from 'cheerio';
 export class FormHTMLAnalyzer {
   constructor(config = null) {
     this.config = config;
+    
+    // Hero image detection configuration (with defaults)
+    this.heroConfig = {
+      enabled: true,
+      keywords: ['hero', 'banner', 'masthead', 'jumbotron', 'splash', 'featured'],
+      treatFirstImageAsHero: true,
+      minimumHeroSize: { width: 300, height: 200 },
+      checkParentContainer: true,
+      ...(config?.heroImageDetection || {})
+    };
+  }
+
+  /**
+   * Detect if an image is a hero/banner image that should NOT be lazy-loaded
+   * Multi-factor heuristic approach
+   */
+  isHeroImage(img, index, allImages) {
+    if (!this.heroConfig.enabled) {
+      return false; // If disabled, all images should be lazy-loaded
+    }
+    
+    // 1. Check image class/id for hero keywords
+    const imgClasses = (img.class || '').toLowerCase();
+    const imgId = (img.id || '').toLowerCase();
+    const keywords = this.heroConfig.keywords.join('|');
+    const heroRegex = new RegExp(keywords, 'i');
+    
+    if (heroRegex.test(imgClasses + imgId)) {
+      return true; // Explicit hero indicator in class/id
+    }
+    
+    // 2. Check if image has explicit eager loading attributes
+    //    (Next.js priority, fetchpriority, or loading="eager")
+    if (img.loading === 'eager' || img.fetchpriority === 'high' || img.priority === 'true') {
+      return true; // Developer explicitly marked as high priority
+    }
+    
+    // 3. First image in form heuristic
+    if (this.heroConfig.treatFirstImageAsHero && index === 0) {
+      // First image is often hero, but check if it's large enough
+      const width = parseInt(img.width) || 0;
+      const height = parseInt(img.height) || 0;
+      const minWidth = this.heroConfig.minimumHeroSize.width;
+      const minHeight = this.heroConfig.minimumHeroSize.height;
+      
+      // If no dimensions, assume it might be hero (safer to not flag)
+      if (!width && !height) {
+        return true; // First image without dimensions - likely hero
+      }
+      
+      // If dimensions exist, check if they exceed minimum hero size
+      if (width >= minWidth || height >= minHeight) {
+        return true; // First large image is likely hero
+      }
+    }
+    
+    // 4. Check parent container for hero-related classes
+    //    (e.g., <section class="hero-section"><img></section>)
+    if (this.heroConfig.checkParentContainer && img.parentClasses) {
+      const parentClasses = img.parentClasses.toLowerCase();
+      if (heroRegex.test(parentClasses)) {
+        return true; // Inside a hero container
+      }
+    }
+    
+    // Not a hero image - should be lazy-loaded
+    return false;
   }
 
   /**
@@ -43,12 +110,19 @@ export class FormHTMLAnalyzer {
   analyzeFormImages($, container) {
     const images = container.find('img').map((i, img) => {
       const $img = $(img);
+      const $parent = $img.parent();
+      
       return {
         src: $img.attr('src'),
         alt: $img.attr('alt'),
         loading: $img.attr('loading'),
+        fetchpriority: $img.attr('fetchpriority'),
+        priority: $img.attr('priority'),
         width: $img.attr('width'),
         height: $img.attr('height'),
+        class: $img.attr('class'),
+        id: $img.attr('id'),
+        parentClasses: $parent.attr('class') || '',
         hasLazyLoading: $img.attr('loading') === 'lazy',
         hasDimensions: !!($img.attr('width') && $img.attr('height')),
       };
@@ -216,16 +290,24 @@ export class FormHTMLAnalyzer {
   detectIssues(analysis) {
     const issues = [];
 
-    // Images without lazy loading
+    // Images without lazy loading (EXCLUDE hero/banner images)
     if (analysis.images.nonLazyLoaded > 0) {
-      issues.push({
-        severity: 'warning',
-        type: 'images-not-lazy-loaded',
-        message: `${analysis.images.nonLazyLoaded} image(s) in form without lazy loading. This blocks form rendering.`,
-        count: analysis.images.nonLazyLoaded,
-        images: analysis.images.nonLazyImages.map(img => img.src),
-        recommendation: 'Add loading="lazy" attribute to images that are not immediately visible. This prevents blocking the form render.',
+      // Filter out hero/banner images (which should be eager-loaded for LCP)
+      const nonHeroImages = analysis.images.nonLazyImages.filter((img, index) => {
+        return !this.isHeroImage(img, index, analysis.images.nonLazyImages);
       });
+      
+      if (nonHeroImages.length > 0) {
+        const heroCount = analysis.images.nonLazyLoaded - nonHeroImages.length;
+        issues.push({
+          severity: 'error', // CRITICAL: All non-hero images must be lazy loaded
+          type: 'images-not-lazy-loaded',
+          message: `${nonHeroImages.length} image(s) in form without lazy loading. This blocks form rendering and impacts LCP.${heroCount > 0 ? ` (${heroCount} hero image(s) excluded)` : ''}`,
+          count: nonHeroImages.length,
+          images: nonHeroImages.map(img => img.src),
+          recommendation: 'Add loading="lazy" attribute to all images EXCEPT hero/banner images (first visible image above the fold). Hero images should be eager-loaded for LCP optimization.',
+        });
+      }
     }
 
     // Images without dimensions (causes layout shift)

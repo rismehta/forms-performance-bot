@@ -64,7 +64,7 @@ Create `.performance-bot.json` in your project root:
 }
 ```
 
-**📖 See [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) for more examples and options.**
+**📋 For all available configuration options**, see [`.performance-bot.example.json`](.performance-bot.example.json) or [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md).
 
 ## Setup
 

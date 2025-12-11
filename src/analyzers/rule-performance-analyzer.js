@@ -431,26 +431,40 @@ export class RulePerformanceAnalyzer {
               // If result is a promise, catch rejections
               if (result && typeof result.then === 'function') {
                 return result.catch((err) => {
-                  // Log promise rejection
+                  // Log promise rejection with stack trace
                   if (!functionFailures.has(name)) {
                     functionFailures.set(name, { count: 0, errors: new Set() });
                   }
                   const failure = functionFailures.get(name);
                   failure.count++;
-                  failure.errors.add(err?.message || 'Promise rejected');
+                  
+                  // Capture full error details including stack trace
+                  const errorDetails = {
+                    message: err?.message || 'Promise rejected',
+                    stack: err?.stack || '',
+                    name: err?.name || 'Error'
+                  };
+                  failure.errors.add(JSON.stringify(errorDetails));
                   return null;
                 });
               }
               
               return result;
             } catch (e) {
-              // Log sync error - functions expect different runtime context
+              // Log sync error with stack trace - functions expect different runtime context
               if (!functionFailures.has(name)) {
                 functionFailures.set(name, { count: 0, errors: new Set() });
               }
               const failure = functionFailures.get(name);
               failure.count++;
-              failure.errors.add(e?.message || 'Unknown error');
+              
+              // Capture full error details including stack trace
+              const errorDetails = {
+                message: e?.message || 'Unknown error',
+                stack: e?.stack || '',
+                name: e?.name || 'Error'
+              };
+              failure.errors.add(JSON.stringify(errorDetails));
               return null;
             }
           };

@@ -1,6 +1,6 @@
 import * as core from '@actions/core';
 import { readFileSync, writeFileSync, existsSync } from 'fs';
-import { resolve, basename, relative } from 'path';
+import { resolve, basename, relative, dirname } from 'path';
 import { GitHelper } from '../utils/git-helper.js';
 
 /**
@@ -361,6 +361,33 @@ Respond ONLY with valid JSON:
               core.info(`  [Validation Debug] Original code length: ${orig.length}, Refactored: ${refac.length}`);
               core.info(`  [Validation Debug] Refactored code preview: ${refac.substring(0, 200)}...`);
               return { valid: false, error: 'No defensive checks added (expected if/null checks or try-catch)' };
+            }
+            return { valid: true };
+          }
+        },
+        {
+          name: 'No unnecessary checks on guaranteed objects',
+          check: (orig, refac) => {
+            // Check for unnecessary null checks on AEM runtime guaranteed objects
+            const unnecessaryChecks = [
+              /if\s*\(\s*!globals\s*\)/,                       // if (!globals)
+              /if\s*\(\s*!globals\.functions\s*\)/,           // if (!globals.functions)
+              /if\s*\(\s*!globals\.form\s*\)/,                // if (!globals.form)
+              /if\s*\([^)]*globals\.functions\s*===?\s*null/, // if (globals.functions === null)
+              /if\s*\([^)]*globals\.form\s*===?\s*null/,      // if (globals.form === null)
+              /!globals\.functions\.setProperty/,              // !globals.functions.setProperty
+              /!globals\.functions\.getProperty/,              // !globals.functions.getProperty
+              /!globals\.functions\.setVariable/,              // !globals.functions.setVariable
+              /!globals\.functions\.getVariable/,              // !globals.functions.getVariable
+            ];
+            
+            for (const pattern of unnecessaryChecks) {
+              if (pattern.test(refac)) {
+                return { 
+                  valid: false, 
+                  error: `Added unnecessary null check for guaranteed object (globals/globals.functions/globals.form are always present in AEM runtime)` 
+                };
+              }
             }
             return { valid: true };
           }
@@ -1390,13 +1417,19 @@ ${hasAIRefactoring ? '\n REVIEW CHECKLIST:\n- [ ] Test all affected functions\n-
 
     // Apply fix based on type
     if (fix.type === 'css-import-fix') {
-      // Comment out @import statement
+      // Replace @import with inlined CSS content
       const originalLine = fix.originalCode;
-      const commentedLine = `/* ${originalLine} */\n/* Performance: Bundle CSS during build instead - see Performance Bot PR comment */`;
+      const inlinedCSS = fix.fixedCode;
       
-      content = content.replace(originalLine, commentedLine);
-      description = `Comment out @import in ${fix.file}`;
-      impact = 'Eliminates render-blocking CSS import';
+      if (!content.includes(originalLine)) {
+        core.warning(`Could not find original @import line in ${fix.file}`);
+        core.warning(`  Looking for: ${originalLine}`);
+        return { success: false, error: '@import line not found' };
+      }
+      
+      content = content.replace(originalLine, inlinedCSS);
+      description = `Inline CSS from ${fix.title}`;
+      impact = 'Eliminates render-blocking CSS import, preserves all styling';
       
     } else if (fix.type === 'css-background-image-fix') {
       // Apply AI-generated CSS and component refactoring
@@ -1585,8 +1618,8 @@ ${hasAIRefactoring ? '\n REVIEW CHECKLIST:\n- [ ] Test all affected functions\n-
   }
 
   /**
-   * Fix CSS @import statements
-   * Replace with <link> tags in HTML or bundle recommendation
+   * Fix CSS @import statements by INLINING the imported CSS content
+   * This eliminates render-blocking imports while preserving styling
    */
   fixCSSImports = async (cssResults) => {
     if (!cssResults || !cssResults.newIssues) return [];
@@ -1601,23 +1634,20 @@ ${hasAIRefactoring ? '\n REVIEW CHECKLIST:\n- [ ] Test all affected functions\n-
         const filePath = resolve(this.workspaceRoot, issue.file);
         const fileContent = readFileSync(filePath, 'utf-8');
         
-        // PHASE 1 ENHANCEMENT: Send full file + related files for better context
-        const enhancedContext = this.buildCSSEnhancedContext(issue.file, fileContent);
+        // Read and inline the imported CSS file
+        const inlineResult = await this.inlineImportedCSS(issue, fileContent);
         
-        // Generate fix using AI with enhanced context
-        const fix = await this.generateImportFix(issue, enhancedContext, fileContent);
-        
-        if (fix) {
+        if (inlineResult) {
           suggestions.push({
             type: 'css-import-fix',
             severity: 'critical',
             file: issue.file,
             line: issue.line,
-            title: `Replace @import with bundled CSS`,
-            description: `CSS @import blocks rendering. ${fix.explanation}`,
-            originalCode: fix.originalCode || `@import url('${issue.importUrl}');`,
-            fixedCode: fix.fixedCode,
-            alternativeFix: fix.alternativeFix,
+            title: `Inline CSS from ${basename(inlineResult.importedFile || issue.importUrl)}`,
+            description: `CSS @import blocks rendering. Inlined ${inlineResult.importedLines} lines from ${inlineResult.importedFile}.`,
+            originalCode: inlineResult.originalImportLine,
+            fixedCode: inlineResult.inlinedCSS,
+            alternativeFix: inlineResult.alternativeFix,
             estimatedImpact: 'Eliminates render-blocking @import, improves FCP by 100-300ms'
           });
         }
@@ -1639,9 +1669,8 @@ ${hasAIRefactoring ? '\n REVIEW CHECKLIST:\n- [ ] Test all affected functions\n-
     const bgImageIssues = cssResults.newIssues.filter(i => i.type === 'css-background-image');
     if (bgImageIssues.length === 0) return [];
     
-    const suggestions = [];
-    
-    for (const issue of bgImageIssues.slice(0, 3)) { // Limit to top 3
+    // PARALLEL: Generate all CSS background-image fixes at once
+    const cssFixPromises = bgImageIssues.slice(0, 3).map(async (issue) => {
       try {
         const cssFilePath = resolve(this.workspaceRoot, issue.file);
         const cssContent = readFileSync(cssFilePath, 'utf-8');
@@ -1697,7 +1726,7 @@ ${hasAIRefactoring ? '\n REVIEW CHECKLIST:\n- [ ] Test all affected functions\n-
         if (!enhancedContext.imagePath) {
           core.warning(`Skipping ${issue.file}:${issue.line} - could not extract image path from CSS`);
           core.warning(`  CSS issue: ${issue.message}`);
-          continue;
+          return null;
         }
         
         const fix = await this.generateBackgroundImageFix(issue, enhancedContext, cssContent, componentContent);
@@ -1725,7 +1754,7 @@ ${hasAIRefactoring ? '\n REVIEW CHECKLIST:\n- [ ] Test all affected functions\n-
             }
           }
           
-          suggestions.push({
+          return {
             type: 'css-background-image-fix',
             severity: 'critical',
             file: issue.file,
@@ -1739,12 +1768,17 @@ ${hasAIRefactoring ? '\n REVIEW CHECKLIST:\n- [ ] Test all affected functions\n-
             fixedComponentCode: fix.fixedComponentCode,
             htmlSuggestion: fix.htmlSuggestion,
             estimatedImpact: 'Enables lazy loading, reduces initial page weight by image size'
-          });
+          };
         }
+        return null;
       } catch (error) {
         core.warning(`Error generating fix for ${issue.file}:${issue.line}: ${error.message}`);
+        return null;
       }
-    }
+    });
+    
+    const cssFixResults = await Promise.all(cssFixPromises);
+    const suggestions = cssFixResults.filter(r => r !== null);
     
     return suggestions;
   }
@@ -1959,22 +1993,23 @@ ${fieldNames.length > 5 ? `\n...and ${fieldNames.length - 5} more` : ''}
       issue => issue.type === 'http-request-in-custom-function'
     );
     
-    for (const issue of httpIssues.slice(0, 3)) { // Top 3
-      // Generate AI-powered refactored code
-      const refactoredCode = await this.generateRefactoredCode(issue, 'http');
-      
-      suggestions.push({
-        type: 'custom-function-http-fix',
-        severity: 'critical',
-        function: issue.functionName,
-        functionName: issue.functionName, // For applyFixToFile()
-        file: issue.file,
-        line: issue.line || 1,
-        title: `Move HTTP request from ${issue.functionName}() to form-level API call`,
-        description: `Custom function "${issue.functionName}()" makes direct HTTP requests. This bypasses error handling, loading states, and retry logic.`,
-        refactoredCode: refactoredCode.jsCode,
-        formJsonSnippet: refactoredCode.formJsonSnippet,
-        testingSteps: refactoredCode.testingSteps,
+    // PARALLEL: Generate all HTTP fixes at once
+    const httpFixPromises = httpIssues.slice(0, 3).map(async (issue) => {
+      try {
+        const refactoredCode = await this.generateRefactoredCode(issue, 'http');
+        
+        return {
+          type: 'custom-function-http-fix',
+          severity: 'critical',
+          function: issue.functionName,
+          functionName: issue.functionName,
+          file: issue.file,
+          line: issue.line || 1,
+          title: `Move HTTP request from ${issue.functionName}() to form-level API call`,
+          description: `Custom function "${issue.functionName}()" makes direct HTTP requests. This bypasses error handling, loading states, and retry logic.`,
+          refactoredCode: refactoredCode.jsCode,
+          formJsonSnippet: refactoredCode.formJsonSnippet,
+          testingSteps: refactoredCode.testingSteps,
         guidance: `
 **Current (ANTI-PATTERN):**
 \`\`\`javascript
@@ -2037,31 +2072,39 @@ export function ${issue.functionName}(field, globals) {
 - Security: Bypasses encrypt() wrapper
 `,
         estimatedImpact: 'Improves error handling, adds loading states, enables request queueing'
-      });
-    }
+        };
+      } catch (error) {
+        core.warning(`Failed to generate HTTP fix for ${issue.functionName}(): ${error.message}`);
+        return null;
+      }
+    });
+    
+    const httpResults = await Promise.all(httpFixPromises);
+    suggestions.push(...httpResults.filter(r => r !== null));
     
     // DOM access in custom functions
     const domIssues = customFunctionsResults.newIssues.filter(
       issue => issue.type === 'dom-access-in-custom-function'
     );
     
-    for (const issue of domIssues.slice(0, 2)) { // Top 2
-      // Generate AI-powered refactored code
-      const refactoredCode = await this.generateRefactoredCode(issue, 'dom');
-      
-      suggestions.push({
-        type: 'custom-function-dom-fix',
-        severity: 'critical',
-        function: issue.functionName,
-        functionName: issue.functionName, // For applyFixToFile()
-        file: issue.file,
-        line: issue.line || 1,
-        title: `Replace DOM access in ${issue.functionName}() with custom component`,
-        description: `Custom function "${issue.functionName}()" directly manipulates DOM. This breaks AEM Forms architecture and causes maintenance issues.`,
-        refactoredCode: refactoredCode.jsCode,
-        componentExample: refactoredCode.componentExample,
-        testingSteps: refactoredCode.testingSteps,
-        guidance: `
+    // PARALLEL: Generate all DOM fixes at once
+    const domFixPromises = domIssues.slice(0, 2).map(async (issue) => {
+      try {
+        const refactoredCode = await this.generateRefactoredCode(issue, 'dom');
+        
+        return {
+          type: 'custom-function-dom-fix',
+          severity: 'critical',
+          function: issue.functionName,
+          functionName: issue.functionName,
+          file: issue.file,
+          line: issue.line || 1,
+          title: `Replace DOM access in ${issue.functionName}() with custom component`,
+          description: `Custom function "${issue.functionName}()" directly manipulates DOM. This breaks AEM Forms architecture and causes maintenance issues.`,
+          refactoredCode: refactoredCode.jsCode,
+          componentExample: refactoredCode.componentExample,
+          testingSteps: refactoredCode.testingSteps,
+          guidance: `
 **Current (ANTI-PATTERN):**
 \`\`\`javascript
 // In ${issue.file}:
@@ -2137,8 +2180,15 @@ export function ${issue.functionName}(field, newState, globals) {
 -  Doesn't work with form serialization
 `,
         estimatedImpact: 'Improves maintainability, enables proper state management, reduces bugs'
-      });
-    }
+        };
+      } catch (error) {
+        core.warning(`Failed to generate DOM fix for ${issue.functionName}(): ${error.message}`);
+        return null;
+      }
+    });
+    
+    const domResults = await Promise.all(domFixPromises);
+    suggestions.push(...domResults.filter(r => r !== null));
     
     return suggestions;
   }
@@ -2156,19 +2206,17 @@ export function ${issue.functionName}(field, newState, globals) {
     
     if (runtimeErrorIssues.length === 0) return [];
     
-    const suggestions = [];
-    
-    for (const issue of runtimeErrorIssues.slice(0, 5)) { // Top 5
+    // PARALLEL: Generate all runtime error fixes at once
+    const runtimeFixPromises = runtimeErrorIssues.slice(0, 5).map(async (issue) => {
       try {
         // Extract function code
-        // Runtime errors now include file property from custom function analysis
         core.info(`Extracting ${issue.functionName}() from ${issue.file || 'blocks/form/functions.js'}`);
         const functionCode = this.extractFunctionCode(issue);
         
         // Skip if extraction failed
         if (!functionCode) {
           core.warning(`Skipping ${issue.functionName}() - could not extract function code from ${issue.file}`);
-          continue;
+          return null;
         }
         
         // Log what was extracted
@@ -2179,14 +2227,14 @@ export function ${issue.functionName}(field, newState, globals) {
         
         if (!enhancedContext) {
           core.warning(`Could not extract context for ${issue.functionName}`);
-          continue;
+          return null;
         }
         
         // Validate the extracted code has actual body (not just signature)
         if (functionCode.length < 50 || !functionCode.includes('{') || functionCode.split('\n').length < 3) {
           core.warning(`Skipping ${issue.functionName}() - extracted code too short or incomplete`);
           core.warning(`  Extracted: ${functionCode}`);
-          continue;
+          return null;
         }
         
         // Generate AI-powered null-check fix
@@ -2199,12 +2247,12 @@ export function ${issue.functionName}(field, newState, globals) {
           if (!validation.valid) {
             core.warning(`AI refactoring rejected for ${issue.functionName} (${validation.rulesChecked} rules checked):`);
             validation.errors.forEach(err => core.warning(`  - ${err}`));
-            continue;
+            return null;
           }
           
           core.info(`AI refactoring validated for ${issue.functionName} (${validation.rulesChecked} rules passed)`);
           
-          suggestions.push({
+          return {
             type: 'custom-function-runtime-error-fix',
             severity: 'warning',
             file: issue.file || 'blocks/form/functions.js',
@@ -2214,12 +2262,17 @@ export function ${issue.functionName}(field, newState, globals) {
             refactoredCode: refactored.jsCode,
             impact: `Prevents ${issue.errorCount} runtime error(s), improves form stability`,
             testingSteps: refactored.testingSteps || 'Test form submission and field interactions'
-          });
+          };
         }
+        return null;
       } catch (error) {
         core.warning(`Error generating runtime error fix for ${issue.functionName}: ${error.message}`);
+        return null;
       }
-    }
+    });
+    
+    const runtimeResults = await Promise.all(runtimeFixPromises);
+    const suggestions = runtimeResults.filter(r => r !== null);
     
     return suggestions;
   }
@@ -2424,6 +2477,158 @@ export function ${issue.functionName}(field, newState, globals) {
     }
 
     return context;
+  }
+
+  /**
+   * Inline imported CSS content to eliminate render-blocking @import
+   * Handles nested imports recursively
+   */
+  inlineImportedCSS = async (issue, parentFileContent) => {
+    try {
+      const parentFilePath = resolve(this.workspaceRoot, issue.file);
+      const parentDir = dirname(parentFilePath);
+      
+      // Resolve import path (relative to parent CSS file)
+      let importedFilePath = issue.importUrl;
+      
+      // Handle different import formats
+      // @import url('../shared/buttons.css');
+      // @import '../shared/buttons.css';
+      // @import 'buttons.css';
+      if (importedFilePath.startsWith('http://') || importedFilePath.startsWith('https://')) {
+        // External URLs cannot be inlined
+        core.warning(`Cannot inline external URL: ${importedFilePath}`);
+        return null;
+      }
+      
+      // Resolve relative path
+      importedFilePath = resolve(parentDir, importedFilePath);
+      
+      // Check if file exists
+      if (!existsSync(importedFilePath)) {
+        core.warning(`Imported CSS file not found: ${importedFilePath}`);
+        core.warning(`  Referenced in: ${issue.file}`);
+        core.warning(`  Import URL: ${issue.importUrl}`);
+        return null;
+      }
+      
+      // Read imported file
+      const importedContent = readFileSync(importedFilePath, 'utf-8');
+      const importedLines = importedContent.split('\n').length;
+      
+      core.info(`  Reading imported CSS: ${relative(this.workspaceRoot, importedFilePath)}`);
+      core.info(`  Imported file: ${importedLines} lines`);
+      
+      // CRITICAL: Resolve relative paths in the imported CSS
+      // Example: url(../icons/arrow.png) needs to be rewritten relative to parent file
+      const importedDir = dirname(importedFilePath);
+      let processedContent = importedContent.replace(
+        /url\(['"]?([^'")]+)['"]?\)/gi,
+        (match, urlPath) => {
+          // Skip absolute URLs and data URIs
+          if (urlPath.startsWith('http://') || 
+              urlPath.startsWith('https://') || 
+              urlPath.startsWith('//') ||
+              urlPath.startsWith('data:')) {
+            return match;
+          }
+          
+          // Resolve path relative to imported file's location
+          const absolutePath = resolve(importedDir, urlPath);
+          
+          // Make it relative to parent file's location
+          const relativeToParent = relative(parentDir, absolutePath);
+          
+          core.info(`    Resolved path: ${urlPath} → ${relativeToParent}`);
+          return `url('${relativeToParent}')`;
+        }
+      );
+      
+      // Check for nested @imports in the imported file
+      const nestedImports = this.detectNestedImports(processedContent);
+      
+      if (nestedImports.length > 0) {
+        core.info(`  Found ${nestedImports.length} nested @import(s) in ${basename(importedFilePath)}`);
+        
+        // Recursively inline nested imports
+        for (const nestedImport of nestedImports) {
+          try {
+            const nestedResult = await this.inlineImportedCSS(
+              {
+                file: relative(this.workspaceRoot, importedFilePath),
+                importUrl: nestedImport.url,
+                line: nestedImport.line
+              },
+              importedContent
+            );
+            
+            if (nestedResult) {
+              // Replace nested @import with its inlined content
+              processedContent = processedContent.replace(
+                nestedImport.fullLine,
+                nestedResult.inlinedCSS
+              );
+            }
+          } catch (nestedError) {
+            core.warning(`Failed to inline nested import ${nestedImport.url}: ${nestedError.message}`);
+          }
+        }
+      }
+      
+      // Find the exact @import line in the parent file
+      const importPattern = new RegExp(
+        `@import\\s+(?:url\\()?['"]?${issue.importUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}['"]?(?:\\))?\\s*;?`,
+        'i'
+      );
+      const match = parentFileContent.match(importPattern);
+      const originalImportLine = match ? match[0] : `@import url('${issue.importUrl}');`;
+      
+      // Generate inlined CSS with source comments
+      const inlinedCSS = `/* ═══════════════════════════════════════════════════════════════════
+   INLINED CSS from: ${relative(dirname(parentFilePath), importedFilePath)}
+   Performance: Eliminates render-blocking @import
+   Lines: ${importedLines}
+   Original: ${originalImportLine}
+   Auto-generated by AEM Forms Performance Analyzer
+   ═══════════════════════════════════════════════════════════════════ */
+
+${processedContent}
+
+/* ═══════════════════════════════════════════════════════════════════
+   End of inlined CSS from: ${relative(dirname(parentFilePath), importedFilePath)}
+   ═══════════════════════════════════════════════════════════════════ */`;
+      
+      return {
+        originalImportLine,
+        inlinedCSS,
+        importedFile: relative(this.workspaceRoot, importedFilePath),
+        importedLines,
+        alternativeFix: `Alternatively, use a bundler (webpack/rollup) to combine CSS during build.`
+      };
+      
+    } catch (error) {
+      core.warning(`Error inlining CSS for ${issue.file}: ${error.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Detect nested @import statements in CSS content
+   */
+  detectNestedImports = (cssContent) => {
+    const imports = [];
+    const importPattern = /@import\s+(?:url\()?['"]([^'"]+)['"](?:\))?\s*;?/gi;
+    let match;
+    
+    while ((match = importPattern.exec(cssContent)) !== null) {
+      imports.push({
+        fullLine: match[0],
+        url: match[1],
+        line: cssContent.substring(0, match.index).split('\n').length
+      });
+    }
+    
+    return imports;
   }
 
   /**
@@ -2634,8 +2839,45 @@ export default function decorate(block) {
    * Generate runtime error fix by adding null/undefined checks
    */
   generateRuntimeErrorFix = async (issue, functionCode, enhancedContext) => {
-    const errorList = issue.errors && issue.errors.length > 0 
-      ? issue.errors.map((err, i) => `${i + 1}. ${err}`).join('\n')
+    // Check if function contains crypto operations (Azure OpenAI content filter may block)
+    const hasCryptoOperations = /crypto\.(subtle\.|getRandomValues|encrypt|decrypt)|CryptoKey|SubtleCrypto/i.test(functionCode);
+    
+    if (hasCryptoOperations) {
+      core.warning(`Skipping AI fix for ${issue.functionName}() - contains cryptographic operations (may trigger content filter)`);
+      core.warning(`  Recommendation: Manually add null checks before crypto operations`);
+      return null; // Skip AI generation, will not be auto-applied
+    }
+    
+    // Parse error details (now includes stack traces)
+    const parsedErrors = [];
+    if (issue.errors && issue.errors.length > 0) {
+      for (const errStr of issue.errors) {
+        try {
+          const errObj = JSON.parse(errStr);
+          parsedErrors.push(errObj);
+        } catch (e) {
+          // Fallback for old format (plain strings)
+          parsedErrors.push({ message: errStr, stack: '', name: 'Error' });
+        }
+      }
+    }
+    
+    // Build error list with stack traces for AI context
+    const errorList = parsedErrors.length > 0
+      ? parsedErrors.map((err, i) => {
+          let formatted = `${i + 1}. ${err.message}`;
+          if (err.stack) {
+            // Extract relevant stack trace lines (filter out internal Node.js traces)
+            const stackLines = err.stack.split('\n')
+              .filter(line => !line.includes('node_modules') && !line.includes('internal/'))
+              .slice(0, 5) // Top 5 relevant lines
+              .join('\n   ');
+            if (stackLines) {
+              formatted += `\n   Stack:\n   ${stackLines}`;
+            }
+          }
+          return formatted;
+        }).join('\n\n')
       : 'Unknown errors';
     
     const contextInfo = enhancedContext ? `
@@ -2667,33 +2909,71 @@ ${enhancedContext.fullFileContent}
 \`\`\`
 ` : ''}
 
-**Task:** Add proper null/undefined checks to prevent these runtime errors.
+**Task:** Add TARGETED null/undefined checks ONLY where the stack trace indicates errors occurred.
+
+**AEM FORMS RUNTIME GUARANTEES (DO NOT add null checks for these):**
+The following are ALWAYS present in AEM Forms runtime:
+✓ \`globals\` - always exists
+✓ \`globals.form\` - always exists (the FormModel instance)
+✓ \`globals.functions\` - always exists (contains OOTB functions)
+✓ \`globals.functions.setProperty\` - OOTB function, always available
+✓ \`globals.functions.getProperty\` - OOTB function, always available
+✓ \`globals.functions.setVariable\` - OOTB function, always available
+✓ \`globals.functions.getVariable\` - OOTB function, always available
+✓ \`globals.functions.exportData\` - OOTB function, always available
+✓ \`globals.functions.importData\` - OOTB function, always available
+✓ \`globals.functions.validate\` - OOTB function, always available
+✓ \`globals.functions.setFocus\` - OOTB function, always available
+✓ \`globals.functions.dispatchEvent\` - OOTB function, always available
+
+**What CAN be null/undefined (DO add checks for these):**
+✗ Function parameters (e.g., \`panNumber\`, \`field\`, \`formData\`)
+✗ Field values (e.g., \`field.$value\`, \`field.$qualifiedName\`)
+✗ User-defined form fields (e.g., \`globals.form.someCustomField\`)
+✗ Properties on user data (e.g., \`formData.countryCode\`, \`user.profile.name\`)
+✗ Results from operations (e.g., \`str.split()[0]\`, \`array[index]\`)
 
 **CONCRETE EXAMPLE (showing what we expect):**
 
 BEFORE (crashes on null):
 \`\`\`javascript
-function formatPhoneNumber(phone, formData) {
-  const cleaned = phone.toString().replace(/\\D/g, '');
-  return formData.countryCode + '-' + cleaned;
+function formatPhoneNumber(phone, formData, globals) {
+  const cleaned = phone.toString().replace(/\\D/g, '');  // ← Error: phone is null
+  globals.functions.setProperty(field, { value: cleaned });
 }
 \`\`\`
 
-AFTER (with defensive checks):
+AFTER (with TARGETED defensive check):
 \`\`\`javascript
-function formatPhoneNumber(phone, formData) {
-  // Add null check before toString()
+function formatPhoneNumber(phone, formData, globals) {
+  // Add null check ONLY for 'phone' (the parameter causing the error)
   if (!phone) {
     return '';
   }
   const cleaned = phone.toString().replace(/\\D/g, '');
   
-  // Add null check before accessing properties
-  if (!formData || !formData.countryCode) {
-    return cleaned;
-  }
+  // NO check needed for globals.functions.setProperty - it's OOTB and always available
+  globals.functions.setProperty(field, { value: cleaned });
+}
+\`\`\`
+
+**WRONG EXAMPLE (DO NOT do this):**
+\`\`\`javascript
+function formatPhoneNumber(phone, formData, globals) {
+  // ❌ WRONG: No need to check globals
+  if (!globals) return;
   
-  return formData.countryCode + '-' + cleaned;
+  // ❌ WRONG: No need to check globals.functions
+  if (!globals.functions) return;
+  
+  // ❌ WRONG: No need to check globals.functions.setProperty
+  if (!globals.functions.setProperty) return;
+  
+  // ✓ CORRECT: Only check user parameters
+  if (!phone) return '';
+  
+  const cleaned = phone.toString().replace(/\\D/g, '');
+  globals.functions.setProperty(field, { value: cleaned });
 }
 \`\`\`
 
@@ -2705,18 +2985,26 @@ function formatPhoneNumber(phone, formData) {
 
 **CRITICAL RULES:**
 1. RETURN THE COMPLETE FUNCTION with all original code intact
-2. ADD if checks BEFORE operations that can fail (like .toString(), .split(), property access)
-3. PRESERVE function signature (parameters, name) exactly
-4. PRESERVE all existing logic and calculations
-5. PRESERVE all setProperty, setVariable, dispatchEvent calls
-6. DO NOT change variable names or remove any logic
-7. ONLY ADD defensive checks - don't refactor or simplify
+2. USE THE STACK TRACE to identify which specific variable/operation is failing
+3. ADD checks ONLY for the variables mentioned in the error stack trace
+4. DO NOT add checks for \`globals\`, \`globals.form\`, or \`globals.functions.*\` (guaranteed by runtime)
+5. PRESERVE function signature (parameters, name) exactly
+6. PRESERVE all existing logic and calculations
+7. PRESERVE all setProperty, setVariable, dispatchEvent calls
+8. DO NOT change variable names or remove any logic
+9. ONLY ADD defensive checks - don't refactor or simplify
 
-**Defensive Check Patterns:**
-- Before .toString(): if (!value) { return ''; }
-- Before .split(): if (!str || typeof str !== 'string') { return []; }
-- Before property access: if (!obj || !obj.property) { return null; }
+**Defensive Check Patterns (use sparingly, only where stack trace indicates):**
+- Before .toString() on parameter: if (!value) { return ''; }
+- Before .split() on parameter: if (!str || typeof str !== 'string') { return []; }
+- Before property access on user data: if (!obj || !obj.property) { return null; }
 - Before field.$value: if (!field || field.$value === undefined) { return; }
+
+**DO NOT add checks for:**
+- \`globals\` (always exists)
+- \`globals.form\` (always exists)  
+- \`globals.functions\` (always exists)
+- \`globals.functions.setProperty\`, \`getProperty\`, \`setVariable\`, etc. (all OOTB functions)
 
 Respond with ONLY the JSON object containing the COMPLETE function code, no markdown formatting.`;
 
@@ -3060,7 +3348,28 @@ Focus on performance impact and Core Web Vitals (FCP, LCP, TBT, INP).`;
     // Defensive check: ensure content is a string
     if (!content) {
       core.warning(`No content in API response. Keys: ${Object.keys(data).join(', ')}`);
-      throw new Error('AI response contained no content');
+      
+      // Check for content filter blocks
+      if (data.content_filters) {
+        core.warning(`  Content filtered: ${JSON.stringify(data.content_filters)}`);
+      }
+      
+      // Check for explicit error
+      if (data.error) {
+        core.warning(`  API error: ${JSON.stringify(data.error)}`);
+      }
+      
+      // Check for incomplete details
+      if (data.incomplete_details) {
+        core.warning(`  Incomplete: ${JSON.stringify(data.incomplete_details)}`);
+      }
+      
+      // Check status field
+      if (data.status) {
+        core.warning(`  Status: ${data.status}`);
+      }
+      
+      throw new Error('AI response contained no content (possibly filtered or rate limited)');
     }
     
     if (typeof content !== 'string') {

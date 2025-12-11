@@ -82,9 +82,37 @@ You only need to customize if your forms have legitimate reasons for higher thre
 
 ## Advanced Configuration
 
-For all available options, see `.performance-bot.example.json` or the comprehensive guide:
-- **Full Options**: `.performance-bot.example.json`
-- **Research & Details**: `docs/THRESHOLDS.md` (if you need it)
+### Hero Image Detection
+
+Control which images should NOT be lazy-loaded (for LCP optimization):
+
+```json
+{
+  "heroImageDetection": {
+    "enabled": true,
+    "keywords": ["hero", "banner", "masthead", "jumbotron", "splash", "featured"],
+    "treatFirstImageAsHero": true,
+    "minimumHeroSize": { "width": 300, "height": 200 },
+    "checkParentContainer": true
+  }
+}
+```
+
+**How it works:**
+- Hero/banner images are detected and excluded from lazy-loading requirements
+- All other images MUST have `loading="lazy"` (CRITICAL error if missing)
+- Multi-factor detection: class/id keywords, first image heuristic, explicit `loading="eager"`, parent container
+
+**Why:** Hero images should be eager-loaded for optimal LCP (Largest Contentful Paint). Lazy-loading the hero image delays your LCP metric!
+
+### All Available Options
+
+For complete configuration reference, see [`.performance-bot.example.json`](../.performance-bot.example.json) which includes:
+- Form and HTML thresholds
+- Hero image detection settings
+- Analysis skip patterns
+- Reporting verbosity controls
+- Auto-fix configuration
 
 ## How It Works
 

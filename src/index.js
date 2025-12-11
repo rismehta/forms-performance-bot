@@ -587,6 +587,14 @@ function detectCriticalIssues(results) {
       critical.count += excessiveDOM.length;
       critical.issues.push(`${excessiveDOM[0].count} DOM nodes (threshold: ${excessiveDOM[0].threshold}) - severely impacts INP`);
     }
+    
+    // Non-lazy-loaded images (CRITICAL - blocks rendering, impacts LCP)
+    const nonLazyImages = results.formHTML.newIssues.filter(i => i.type === 'images-not-lazy-loaded' && i.severity === 'error');
+    if (nonLazyImages.length > 0 && nonLazyImages[0].count) {
+      critical.hasCritical = true;
+      critical.count += nonLazyImages.length;
+      critical.issues.push(`${nonLazyImages[0].count} image(s) without lazy loading (blocks rendering, excludes hero images)`);
+    }
   }
 
   return critical;

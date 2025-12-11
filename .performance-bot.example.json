@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema",
+  "description": "Complete configuration example for AEM Forms Performance Analyzer. Copy this file to .performance-bot.json in your project root and customize as needed.",
+  
+  "thresholds": {
+    "form": {
+      "maxComponents": 75,
+      "maxDepth": 8,
+      "description": "Form structure thresholds. Large forms impact rendering performance."
+    },
+    "html": {
+      "maxDOMSize": 800,
+      "description": "Maximum DOM nodes in rendered form. Impacts INP (Interaction to Next Paint)."
+    },
+    "rules": {
+      "maxExecutionTime": 50,
+      "description": "Maximum rule execution time in milliseconds. Slow rules block form interactions."
+    }
+  },
+  
+  "heroImageDetection": {
+    "enabled": true,
+    "keywords": ["hero", "banner", "masthead", "jumbotron", "splash", "featured"],
+    "treatFirstImageAsHero": true,
+    "minimumHeroSize": { "width": 300, "height": 200 },
+    "checkParentContainer": true,
+    "description": "Configure hero/banner image detection. Hero images should NOT be lazy-loaded (for LCP optimization). All other images MUST be lazy-loaded."
+  },
+  
+  "analysis": {
+    "skipPatterns": {
+      "files": ["**/test/**", "**/*.test.js", "**/*.spec.js"],
+      "functions": ["test*", "*Test", "*Mock"],
+      "description": "Patterns to skip during analysis (glob format)."
+    }
+  },
+  
+  "reporting": {
+    "verbosity": "normal",
+    "includePassedChecks": false,
+    "groupByCategory": true,
+    "description": "Control how performance reports are generated. Options: 'minimal', 'normal', 'verbose'."
+  },
+  
+  "autoFix": {
+    "enabled": true,
+    "trivialFixes": {
+      "cssImports": true,
+      "cssBackgroundImages": true,
+      "runtimeErrors": true,
+      "description": "Auto-apply trivial fixes directly to PR. HTTP/DOM fixes remain as suggestions only."
+    }
+  }
+}
+
