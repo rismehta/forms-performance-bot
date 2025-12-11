@@ -274,6 +274,11 @@ async function run() {
           .map(i => i.functionName)
       );
       
+      core.info(`  Existing runtime errors in customFunctionAnalysis: ${existingFunctionNames.size}`);
+      if (existingFunctionNames.size > 0) {
+        core.info(`    Functions: ${Array.from(existingFunctionNames).join(', ')}`);
+      }
+      
       const newRuntimeErrors = runtimeErrorsWithFiles.filter(
         err => !existingFunctionNames.has(err.functionName)
       );
@@ -281,7 +286,22 @@ async function run() {
       if (newRuntimeErrors.length > 0) {
         customFunctionAnalysis.after.issues.push(...newRuntimeErrors);
         core.info(`  Added ${newRuntimeErrors.length} new runtime error(s) (${runtimeErrorsWithFiles.length - newRuntimeErrors.length} already present)`);
+      } else {
+        core.info(`  No new runtime errors to add (all ${runtimeErrorsWithFiles.length} already in customFunctionAnalysis)`);
       }
+      
+      // Final dedupe: Remove any remaining duplicates by function name (safety check)
+      const seenFunctions = new Set();
+      customFunctionAnalysis.after.issues = customFunctionAnalysis.after.issues.filter(issue => {
+        if (issue.type === 'runtime-error-in-custom-function') {
+          if (seenFunctions.has(issue.functionName)) {
+            core.warning(`  Removing duplicate runtime error for ${issue.functionName}`);
+            return false;
+          }
+          seenFunctions.add(issue.functionName);
+        }
+        return true;
+      });
       
       // Add to newIssues for reporting (only new ones)
       if (!customFunctionAnalysis.newIssues) {
