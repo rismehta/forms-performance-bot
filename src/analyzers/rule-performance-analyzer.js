@@ -128,51 +128,6 @@ export class RulePerformanceAnalyzer {
       let originalExecute = null;
       const that = this; // Capture 'this' for use in callback
       
-      // Helper: Find field and build ancestor chain
-      const findFieldWithAncestors = (node, fieldId, ancestors = []) => {
-        if (!node || typeof node !== 'object') return null;
-        
-        // Check if this node itself is the field we're looking for
-        if (node.id === fieldId) {
-          return { field: node, ancestors };
-        }
-        
-        // Recursively search children
-        // Handle both array format (items) and object format (:items)
-        
-        // Array format: node.items = [...]
-        if (Array.isArray(node.items)) {
-          for (const child of node.items) {
-            const found = findFieldWithAncestors(child, fieldId, [...ancestors, node]);
-            if (found) return found;
-          }
-        }
-        
-        // Object format: node[':items'] = {key1: {...}, key2: {...}}
-        if (node[':items'] && typeof node[':items'] === 'object' && !Array.isArray(node[':items'])) {
-          for (const key of Object.keys(node[':items'])) {
-            const child = node[':items'][key];
-            const found = findFieldWithAncestors(child, fieldId, [...ancestors, node]);
-            if (found) return found;
-          }
-        }
-        
-        // If node is a plain object (like the root :items container), search its values
-        // This handles the case where we're starting at formJson[':items']
-        if (!node.id && !node.fieldType && !Array.isArray(node)) {
-          for (const key of Object.keys(node)) {
-            if (key === 'id' || key === 'fieldType' || key.startsWith(':') || key === 'items') continue;
-            const child = node[key];
-            if (child && typeof child === 'object') {
-              const found = findFieldWithAncestors(child, fieldId, ancestors);
-              if (found) return found;
-            }
-          }
-        }
-        
-        return null;
-      };
-      
       // Helper: Find the ancestor with dataRef: null
       const findNullDataRefAncestor = (ancestors) => {
         // Walk from closest to farthest ancestor
@@ -350,27 +305,47 @@ export class RulePerformanceAnalyzer {
       // NOW process the collected errors (form is fully instantiated, fields are available)
       core.info(`Processing ${rawDataRefErrors.length} dataRef error(s) and ${rawTypeConflicts.length} type conflict(s)...`);
       
-      // Process dataRef errors
+      // Helper: Get parent chain from instantiated form model (uses .parent references)
+      // This matches exactly how af-core checks dataRef - walks up the .parent chain
+      const getModelParentChain = (field) => {
+        const ancestors = [];
+        let current = field.parent;
+        while (current && current.id !== formJson.id) { // Stop at form root
+          ancestors.push({
+            id: current.id,
+            name: current.name,
+            fieldType: current.fieldType,
+            dataRef: current.dataRef
+          });
+          current = current.parent;
+        }
+        return ancestors; // Closest to farthest
+      };
+      
+      // Process dataRef errors - ALWAYS use form model hierarchy (not JSON structure)
       for (const raw of rawDataRefErrors) {
-        let fieldInfo = findFieldWithAncestors(formJson, raw.fieldId);
+        let fieldInfo = null;
         
-        // If not found in raw JSON, try instantiated form
-        if (!fieldInfo && form) {
+        if (form) {
           try {
             const field = form.getElement(raw.fieldId);
             if (field) {
+              // Get ancestor chain from MODEL's .parent references
+              // This is the ACTUAL hierarchy af-core uses for dataRef checking
+              const modelAncestors = getModelParentChain(field);
+              
               fieldInfo = {
                 field: { id: field.id, name: field.name, fieldType: field.fieldType },
-                ancestors: []
+                ancestors: modelAncestors
               };
             }
           } catch (e) {
-            // Ignore
+            // Field doesn't exist in form
           }
         }
         
         if (!fieldInfo) {
-          // Field not found - likely in fragment/conditional
+          // Field not found in instantiated form
           validationErrors.dataRefErrors.push({
             fieldId: raw.fieldId,
             dataRef: raw.dataRef,
@@ -428,9 +403,35 @@ export class RulePerformanceAnalyzer {
       // Log summary (not individual fields - too verbose)
       if (validationErrors.dataRefErrors.length > 0) {
         core.info(` Found ${validationErrors.dataRefErrors.length} dataRef parsing error(s)`);
+        
         const notFound = validationErrors.dataRefErrors.filter(e => e.rootCause === 'field_not_found').length;
+        const noNullAncestor = validationErrors.dataRefErrors.filter(e => e.rootCause === 'no_null_ancestor_found').length;
+        const withNullAncestor = validationErrors.dataRefErrors.filter(e => e.rootCause === 'ancestor_null_dataref').length;
+        
         if (notFound > 0) {
           core.info(`   ${notFound} field(s) not found (may be in fragments/conditional panels)`);
+        }
+        if (withNullAncestor > 0) {
+          core.info(`   ${withNullAncestor} field(s) have ancestor with dataRef: null`);
+        }
+        if (noNullAncestor > 0) {
+          core.warning(`   ${noNullAncestor} field(s) fail dataRef parsing but NO ancestor has dataRef: null (unexpected)`);
+          core.warning(`   Detailed ancestor chains for investigation:`);
+          
+          validationErrors.dataRefErrors
+            .filter(e => e.rootCause === 'no_null_ancestor_found')
+            .slice(0, 5) // Show first 5 to avoid log spam
+            .forEach(error => {
+              const ancestorPath = error.ancestorChain.length > 0
+                ? error.ancestorChain.map(a => `${a.name}(dataRef: ${a.dataRef === null ? 'NULL' : a.dataRef || 'undefined'})`).join(' > ')
+                : 'No ancestors';
+              core.warning(`     Field "${error.fieldName}" (dataRef: "${error.dataRef}")`);
+              core.warning(`       Ancestor chain: ${ancestorPath}`);
+            });
+          
+          if (noNullAncestor > 5) {
+            core.warning(`     ... and ${noNullAncestor - 5} more field(s) - see HTML report for full details`);
+          }
         }
       }
       if (validationErrors.typeConflicts.length > 0) {
