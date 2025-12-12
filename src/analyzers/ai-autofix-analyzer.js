@@ -1492,13 +1492,43 @@ ${hasAIRefactoring ? '\n REVIEW CHECKLIST:\n- [ ] Test all affected functions\n-
       const originalLine = fix.originalCode;
       const inlinedCSS = fix.fixedCode;
       
-      if (!content.includes(originalLine)) {
-        core.warning(`Could not find original @import line in ${fix.file}`);
-        core.warning(`  Looking for: ${originalLine}`);
-        return { success: false, error: '@import line not found' };
+      // FUZZY MATCH: Handle variations in quotes, spacing, semicolons
+      // This fixes issues where generated fix has single quotes but file has double quotes
+      let matched = false;
+      
+      if (content.includes(originalLine)) {
+        // Exact match - fast path
+        content = content.replace(originalLine, inlinedCSS);
+        matched = true;
+      } else {
+        // Fuzzy match - normalize quotes, spacing, semicolons
+        // Extract the URL from the original line for fuzzy matching
+        const urlMatch = originalLine.match(/url\(['"]?([^'"()]+)['"]?\)/i) || 
+                        originalLine.match(/@import\s+['"]([^'"]+)['"]/i);
+        
+        if (urlMatch && urlMatch[1]) {
+          const url = urlMatch[1];
+          // Create regex that matches any variation of the @import statement
+          const escapedUrl = url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const fuzzyPattern = new RegExp(
+            `@import\\s+(?:url\\()?\\s*['"]?${escapedUrl}['"]?\\s*(?:\\))?\\s*;?`,
+            'gi'
+          );
+          
+          if (fuzzyPattern.test(content)) {
+            content = content.replace(fuzzyPattern, inlinedCSS);
+            matched = true;
+            core.info(`  Fuzzy matched @import for: ${url}`);
+          }
+        }
       }
       
-      content = content.replace(originalLine, inlinedCSS);
+      if (!matched) {
+        core.warning(`Could not find original @import line in ${fix.file}`);
+        core.warning(`  Looking for: ${originalLine}`);
+        core.warning(`  Tried fuzzy matching but no match found`);
+        return { success: false, error: '@import line not found' };
+      }
       
       // Check if this fix also modified head.html (for external imports)
       const isExternalImport = fix.metadata?.htmlFileUpdated;
