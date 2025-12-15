@@ -48,11 +48,9 @@ flowchart TD
     subgraph Layer5[" "]
         direction TB
         L5Title["<b>LAYER 5: AI AUTO-FIX ENGINE - Sequential Pipeline</b>"]:::title
-        IssueDetector[Issue Detector<br/>Prioritize critical]
-        ContextBuilder[Context Builder<br/>Extract function code<br/>Find call sites]
-        AIGenerator[AI Generator<br/>Azure OpenAI GPT-5.1<br/>Context-aware prompts]
-        CodeValidator[Code Validator<br/>5+ safety rules<br/>Signature preservation]
-        GitOperations[Git Operations<br/>Auto-commit<br/>Create suggestions]
+        Detection[Issue Detection & Context<br/>Prioritize critical issues<br/>Extract function code<br/>Find call sites]
+        AIEngine[AI Generation & Validation<br/>Azure OpenAI GPT-5.1<br/>Context-aware prompts<br/>5+ safety rules]
+        GitOperations[Apply Fixes<br/>Auto-commit to PR<br/>Create PR suggestions<br/>GitHub annotations]
     end
     
     Spacer5[" "]:::spacer
@@ -88,9 +86,9 @@ flowchart TD
     HTMLPerf --> Spacer4
     DataRefValidator --> Spacer4
     
-    Spacer4 --> IssueDetector
+    Spacer4 --> Detection
     
-    IssueDetector --> ContextBuilder --> AIGenerator --> CodeValidator --> GitOperations
+    Detection --> AIEngine --> GitOperations
     
     GitOperations --> Spacer5
     Spacer5 --> PRComment & HTMLReport & GitHubChecks & PRSuggestions
@@ -109,7 +107,7 @@ flowchart TD
     class URLAnalyzer,JSONExtractor,HTMLParser extract
     class CSSAnalyzer,JSAnalyzer,EventsAnalyzer,FieldsAnalyzer analyze
     class RuleEngine,HTMLPerf,DataRefValidator runtime
-    class IssueDetector,ContextBuilder,AIGenerator,CodeValidator,GitOperations ai
+    class Detection,AIEngine,GitOperations ai
     class PRComment,HTMLReport,GitHubChecks,PRSuggestions report
     class Spacer1,Spacer2,Spacer3,Spacer4,Spacer5 spacer
     class L1Title,L2Title,L3Title,L4Title,L5Title,L6Title title
