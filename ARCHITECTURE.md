@@ -6,30 +6,48 @@
 
 ```mermaid
 flowchart TD
-    subgraph Layer1["LAYER 1: INPUT"]
+    subgraph Layer1[" "]
+        direction TB
+        L1Title["<b>LAYER 1: INPUT</b>"]:::title
         Input[GitHub Pull Request<br/>Before/After URLs<br/>Source Code Repository]
     end
     
-    subgraph Layer2["LAYER 2: DATA EXTRACTION"]
+    Spacer1[" "]:::spacer
+    
+    subgraph Layer2[" "]
+        direction TB
+        L2Title["<b>LAYER 2: DATA EXTRACTION</b>"]:::title
         URLAnalyzer[URL Analyzer<br/>Puppeteer Browser]
         JSONExtractor[JSON Extractor<br/>Form Definition Parser]
         HTMLParser[HTML Parser<br/>DOM Structure]
     end
     
-    subgraph Layer3["LAYER 3: STATIC ANALYSIS - Parallel Execution"]
+    Spacer2[" "]:::spacer
+    
+    subgraph Layer3[" "]
+        direction TB
+        L3Title["<b>LAYER 3: STATIC ANALYSIS - Parallel Execution</b>"]:::title
         CSSAnalyzer[CSS Analyzer<br/>background-image<br/>@import statements]
         JSAnalyzer[JS Functions Analyzer<br/>HTTP calls<br/>DOM access]
         EventsAnalyzer[Form Events Analyzer<br/>initialize events<br/>API blocking]
         FieldsAnalyzer[Hidden Fields Analyzer<br/>Unused visibility<br/>Dead code]
     end
     
-    subgraph Layer4["LAYER 4: RUNTIME ANALYSIS - Parallel Execution"]
+    Spacer3[" "]:::spacer
+    
+    subgraph Layer4[" "]
+        direction TB
+        L4Title["<b>LAYER 4: RUNTIME ANALYSIS - Parallel Execution</b>"]:::title
         RuleEngine[Rule Performance<br/>Cycle detection<br/>Slow rules<br/>af-core integration]
         HTMLPerf[HTML Performance<br/>Lazy loading<br/>Blocking scripts<br/>DOM size]
         DataRefValidator[DataRef Validator<br/>Parsing errors<br/>Null ancestors]
     end
     
-    subgraph Layer5["LAYER 5: AI AUTO-FIX ENGINE - Sequential Pipeline"]
+    Spacer4[" "]:::spacer
+    
+    subgraph Layer5[" "]
+        direction TB
+        L5Title["<b>LAYER 5: AI AUTO-FIX ENGINE - Sequential Pipeline</b>"]:::title
         IssueDetector[Issue Detector<br/>Prioritize critical]
         ContextBuilder[Context Builder<br/>Extract function code<br/>Find call sites]
         AIGenerator[AI Generator<br/>Azure OpenAI GPT-5.1<br/>Context-aware prompts]
@@ -37,30 +55,45 @@ flowchart TD
         GitOperations[Git Operations<br/>Auto-commit<br/>Create suggestions]
     end
     
-    subgraph Layer6["LAYER 6: REPORTING - Multiple Outputs"]
+    Spacer5[" "]:::spacer
+    
+    subgraph Layer6[" "]
+        direction TB
+        L6Title["<b>LAYER 6: REPORTING - Multiple Outputs</b>"]:::title
         PRComment[PR Comment<br/>Summary & metrics]
         HTMLReport[HTML Report<br/>GitHub Gist<br/>Detailed analysis]
         GitHubChecks[GitHub Checks<br/>Code annotations]
         PRSuggestions[PR Suggestions<br/>Line-level<br/>One-click apply]
     end
     
-    %% Simplified Data Flow
-    Input --> URLAnalyzer
-    Input --> JSONExtractor
-    Input --> HTMLParser
+    %% Data Flow with Spacers
+    Input --> Spacer1
+    Spacer1 --> URLAnalyzer & JSONExtractor & HTMLParser
     
-    URLAnalyzer --> CSSAnalyzer & JSAnalyzer & EventsAnalyzer & FieldsAnalyzer
-    JSONExtractor --> CSSAnalyzer & JSAnalyzer & EventsAnalyzer & FieldsAnalyzer
+    URLAnalyzer --> Spacer2
+    JSONExtractor --> Spacer2
+    HTMLParser --> Spacer2
     
-    URLAnalyzer --> RuleEngine & HTMLPerf & DataRefValidator
-    HTMLParser --> RuleEngine & HTMLPerf & DataRefValidator
+    Spacer2 --> CSSAnalyzer & JSAnalyzer & EventsAnalyzer & FieldsAnalyzer
+    Spacer2 --> RuleEngine & HTMLPerf & DataRefValidator
     
-    CSSAnalyzer & JSAnalyzer & EventsAnalyzer & FieldsAnalyzer --> IssueDetector
-    RuleEngine & HTMLPerf & DataRefValidator --> IssueDetector
+    CSSAnalyzer --> Spacer3
+    JSAnalyzer --> Spacer3
+    EventsAnalyzer --> Spacer3
+    FieldsAnalyzer --> Spacer3
+    
+    Spacer3 --> Spacer4
+    
+    RuleEngine --> Spacer4
+    HTMLPerf --> Spacer4
+    DataRefValidator --> Spacer4
+    
+    Spacer4 --> IssueDetector
     
     IssueDetector --> ContextBuilder --> AIGenerator --> CodeValidator --> GitOperations
     
-    GitOperations --> PRComment & HTMLReport & GitHubChecks & PRSuggestions
+    GitOperations --> Spacer5
+    Spacer5 --> PRComment & HTMLReport & GitHubChecks & PRSuggestions
     
     %% Styling
     classDef input fill:#f5f5f5,stroke:#666,stroke-width:2px
@@ -69,6 +102,8 @@ flowchart TD
     classDef runtime fill:#e1d5e7,stroke:#9673a6,stroke-width:2px
     classDef ai fill:#f8cecc,stroke:#b85450,stroke-width:2px
     classDef report fill:#d5e8d4,stroke:#82b366,stroke-width:2px
+    classDef spacer fill:none,stroke:none,color:transparent
+    classDef title fill:#ffffcc,stroke:#cccc00,stroke-width:1px,font-weight:bold
     
     class Input input
     class URLAnalyzer,JSONExtractor,HTMLParser extract
@@ -76,6 +111,8 @@ flowchart TD
     class RuleEngine,HTMLPerf,DataRefValidator runtime
     class IssueDetector,ContextBuilder,AIGenerator,CodeValidator,GitOperations ai
     class PRComment,HTMLReport,GitHubChecks,PRSuggestions report
+    class Spacer1,Spacer2,Spacer3,Spacer4,Spacer5 spacer
+    class L1Title,L2Title,L3Title,L4Title,L5Title,L6Title title
 ```
 
 ### Detailed Component Architecture
