@@ -799,7 +799,7 @@ export class HTMLReporter {
             html += '<hr style="border: 0; border-top: 1px solid #30363d; margin: 10px 0;">';
             html += `<p><strong>✓ ACTIONABLE FIX:</strong></p>`;
             html += '<ol style="margin-left: 20px;">';
-            html += `<li>Open form in <strong>AEM Forms Editor (Visual Rule Editor)</strong></li>`;
+            html += `<li>Open form in <strong>AEM Forms Editor</strong></li>`;
             html += `<li>Select ancestor "<strong>${group.ancestor?.name || group.ancestor?.id}</strong>" in the component tree</li>`;
             html += `<li>In Properties panel → Find "Data Reference (dataRef)" field</li>`;
             html += `<li><strong>Change from <code>null</code> to:</strong>`;
