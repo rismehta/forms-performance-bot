@@ -1,6 +1,6 @@
 import * as core from '@actions/core';
-import { readFileSync, writeFileSync, existsSync } from 'fs';
-import { resolve, basename, relative, dirname } from 'path';
+import { readFileSync, writeFileSync, existsSync, readdirSync } from 'fs';
+import { resolve, basename, relative, dirname, join } from 'path';
 import { GitHelper } from '../utils/git-helper.js';
 
 /**
@@ -28,9 +28,166 @@ export class AIAutoFixAnalyzer {
   }
 
   /**
+   * Find relevant component file for a DOM manipulation issue
+   * Analyzes DOM selectors in the function to find related component files
+   */
+  findRelevantComponent = async (issue) => {
+    try {
+      // Extract DOM selectors from the issue details
+      const domSelectors = this.extractDOMSelectors(issue);
+      
+      if (domSelectors.length === 0) {
+        core.info(`  No DOM selectors found for ${issue.functionName}()`);
+        return {
+          componentFile: null,
+          componentPath: null,
+          componentContent: null,
+          domSelectors: []
+        };
+      }
+      
+      core.info(`  DOM selectors found: ${domSelectors.join(', ')}`);
+      
+      // Search for component files that might handle these selectors
+      // Similar to background-image approach: look in components/ directory
+      const componentsDir = join(this.workspaceRoot, 'blocks/form/components');
+      
+      if (!existsSync(componentsDir)) {
+        core.info(`  Components directory not found: ${componentsDir}`);
+        return {
+          componentFile: null,
+          componentPath: null,
+          componentContent: null,
+          domSelectors
+        };
+      }
+      
+      // Search for component files that might match the selectors
+      const componentFiles = [];
+      
+      const scanComponents = (dir) => {
+        const entries = readdirSync(dir, { withFileTypes: true });
+        
+        for (const entry of entries) {
+          const fullPath = join(dir, entry.name);
+          
+          if (entry.isDirectory()) {
+            // Check if component has a .js file
+            const componentJSPath = join(fullPath, `${entry.name}.js`);
+            if (existsSync(componentJSPath)) {
+              componentFiles.push({
+                name: entry.name,
+                path: componentJSPath,
+                relativePath: relative(this.workspaceRoot, componentJSPath)
+              });
+            }
+          }
+        }
+      };
+      
+      scanComponents(componentsDir);
+      
+      // Try to match selectors to component names
+      for (const selector of domSelectors) {
+        const cleanSelector = selector.replace(/^[.#]/, ''); // Remove . or #
+        
+        for (const component of componentFiles) {
+          // Check if selector matches component name or is in component content
+          if (cleanSelector.toLowerCase().includes(component.name.toLowerCase()) ||
+              component.name.toLowerCase().includes(cleanSelector.toLowerCase())) {
+            
+            core.info(`  Found matching component: ${component.relativePath} (matched selector: ${selector})`);
+            
+            return {
+              componentFile: component.relativePath,
+              componentPath: component.path,
+              componentContent: readFileSync(component.path, 'utf-8'),
+              domSelectors
+            };
+          }
+        }
+      }
+      
+      // If no exact match, return first component as a suggestion
+      if (componentFiles.length > 0) {
+        const firstComponent = componentFiles[0];
+        core.info(`  No exact match, suggesting: ${firstComponent.relativePath}`);
+        
+        return {
+          componentFile: firstComponent.relativePath,
+          componentPath: firstComponent.path,
+          componentContent: readFileSync(firstComponent.path, 'utf-8'),
+          domSelectors
+        };
+      }
+      
+      return {
+        componentFile: null,
+        componentPath: null,
+        componentContent: null,
+        domSelectors
+      };
+      
+    } catch (error) {
+      core.warning(`Could not find component for ${issue.functionName}(): ${error.message}`);
+      return {
+        componentFile: null,
+        componentPath: null,
+        componentContent: null,
+        domSelectors: []
+      };
+    }
+  }
+  
+  /**
+   * Extract DOM selectors from the function code
+   * Looks for document.querySelector, getElementById, getElementsByClassName, etc.
+   */
+  extractDOMSelectors = (issue) => {
+    const selectors = [];
+    
+    try {
+      // Get the function code
+      const functionCode = this.extractFunctionCode(issue);
+      if (!functionCode) return selectors;
+      
+      // Extract querySelector/querySelectorAll selectors
+      const querySelectorPattern = /\.querySelector(?:All)?\s*\(\s*['"`]([^'"`]+)['"`]\s*\)/g;
+      let match;
+      while ((match = querySelectorPattern.exec(functionCode)) !== null) {
+        selectors.push(match[1]);
+      }
+      
+      // Extract getElementById
+      const getByIdPattern = /\.getElementById\s*\(\s*['"`]([^'"`]+)['"`]\s*\)/g;
+      while ((match = getByIdPattern.exec(functionCode)) !== null) {
+        selectors.push(`#${match[1]}`);
+      }
+      
+      // Extract getElementsByClassName
+      const getByClassPattern = /\.getElementsByClassName\s*\(\s*['"`]([^'"`]+)['"`]\s*\)/g;
+      while ((match = getByClassPattern.exec(functionCode)) !== null) {
+        selectors.push(`.${match[1]}`);
+      }
+      
+      // Extract classList operations (e.g., element.classList.add('my-class'))
+      const classListPattern = /\.classList\.(add|remove|toggle)\s*\(\s*['"`]([^'"`]+)['"`]\s*\)/g;
+      while ((match = classListPattern.exec(functionCode)) !== null) {
+        selectors.push(`.${match[2]}`);
+      }
+      
+    } catch (error) {
+      core.warning(`Could not extract selectors from ${issue.functionName}(): ${error.message}`);
+    }
+    
+    // Remove duplicates
+    return [...new Set(selectors)];
+  }
+
+  /**
    * Generate refactored code for a specific issue using AI
    */
-  generateRefactoredCode = async (issue, issueType) => {
+  generateRefactoredCode = async (issue, issueType, componentInfo = null) => {
     if (!this.aiEnabled) {
       return this.getDefaultRefactoredCode(issue, issueType);
     }
@@ -49,7 +206,7 @@ export class AIAutoFixAnalyzer {
       
       const userPrompt = issueType === 'http' 
         ? this.buildHTTPRefactorPrompt(issue, functionCode, enhancedContext)
-        : this.buildDOMRefactorPrompt(issue, functionCode, enhancedContext);
+        : this.buildDOMRefactorPrompt(issue, functionCode, enhancedContext, componentInfo);
 
       const systemPrompt = `You are a senior AEM Forms developer performing a surgical refactoring. Your ONLY job is to extract ${issueType === 'http' ? 'HTTP calls' : 'DOM manipulation'} from custom functions.
 
@@ -58,7 +215,7 @@ ABSOLUTE RULES (WILL BE REJECTED IF NOT FOLLOWED):
 2. NEVER remove existing logic - keep all validation, sorting, calculations
 3. NEVER change variable names - use exact same names
 4. NEVER change return types or values
-5. ONLY extract the ${issueType === 'http' ? 'HTTP call (fetch/axios/request)' : 'DOM manipulation (document.*, .style.*, .innerHTML)'} to ${issueType === 'http' ? 'event dispatcher' : 'setProperty()'}
+5. ONLY ${issueType === 'http' ? 'move HTTP calls to event dispatcher' : 'move DOM manipulation to custom component'}
 6. PRESERVE all comments, formatting, and code structure
 
 YOU ARE NOT:
@@ -794,7 +951,7 @@ Form JSON event:
   /**
    * Build prompt for DOM refactoring
    */
-  buildDOMRefactorPrompt = (issue, functionCode, enhancedContext) => {
+  buildDOMRefactorPrompt = (issue, functionCode, enhancedContext, componentInfo = null) => {
     const contextSection = enhancedContext ? `
 
 **FULL CONTEXT (You have access to everything):**
@@ -823,22 +980,67 @@ ${f.code}
 ${enhancedContext.callingFunctions?.length ? enhancedContext.callingFunctions.map(c => `- ${c.name}() calls as: ${c.callSite}`).join('\n') : 'None'}
 ` : '';
 
-    return `Refactor this AEM Forms custom function that directly manipulates DOM.
+    const componentSection = componentInfo?.componentContent ? `
+
+**RELEVANT COMPONENT FILE FOUND:**
+**File:** ${componentInfo.componentFile}
+This is where the DOM logic should be moved.
+
+\`\`\`javascript
+${componentInfo.componentContent.substring(0, 5000)}${componentInfo.componentContent.length > 5000 ? '\n... (truncated)' : ''}
+\`\`\`
+` : '';
+
+    const refactoringStrategy = componentInfo?.componentFile 
+      ? `**REFACTORING STRATEGY: Move DOM logic to existing component**
+
+The function is in or near a component file. Move the DOM manipulation to that component's lifecycle methods.
+
+**Steps:**
+1. Remove DOM manipulation from the custom function
+2. Move DOM logic to the component file (${componentInfo.componentFile})
+3. Use component lifecycle (connectedCallback, render, etc.)
+4. Keep function for data processing only (no DOM access)`
+      : `**REFACTORING STRATEGY: Create a custom component**
+
+This function manipulates DOM but is not in a component file. The DOM logic should be in a custom component.
+
+**Steps:**
+1. Remove DOM manipulation from the custom function
+2. Create a new custom component file
+3. Move DOM logic to component's lifecycle methods
+4. Keep function for data processing only (no DOM access)`;
+
+    return `Refactor this AEM Forms custom function to move DOM manipulation to a custom component.
+
+**CRITICAL ARCHITECTURAL RULES:**
+1. **DOM manipulation ONLY in components** - Custom functions should NOT touch DOM
+2. **Custom functions = DATA PROCESSING** - Validate, calculate, transform data
+3. **Custom components = UI/DOM** - Read state and update DOM
+4. **setProperty() stores STATE/DATA** - NOT DOM elements (e.g., store { highlight: true }, not document.querySelector())
+5. **Component reads state** - Component listens for changes and updates its own DOM
+
+**TWO-STEP REFACTORING:**
+STEP 1: Function stores STATE via setProperty()
+STEP 2: Component reads STATE and updates DOM
 
 **CRITICAL RULES - MUST FOLLOW:**
-1. **PRESERVE EXACT FUNCTION SIGNATURE** - Do NOT change parameters, parameter names, or order
-2. **PRESERVE ALL EXISTING LOGIC** - Keep all validation, calculations, data processing
-3. **ONLY REMOVE DOM MANIPULATION** - Replace document.querySelector, .innerHTML, .style, etc.
-4. **USE setProperty() INSTEAD** - Use globals.functions.setProperty() for state changes
-5. **KEEP ALL OTHER CODE** - Keep all other logic, variables, returns EXACTLY as-is
+1. **USE setProperty() for STATE** - Store data/flags, NOT DOM elements
+2. **MOVE DOM TO COMPONENT** - All document.*, .style, .innerHTML goes to component
+3. **PRESERVE EXACT FUNCTION SIGNATURE** - Do NOT change parameters, parameter names, or order
+4. **PRESERVE ALL DATA LOGIC** - Keep all validation, calculations, data processing
+5. **ONLY REMOVE DOM MANIPULATION** - Remove document.querySelector, .innerHTML, .style, etc.
 6. **USE EXISTING HELPERS** - Reuse helper functions already defined in the file
 7. **MATCH CODING STYLE** - Follow the same patterns as other functions in this file
+
+${refactoringStrategy}
 
 **Target Function to Refactor:**
 \`\`\`javascript
 ${functionCode}
 \`\`\`
 ${contextSection}
+${componentSection}
 
 ${enhancedContext?.fullFileContent && enhancedContext.fullFileContent.length < 10000 ? `
 **COMPLETE FILE FOR REFERENCE (so you can see all patterns and helpers):**
@@ -847,56 +1049,87 @@ ${enhancedContext.fullFileContent}
 \`\`\`
 ` : ''}
 
-**What to do:**
-1. Identify DOM manipulation (document.*, element.innerHTML, .style.*, etc.)
-2. Replace with globals.functions.setProperty() to update field properties
-3. Keep everything else EXACTLY the same
-4. Preserve all parameters, logic, validation
-
 **Example of correct refactoring:**
 
-BEFORE (BAD):
+BEFORE (BAD - DOM in custom function):
 \`\`\`javascript
-export function myDOMFunction(value, targetField, globals) {
-  // Validation
+// In functions.js
+export function highlightField(value, targetField, globals) {
   if (!value) return;
   
-  // DOM manipulation (PROBLEM)
-  const element = document.querySelector('#field');
-  element.style.color = 'red';
-  element.innerHTML = value;
+  // DOM manipulation (WRONG - function touching DOM)
+  const element = document.querySelector(\`[name="\${targetField.$name}"]\`);
+  element.style.backgroundColor = 'yellow';
+  element.closest('.field-wrapper').style.border = '2px solid red';
 }
 \`\`\`
 
-AFTER (GOOD):
+AFTER (GOOD - State in function, DOM in component):
 \`\`\`javascript
-export function myDOMFunction(value, targetField, globals) {
-  // Same validation (PRESERVED)
+// STEP 1: In functions.js - Store STATE (not DOM elements!)
+export function highlightField(value, targetField, globals) {
   if (!value) return;
   
-  // Use setProperty instead of DOM (CHANGED)
-  globals.functions.setProperty(targetField, { 
+  // Store STATE via setProperty (data/flags, NOT DOM)
+  globals.functions.setProperty(targetField, {
     value: value,
-    visible: true
+    customState: {
+      shouldHighlight: true,  // ✓ State flag
+      highlightColor: 'yellow' // ✓ State data
+      // ✗ Do NOT store: domElement: document.querySelector(...)
+    }
   });
 }
+
+// STEP 2: In components/my-field/my-field.js - Read STATE, update DOM
+export default function decorate(block) {
+  const input = block.querySelector('input');
+  const field = block.closest('.field-wrapper');
+  
+  // Listen for property changes (when setProperty is called)
+  input.addEventListener('change', () => {
+    const fieldModel = input.fieldModel; // Access to form model
+    
+    // Read STATE from the field
+    if (fieldModel.customState?.shouldHighlight) {
+      // DOM manipulation HERE in component (CORRECT PLACE)
+      input.style.backgroundColor = fieldModel.customState.highlightColor;
+      field.style.border = '2px solid red';
+    }
+  });
+  
+  // Or use MutationObserver for automatic sync
+  const observer = new MutationObserver(() => {
+    if (input.fieldModel?.customState?.shouldHighlight) {
+      input.style.backgroundColor = input.fieldModel.customState.highlightColor;
+    }
+  });
+  observer.observe(input, { attributes: true });
+}
 \`\`\`
+
+**KEY DIFFERENCES:**
+- Function: Processes data, stores STATE flags/data via setProperty
+- Component: Reads STATE, performs DOM manipulation
+- State contains: { shouldHighlight: true } ✓
+- State does NOT contain: { element: document.querySelector(...) } ✗
 
 **Response Format (JSON ONLY):**
 {
-  "jsCode": "COMPLETE refactored function with SAME signature, SAME logic, ONLY DOM manipulation → setProperty",
-  "componentExample": "Custom component code (only if complex UI logic needed beyond setProperty)",
+  "jsCode": "REFACTORED function - uses setProperty() to store STATE/DATA (not DOM elements)",
+  "componentSuggestion": "Which component file to modify (${componentInfo?.componentFile || 'blocks/form/components/[name]/[name].js'}) and what DOM logic to add",
+  "componentExample": "Complete component code showing: 1) How to read STATE from field model, 2) How to update DOM based on that STATE",
   "testingSteps": "Step-by-step testing instructions"
 }
 
 **VALIDATION CHECKLIST:**
 ✓ Function signature preserved exactly
 ✓ All parameters in same order
-✓ All validation logic preserved
-✓ All data processing preserved
-✓ Only DOM manipulation removed (document.*, .innerHTML, .style)
-✓ setProperty() used instead
-✓ Component example provided (if needed)`;
+✓ All validation/data logic preserved
+✓ ALL DOM manipulation removed (document.*, .innerHTML, .style)
+✓ Function dispatches event OR returns data (no DOM)
+✓ Component suggestion provided with specific file path
+✓ Component example shows proper DOM handling`;
   }
 
   /**
@@ -1775,8 +2008,10 @@ ${hasAIRefactoring ? '\n REVIEW CHECKLIST:\n- [ ] Test all affected functions\n-
     const bgImageIssues = cssResults.newIssues.filter(i => i.type === 'css-background-image');
     if (bgImageIssues.length === 0) return [];
     
-    // PARALLEL: Generate all CSS background-image fixes at once
-    const cssFixPromises = bgImageIssues.slice(0, 3).map(async (issue) => {
+    core.info(`Fixing ${bgImageIssues.length} background-image issue(s)...`);
+    
+    // PARALLEL: Generate all CSS background-image fixes at once (no limit)
+    const cssFixPromises = bgImageIssues.map(async (issue) => {
       try {
         const cssFilePath = resolve(this.workspaceRoot, issue.file);
         const cssContent = readFileSync(cssFilePath, 'utf-8');
@@ -2196,7 +2431,10 @@ export function ${issue.functionName}(field, globals) {
     // PARALLEL: Generate all DOM fixes at once
     const domFixPromises = domIssues.slice(0, 2).map(async (issue) => {
       try {
-        const refactoredCode = await this.generateRefactoredCode(issue, 'dom');
+        // Find relevant component file based on DOM selectors
+        const componentInfo = await this.findRelevantComponent(issue);
+        
+        const refactoredCode = await this.generateRefactoredCode(issue, 'dom', componentInfo);
         
         return {
           type: 'custom-function-dom-fix',
@@ -2205,9 +2443,12 @@ export function ${issue.functionName}(field, globals) {
           functionName: issue.functionName,
           file: issue.file,
           line: issue.line || 1,
-          title: `Replace DOM access in ${issue.functionName}() with custom component`,
+          componentFile: componentInfo.componentFile,
+          componentPath: componentInfo.componentPath,
+          title: `Move DOM access from ${issue.functionName}() to custom component`,
           description: `Custom function "${issue.functionName}()" directly manipulates DOM. This breaks AEM Forms architecture and causes maintenance issues.`,
           refactoredCode: refactoredCode.jsCode,
+          componentSuggestion: refactoredCode.componentSuggestion,
           componentExample: refactoredCode.componentExample,
           testingSteps: refactoredCode.testingSteps,
           guidance: `
@@ -3443,13 +3684,57 @@ Respond with ONLY the JSON object containing the COMPLETE function code, no mark
   }
   
   /**
+   * Format testing steps for better readability
+   * Handles both numbered lists and plain text
+   */
+  formatTestingSteps = (testingSteps) => {
+    if (!testingSteps) return 'Test the changes in a development environment';
+    
+    // If already formatted with newlines, return as-is
+    if (testingSteps.includes('\n')) {
+      return testingSteps;
+    }
+    
+    // Try to split by numbered patterns (1. 2. 3. or 1) 2) 3))
+    const numberedPattern = /(\d+[\.)]\s+)/g;
+    const parts = testingSteps.split(numberedPattern).filter(p => p.trim());
+    
+    if (parts.length > 2) {
+      // Has numbered steps, reconstruct with proper line breaks
+      const formatted = [];
+      for (let i = 0; i < parts.length; i += 2) {
+        if (parts[i + 1]) {
+          const stepNum = parts[i].trim();
+          const stepText = parts[i + 1].trim();
+          
+          // Truncate long steps
+          const truncated = stepText.length > 120 
+            ? stepText.substring(0, 117) + '...' 
+            : stepText;
+          
+          formatted.push(`${stepNum} ${truncated}`);
+        }
+      }
+      return formatted.join('\n');
+    }
+    
+    // If very long single sentence, truncate
+    if (testingSteps.length > 200) {
+      return testingSteps.substring(0, 197) + '...';
+    }
+    
+    return testingSteps;
+  }
+
+  /**
    * Build annotation message for GitHub Checks
    */
   buildAnnotationMessage = (fix) => {
     if (fix.type === 'custom-function-http-fix') {
-      return `Function ${fix.functionName}() makes direct HTTP call, bypassing form's request() API. Use Visual Rule Editor to refactor this function to dispatch events instead.`;
+      return `Function ${fix.functionName}() makes direct HTTP call. Use Visual Rule Editor to create API integration and remove request call from custom function.`;
     } else if (fix.type === 'custom-function-dom-fix') {
-      return `Function ${fix.functionName}() accesses DOM directly. Use globals.functions.setProperty() instead to update field properties.`;
+      const componentHint = fix.componentFile ? ` Move DOM logic to component: ${fix.componentFile}.` : ' Move DOM manipulation to a custom component.';
+      return `Function ${fix.functionName}() accesses DOM directly.${componentHint} Use setProperty() to store STATE (data/flags), component reads STATE and updates DOM.`;
     }
     return fix.description || 'Performance issue detected';
   }
@@ -3464,16 +3749,24 @@ Respond with ONLY the JSON object containing the COMPLETE function code, no mark
       lines.push(`##  HTTP Request in Custom Function`);
       lines.push('');
       lines.push(`**Function:** \`${fix.functionName}()\``);
+      lines.push(`**File:** \`${fix.file}\``);
       lines.push(`**Issue:** Direct HTTP call bypasses form's request() API`);
       lines.push('');
-      lines.push('**AI-Generated Fix:**');
-      lines.push('Use **Visual Rule Editor** to refactor this function according to the suggestion below:');
+      lines.push('**Recommended Fix:**');
+      lines.push('1. **Use Visual Rule Editor** to create an API integration (e.g., invoke service, HTTP request rule)');
+      lines.push('2. **Remove the request() call** from this custom function');
+      lines.push('3. **Use form events** to trigger the API integration instead');
       lines.push('');
+      lines.push('**AI-Generated Refactored Code** (for reference):');
       lines.push('```suggestion');
       lines.push(fix.refactoredCode || '// AI-generated refactored code');
       lines.push('```');
       lines.push('');
-      lines.push('**Testing:** ' + (fix.testingSteps || 'Test form submission and API calls'));
+      lines.push('**Why:** Visual Rule Editor provides better error handling, retry logic, and monitoring for API calls.');
+      lines.push('');
+      lines.push('**Testing:**');
+      const httpTestingSteps = this.formatTestingSteps(fix.testingSteps || 'Test form submission and API calls in Visual Rule Editor');
+      lines.push(httpTestingSteps);
       lines.push('');
       lines.push('---');
       lines.push('* AI-powered suggestion by [AEM Forms Performance Analyzer](https://github.com/rismehta/forms-performance-bot)*');
@@ -3482,23 +3775,40 @@ Respond with ONLY the JSON object containing the COMPLETE function code, no mark
       lines.push(`##  DOM Access in Custom Function`);
       lines.push('');
       lines.push(`**Function:** \`${fix.functionName}()\``);
-      lines.push(`**Issue:** Direct DOM manipulation bypasses form state management`);
+      lines.push(`**File:** \`${fix.file}\``);
+      lines.push(`**Issue:** Direct DOM manipulation bypasses form architecture`);
       lines.push('');
+      if (fix.componentFile) {
+        lines.push(`**Relevant Component:** \`${fix.componentFile}\``);
+        lines.push('');
+      }
       lines.push('**AI-Generated Fix:**');
-      lines.push('Use **Visual Rule Editor** to refactor this function:');
       lines.push('');
+      lines.push('**Refactored Function** (use `setProperty` for STATE, not DOM):');
       lines.push('```suggestion');
       lines.push(fix.refactoredCode || '// AI-generated refactored code');
       lines.push('```');
       lines.push('');
+      if (fix.componentSuggestion) {
+        lines.push('**Component Suggestion:**');
+        lines.push(fix.componentSuggestion);
+        lines.push('');
+      }
       if (fix.componentExample) {
-        lines.push('**Custom Component (if complex UI):**');
+        lines.push('**Component Code** (handle DOM here):');
         lines.push('```javascript');
         lines.push(fix.componentExample);
         lines.push('```');
         lines.push('');
       }
-      lines.push('**Testing:** ' + (fix.testingSteps || 'Test UI interactions'));
+      lines.push('**Architecture:**');
+      lines.push('1. Custom function: Process data + store state via `setProperty()`');
+      lines.push('2. Custom component: Read state + update DOM');
+      lines.push('3. Never store DOM elements in state - only data!');
+      lines.push('');
+      lines.push('**Testing:**');
+      const domTestingSteps = this.formatTestingSteps(fix.testingSteps || 'Test UI interactions and state updates');
+      lines.push(domTestingSteps);
       lines.push('');
       lines.push('---');
       lines.push('* AI-powered suggestion by [AEM Forms Performance Analyzer](https://github.com/rismehta/forms-performance-bot)*');

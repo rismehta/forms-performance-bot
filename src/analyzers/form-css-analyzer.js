@@ -104,6 +104,9 @@ export class FormCSSAnalyzer {
       if (imageUrl.includes('.svg') && content.includes('background-repeat')) continue;
       
       const lineNumber = this.getLineNumber(content, match.index);
+      
+      // Extract the CSS selector that contains this background-image
+      const selector = this.extractSelectorAtPosition(content, match.index);
 
       issues.push({
         severity: 'error',
@@ -112,11 +115,37 @@ export class FormCSSAnalyzer {
         line: lineNumber,
         message: `CSS background-image detected: "${imageUrl}". Must use Image component instead.`,
         imageUrl,
+        selector,  // Add selector for AI fix to extract dimensions
         recommendation: 'Replace with <Image> component for better lazy loading, responsive images, and automatic optimization. Background images cannot be lazy loaded and block form rendering.',
       });
     }
 
     return issues;
+  }
+  
+  /**
+   * Extract CSS selector at a given position in the content
+   * Works backwards from position to find the selector before the opening {
+   */
+  extractSelectorAtPosition(content, position) {
+    // Find the opening brace before this position
+    let bracePos = content.lastIndexOf('{', position);
+    if (bracePos === -1) return null;
+    
+    // Find the closing brace of the previous rule (or start of file)
+    let prevCloseBrace = content.lastIndexOf('}', bracePos);
+    let startPos = prevCloseBrace === -1 ? 0 : prevCloseBrace + 1;
+    
+    // Extract the selector (text between previous } and current {)
+    const selectorText = content.substring(startPos, bracePos).trim();
+    
+    // Clean up: remove comments, newlines, etc.
+    const cleanSelector = selectorText
+      .replace(/\/\*[\s\S]*?\*\//g, '') // Remove comments
+      .replace(/\s+/g, ' ')              // Normalize whitespace
+      .trim();
+    
+    return cleanSelector || null;
   }
 
   /**
