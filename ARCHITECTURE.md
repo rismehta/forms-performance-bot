@@ -38,11 +38,14 @@ flowchart TD
         GitOperations[Apply Fixes<br/>Auto-commit to PR<br/>Create PR suggestions<br/>GitHub annotations]
     end
     
-    subgraph Layer6["REPORTING"]
+    subgraph Layer6["REPORTING & QUALITY GATE"]
+        QualityGate{Critical Issues?<br/>Andon Cord}
         PRComment[PR Comment<br/>Summary & metrics]
         HTMLReport[HTML Report<br/>GitHub Gist<br/>Detailed analysis]
         GitHubChecks[GitHub Checks<br/>Code annotations]
         PRSuggestions[PR Suggestions<br/>Line-level<br/>One-click apply]
+        BuildFail[FAIL BUILD<br/>Block merge]
+        BuildPass[PASS BUILD<br/>Allow merge]
     end
     
     %% Data Flow
@@ -65,6 +68,9 @@ flowchart TD
     Detection --> AIEngine --> GitOperations
     
     GitOperations --> PRComment & HTMLReport & GitHubChecks & PRSuggestions
+    GitOperations --> QualityGate
+    QualityGate -->|Yes| BuildFail
+    QualityGate -->|No| BuildPass
     
     %% Styling
     classDef input fill:#f5f5f5,stroke:#666,stroke-width:2px
@@ -73,6 +79,9 @@ flowchart TD
     classDef runtime fill:#e1d5e7,stroke:#9673a6,stroke-width:2px
     classDef ai fill:#f8cecc,stroke:#b85450,stroke-width:2px
     classDef report fill:#d5e8d4,stroke:#82b366,stroke-width:2px
+    classDef gate fill:#fff9e6,stroke:#ff9800,stroke-width:3px
+    classDef fail fill:#ffebee,stroke:#c62828,stroke-width:2px
+    classDef pass fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
     
     class Input input
     class URLAnalyzer,JSONExtractor,HTMLParser extract
@@ -80,6 +89,9 @@ flowchart TD
     class RuleEngine,HTMLPerf,DataRefValidator runtime
     class Detection,AIEngine,GitOperations ai
     class PRComment,HTMLReport,GitHubChecks,PRSuggestions report
+    class QualityGate gate
+    class BuildFail fail
+    class BuildPass pass
 ```
 
 ### Detailed Component Architecture
