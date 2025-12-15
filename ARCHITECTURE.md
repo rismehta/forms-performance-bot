@@ -2,7 +2,26 @@
 
 ## System Architecture Overview
 
-### High-Level Block Diagram
+### Simplified System Flow
+
+```mermaid
+flowchart LR
+    Input[GitHub PR<br/>Form URLs]
+    Extract[EXTRACT<br/>Browser Render<br/>Parse Data]
+    Analyze[ANALYZE<br/>8 Analyzers<br/>15 Issue Types]
+    AI[AI FIX<br/>Generate<br/>Validate<br/>Apply]
+    Output[REPORT<br/>Comment<br/>Checks<br/>Commit]
+    
+    Input --> Extract --> Analyze --> AI --> Output
+    
+    style Input fill:#e8e8e8,stroke:#666,stroke-width:2px
+    style Extract fill:#cce5ff,stroke:#0066cc,stroke-width:2px
+    style Analyze fill:#fff4cc,stroke:#cc9900,stroke-width:2px
+    style AI fill:#ffcccc,stroke:#cc0000,stroke-width:2px
+    style Output fill:#ccffcc,stroke:#00cc00,stroke-width:2px
+```
+
+### Detailed Component Architecture
 
 ```mermaid
 graph TB

@@ -1,82 +1,26 @@
 # AEM Forms Performance Bot - Executive Architecture
 
-## System Architecture (High-Level Block Diagram)
+## System Architecture (Simplified Block Diagram)
 
 ```mermaid
-flowchart TB
-    subgraph External["EXTERNAL SYSTEMS"]
-        GitHub[GitHub Platform<br/>Pull Requests & Actions]
-        Forms[AEM Forms<br/>Before/After URLs]
-        Repo[Git Repository<br/>Source Code]
-    end
+flowchart LR
+    Input[GitHub PR<br/>+<br/>Form URLs]
     
-    subgraph Extraction["DATA EXTRACTION LAYER"]
-        URLAnalyzer[URL Analyzer<br/>Puppeteer Browser]
-        JSONParser[JSON Parser<br/>Form Definition]
-        HTMLParser[HTML Parser<br/>Rendered DOM]
-    end
+    Extract[EXTRACT<br/>Render Form<br/>Parse JSON/HTML]
     
-    subgraph Analysis["ANALYSIS LAYER - 8 Analyzers Run in Parallel"]
-        CSS[CSS Analyzer]
-        JS[JS Functions]
-        Events[Form Events]
-        Fields[Hidden Fields]
-        Rules[Rule Engine]
-        HTML[HTML Performance]
-        DataRef[DataRef Validator]
-        Structure[File Structure]
-    end
+    Analyze[ANALYZE<br/>8 Parallel Checks<br/>CSS, JS, Rules, HTML]
     
-    subgraph AIEngine["AI AUTO-FIX ENGINE"]
-        Detect[Issue Detection<br/>& Prioritization]
-        Generate[Fix Generation<br/>Azure OpenAI GPT-5.1]
-        Validate[Code Validation<br/>Safety Checks]
-        Apply[Apply to Repository<br/>Auto-commit/Suggest]
-    end
+    AI[AI ENGINE<br/>Detect Issues<br/>Generate Fixes<br/>Validate Code]
     
-    subgraph Reporting["REPORTING & OUTPUT"]
-        Comment[PR Comment<br/>Summary & Metrics]
-        Gist[HTML Report<br/>Detailed Analysis]
-        Checks[GitHub Checks<br/>Inline Annotations]
-        Suggestions[Code Suggestions<br/>One-click Apply]
-    end
+    Output[OUTPUT<br/>PR Comment<br/>GitHub Checks<br/>Auto-commit]
     
-    %% Flow
-    GitHub --> URLAnalyzer
-    Forms --> URLAnalyzer
+    Input --> Extract --> Analyze --> AI --> Output
     
-    URLAnalyzer --> JSONParser
-    URLAnalyzer --> HTMLParser
-    
-    JSONParser --> CSS & JS & Events & Fields
-    HTMLParser --> HTML & DataRef
-    Repo --> JS & Structure
-    
-    JSONParser --> Rules
-    
-    CSS & JS & Events & Fields & Rules & HTML & DataRef & Structure --> Detect
-    
-    Detect --> Generate
-    Generate --> Validate
-    Validate --> Apply
-    
-    Apply --> Comment & Gist & Checks & Suggestions
-    Apply --> Repo
-    
-    Comment & Gist & Checks & Suggestions --> GitHub
-    
-    %% Styling
-    classDef external fill:#f5f5f5,stroke:#666,stroke-width:2px,color:#000
-    classDef extraction fill:#dae8fc,stroke:#6c8ebf,stroke-width:2px,color:#000
-    classDef analysis fill:#fff2cc,stroke:#d6b656,stroke-width:2px,color:#000
-    classDef ai fill:#f8cecc,stroke:#b85450,stroke-width:2px,color:#000
-    classDef reporting fill:#d5e8d4,stroke:#82b366,stroke-width:2px,color:#000
-    
-    class GitHub,Forms,Repo external
-    class URLAnalyzer,JSONParser,HTMLParser extraction
-    class CSS,JS,Events,Fields,Rules,HTML,DataRef,Structure analysis
-    class Detect,Generate,Validate,Apply ai
-    class Comment,Gist,Checks,Suggestions reporting
+    style Input fill:#e8e8e8,stroke:#666,stroke-width:2px,color:#000
+    style Extract fill:#cce5ff,stroke:#0066cc,stroke-width:2px,color:#000
+    style Analyze fill:#fff4cc,stroke:#cc9900,stroke-width:2px,color:#000
+    style AI fill:#ffcccc,stroke:#cc0000,stroke-width:2px,color:#000
+    style Output fill:#ccffcc,stroke:#00cc00,stroke-width:2px,color:#000
 ```
 
 ## Key Numbers
