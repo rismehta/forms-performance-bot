@@ -33,7 +33,7 @@ flowchart TD
     end
     
     subgraph Layer5["AI AUTO-FIX ENGINE"]
-        Detection[Issue Detection & Context<br/>Prioritize critical issues<br/>Extract function code<br/>Find call sites]
+        Detection[Issue Detection & Context<br/>Prioritize critical issues<br/>Extract function code<br/>Analyze function usage]
         AIEngine[AI Generation & Validation<br/>Azure OpenAI GPT-5.1<br/>Context-aware prompts<br/>5+ safety rules]
         GitOperations[Apply Fixes<br/>Auto-commit to PR<br/>Create PR suggestions<br/>GitHub annotations]
     end
