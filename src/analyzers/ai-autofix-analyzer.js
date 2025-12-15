@@ -3951,25 +3951,59 @@ Focus on performance impact and Core Web Vitals (FCP, LCP, TBT, INP).`;
       core.warning(`Failed to parse AI response as JSON (trying fallback extraction)`);
       core.warning(`Error: ${error.message}`);
       
-      // Try to extract jsCode using regex (handles literal newlines)
-      const jsCodeMatch = cleanContent.match(/"jsCode"\s*:\s*"([\s\S]*?)"\s*[,}]/);
-      const reasonMatch = cleanContent.match(/"reason"\s*:\s*"([^"]*?)"/);
+      // Helper to extract field value (handles literal newlines)
+      const extractField = (fieldName, content) => {
+        // Try to match: "fieldName": "value" or "fieldName": `value`
+        // Use non-greedy match and handle escaped quotes
+        const patterns = [
+          new RegExp(`"${fieldName}"\\s*:\\s*"([\\s\\S]*?)"\\s*[,}]`),
+          new RegExp(`"${fieldName}"\\s*:\\s*\`([\\s\\S]*?)\`\\s*[,}]`)
+        ];
+        
+        for (const pattern of patterns) {
+          const match = content.match(pattern);
+          if (match) {
+            return match[1]
+              .replace(/\\n/g, '\n')        // Unescape \n
+              .replace(/\\"/g, '"')         // Unescape \"
+              .replace(/\\\\/g, '\\')       // Unescape \\
+              .replace(/\\t/g, '\t');       // Unescape \t
+          }
+        }
+        return null;
+      };
       
-      if (jsCodeMatch) {
-        const extractedCode = jsCodeMatch[1]
-          .replace(/\\n/g, '\n')        // Unescape \n
-          .replace(/\\"/g, '"')         // Unescape \"
-          .replace(/\\\\/g, '\\');      // Unescape \\
-        
-        core.info(`Extracted ${extractedCode.length} chars of code via fallback`);
-        
-        return {
-          jsCode: extractedCode,
-          reason: reasonMatch ? reasonMatch[1] : 'Extracted via fallback'
-        };
+      // Try to extract common fields
+      const extracted = {
+        jsCode: extractField('jsCode', cleanContent),
+        reason: extractField('reason', cleanContent),
+        originalCSSCode: extractField('originalCSSCode', cleanContent),
+        fixedCSSCode: extractField('fixedCSSCode', cleanContent),
+        originalComponentCode: extractField('originalComponentCode', cleanContent),
+        fixedComponentCode: extractField('fixedComponentCode', cleanContent),
+        htmlSuggestion: extractField('htmlSuggestion', cleanContent),
+        explanation: extractField('explanation', cleanContent),
+        componentExample: extractField('componentExample', cleanContent),
+        componentSuggestion: extractField('componentSuggestion', cleanContent),
+        testingSteps: extractField('testingSteps', cleanContent),
+        formJsonSnippet: extractField('formJsonSnippet', cleanContent)
+      };
+      
+      // Remove null values
+      const result = {};
+      for (const [key, value] of Object.entries(extracted)) {
+        if (value !== null) {
+          result[key] = value;
+          core.info(`  Extracted ${key}: ${value.length} chars`);
+        }
       }
       
-      core.warning(`Fallback extraction also failed. Response preview: ${cleanContent.substring(0, 200)}...`);
+      if (Object.keys(result).length > 0) {
+        core.info(`Fallback extraction succeeded (${Object.keys(result).length} fields)`);
+        return result;
+      }
+      
+      core.warning(`Fallback extraction found no fields. Response preview: ${cleanContent.substring(0, 200)}...`);
       throw new Error('AI response was not valid JSON');
     }
   }
