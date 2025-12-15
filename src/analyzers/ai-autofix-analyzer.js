@@ -3542,8 +3542,17 @@ Respond with ONLY the JSON object containing the COMPLETE function code, no mark
             start_line: issue.line || 1,
             end_line: issue.line || 1,
             annotation_level: 'failure',
-            title: 'CSS background-image cannot be lazy loaded',
-            message: `${issue.message}\n\nFix: Replace with <img loading="lazy"> for better performance.`,
+            title: 'CSS background-image blocks page rendering',
+            message: `${issue.message}
+
+WHY THIS IS AN ISSUE:
+• CSS background-image loads immediately (cannot use lazy loading)
+• Browser's loading="lazy" attribute ONLY works on <img> tags
+• Image loads even if user never scrolls to it
+• Blocks page rendering and hurts Core Web Vitals
+
+FIX: Replace with <img loading="lazy"> for lazy loading and better performance.
+See AI-generated fix in PR comments.`,
           });
         });
     }
