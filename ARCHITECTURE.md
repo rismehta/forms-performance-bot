@@ -2,23 +2,80 @@
 
 ## System Architecture Overview
 
-### Simplified System Flow
+### Detailed System Architecture (Top-to-Bottom Flow)
 
 ```mermaid
-flowchart LR
-    Input[GitHub PR<br/>Form URLs]
-    Extract[EXTRACT<br/>Browser Render<br/>Parse Data]
-    Analyze[ANALYZE<br/>8 Analyzers<br/>15 Issue Types]
-    AI[AI FIX<br/>Generate<br/>Validate<br/>Apply]
-    Output[REPORT<br/>Comment<br/>Checks<br/>Commit]
+flowchart TD
+    subgraph Layer1["LAYER 1: INPUT"]
+        Input[GitHub Pull Request<br/>Before/After URLs<br/>Source Code Repository]
+    end
     
-    Input --> Extract --> Analyze --> AI --> Output
+    subgraph Layer2["LAYER 2: DATA EXTRACTION"]
+        URLAnalyzer[URL Analyzer<br/>Puppeteer Browser]
+        JSONExtractor[JSON Extractor<br/>Form Definition Parser]
+        HTMLParser[HTML Parser<br/>DOM Structure]
+    end
     
-    style Input fill:#e8e8e8,stroke:#666,stroke-width:2px
-    style Extract fill:#cce5ff,stroke:#0066cc,stroke-width:2px
-    style Analyze fill:#fff4cc,stroke:#cc9900,stroke-width:2px
-    style AI fill:#ffcccc,stroke:#cc0000,stroke-width:2px
-    style Output fill:#ccffcc,stroke:#00cc00,stroke-width:2px
+    subgraph Layer3["LAYER 3: STATIC ANALYSIS - Parallel Execution"]
+        CSSAnalyzer[CSS Analyzer<br/>background-image<br/>@import statements]
+        JSAnalyzer[JS Functions Analyzer<br/>HTTP calls<br/>DOM access]
+        EventsAnalyzer[Form Events Analyzer<br/>initialize events<br/>API blocking]
+        FieldsAnalyzer[Hidden Fields Analyzer<br/>Unused visibility<br/>Dead code]
+    end
+    
+    subgraph Layer4["LAYER 4: RUNTIME ANALYSIS - Parallel Execution"]
+        RuleEngine[Rule Performance<br/>Cycle detection<br/>Slow rules<br/>af-core integration]
+        HTMLPerf[HTML Performance<br/>Lazy loading<br/>Blocking scripts<br/>DOM size]
+        DataRefValidator[DataRef Validator<br/>Parsing errors<br/>Null ancestors]
+    end
+    
+    subgraph Layer5["LAYER 5: AI AUTO-FIX ENGINE - Sequential Pipeline"]
+        IssueDetector[Issue Detector<br/>Prioritize critical]
+        ContextBuilder[Context Builder<br/>Extract function code<br/>Find call sites]
+        AIGenerator[AI Generator<br/>Azure OpenAI GPT-5.1<br/>Context-aware prompts]
+        CodeValidator[Code Validator<br/>5+ safety rules<br/>Signature preservation]
+        GitOperations[Git Operations<br/>Auto-commit<br/>Create suggestions]
+    end
+    
+    subgraph Layer6["LAYER 6: REPORTING - Multiple Outputs"]
+        PRComment[PR Comment<br/>Summary & metrics]
+        HTMLReport[HTML Report<br/>GitHub Gist<br/>Detailed analysis]
+        GitHubChecks[GitHub Checks<br/>Code annotations]
+        PRSuggestions[PR Suggestions<br/>Line-level<br/>One-click apply]
+    end
+    
+    %% Simplified Data Flow
+    Input --> URLAnalyzer
+    Input --> JSONExtractor
+    Input --> HTMLParser
+    
+    URLAnalyzer --> CSSAnalyzer & JSAnalyzer & EventsAnalyzer & FieldsAnalyzer
+    JSONExtractor --> CSSAnalyzer & JSAnalyzer & EventsAnalyzer & FieldsAnalyzer
+    
+    URLAnalyzer --> RuleEngine & HTMLPerf & DataRefValidator
+    HTMLParser --> RuleEngine & HTMLPerf & DataRefValidator
+    
+    CSSAnalyzer & JSAnalyzer & EventsAnalyzer & FieldsAnalyzer --> IssueDetector
+    RuleEngine & HTMLPerf & DataRefValidator --> IssueDetector
+    
+    IssueDetector --> ContextBuilder --> AIGenerator --> CodeValidator --> GitOperations
+    
+    GitOperations --> PRComment & HTMLReport & GitHubChecks & PRSuggestions
+    
+    %% Styling
+    classDef input fill:#f5f5f5,stroke:#666,stroke-width:2px
+    classDef extract fill:#dae8fc,stroke:#6c8ebf,stroke-width:2px
+    classDef analyze fill:#fff2cc,stroke:#d6b656,stroke-width:2px
+    classDef runtime fill:#e1d5e7,stroke:#9673a6,stroke-width:2px
+    classDef ai fill:#f8cecc,stroke:#b85450,stroke-width:2px
+    classDef report fill:#d5e8d4,stroke:#82b366,stroke-width:2px
+    
+    class Input input
+    class URLAnalyzer,JSONExtractor,HTMLParser extract
+    class CSSAnalyzer,JSAnalyzer,EventsAnalyzer,FieldsAnalyzer analyze
+    class RuleEngine,HTMLPerf,DataRefValidator runtime
+    class IssueDetector,ContextBuilder,AIGenerator,CodeValidator,GitOperations ai
+    class PRComment,HTMLReport,GitHubChecks,PRSuggestions report
 ```
 
 ### Detailed Component Architecture
