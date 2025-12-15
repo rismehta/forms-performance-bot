@@ -551,15 +551,33 @@ Respond ONLY with valid JSON:
           check: (orig, refac) => {
             // Check for unnecessary null checks on AEM runtime guaranteed objects
             const unnecessaryChecks = [
+              // Single checks
               /if\s*\(\s*!globals\s*\)/,                       // if (!globals)
               /if\s*\(\s*!globals\.functions\s*\)/,           // if (!globals.functions)
               /if\s*\(\s*!globals\.form\s*\)/,                // if (!globals.form)
               /if\s*\([^)]*globals\.functions\s*===?\s*null/, // if (globals.functions === null)
               /if\s*\([^)]*globals\.form\s*===?\s*null/,      // if (globals.form === null)
+              
+              // Compound checks (with ||)
+              /if\s*\([^)]*!globals\s*\|\|/,                   // if (!globals || ...)
+              /\|\|\s*!globals\.functions\s*\|\|/,             // || !globals.functions ||
+              /\|\|\s*!globals\.form\s*\|\|/,                  // || !globals.form ||
+              /\|\|\s*!globals\s*\)/,                          // || !globals)
+              /\|\|\s*!globals\.functions\s*\)/,               // || !globals.functions)
+              /\|\|\s*!globals\.form\s*\)/,                    // || !globals.form)
+              
+              // Typeof checks on OOTB functions
+              /typeof\s+globals\.functions\.setProperty\s*[!=]=\s*['"]function['"]/,
+              /typeof\s+globals\.functions\.getProperty\s*[!=]=\s*['"]function['"]/,
+              /typeof\s+globals\.functions\.setVariable\s*[!=]=\s*['"]function['"]/,
+              /typeof\s+globals\.functions\.dispatchEvent\s*[!=]=\s*['"]function['"]/,
+              
+              // Negation checks
               /!globals\.functions\.setProperty/,              // !globals.functions.setProperty
               /!globals\.functions\.getProperty/,              // !globals.functions.getProperty
               /!globals\.functions\.setVariable/,              // !globals.functions.setVariable
               /!globals\.functions\.getVariable/,              // !globals.functions.getVariable
+              /!globals\.functions\.dispatchEvent/,            // !globals.functions.dispatchEvent
             ];
             
             for (const pattern of unnecessaryChecks) {
@@ -3424,17 +3442,21 @@ function formatPhoneNumber(phone, formData, globals) {
 }
 \`\`\`
 
-**WRONG EXAMPLE (DO NOT do this):**
+**WRONG EXAMPLES (DO NOT do any of these):**
 \`\`\`javascript
 function formatPhoneNumber(phone, formData, globals) {
-  // ❌ WRONG: No need to check globals
+  // ❌ WRONG: Compound check with ||
+  if (!globals || !globals.functions || typeof globals.functions.setProperty !== 'function') {
+    return;
+  }
+  
+  // ❌ WRONG: Individual checks
   if (!globals) return;
-  
-  // ❌ WRONG: No need to check globals.functions
   if (!globals.functions) return;
-  
-  // ❌ WRONG: No need to check globals.functions.setProperty
   if (!globals.functions.setProperty) return;
+  
+  // ❌ WRONG: Typeof checks on OOTB functions
+  if (typeof globals.functions.setProperty !== 'function') return;
   
   // ✓ CORRECT: Only check user parameters
   if (!phone) return '';
@@ -3454,12 +3476,14 @@ function formatPhoneNumber(phone, formData, globals) {
 1. RETURN THE COMPLETE FUNCTION with all original code intact
 2. USE THE STACK TRACE to identify which specific variable/operation is failing
 3. ADD checks ONLY for the variables mentioned in the error stack trace
-4. DO NOT add checks for \`globals\`, \`globals.form\`, or \`globals.functions.*\` (guaranteed by runtime)
-5. PRESERVE function signature (parameters, name) exactly
-6. PRESERVE all existing logic and calculations
-7. PRESERVE all setProperty, setVariable, dispatchEvent calls
-8. DO NOT change variable names or remove any logic
-9. ONLY ADD defensive checks - don't refactor or simplify
+4. **NEVER check globals/globals.functions/globals.form** - they are GUARANTEED by AEM runtime
+5. **DO NOT use compound checks** like \`if (!globals || !globals.functions || ...)\` - FORBIDDEN
+6. **DO NOT use typeof checks** on OOTB functions like \`setProperty\`, \`getProperty\`, etc. - FORBIDDEN
+7. PRESERVE function signature (parameters, name) exactly
+8. PRESERVE all existing logic and calculations
+9. PRESERVE all setProperty, setVariable, dispatchEvent calls
+10. DO NOT change variable names or remove any logic
+11. ONLY ADD defensive checks - don't refactor or simplify
 
 **Defensive Check Patterns (use sparingly, only where stack trace indicates):**
 - Before .toString() on parameter: if (!value) { return ''; }
@@ -3472,6 +3496,17 @@ function formatPhoneNumber(phone, formData, globals) {
 - \`globals.form\` (always exists)  
 - \`globals.functions\` (always exists)
 - \`globals.functions.setProperty\`, \`getProperty\`, \`setVariable\`, etc. (all OOTB functions)
+
+**FORBIDDEN PATTERNS (will be REJECTED):**
+❌ \`if (!globals || !globals.functions || ...)\` - compound checks on guaranteed objects
+❌ \`if (!globals.functions.setProperty)\` - checking OOTB functions
+❌ \`typeof globals.functions.setProperty !== 'function'\` - typeof on OOTB functions
+❌ \`if (!globals.form)\` - checking guaranteed form instance
+
+**ONLY check these:**
+✅ Function parameters that can be null (e.g., \`phone\`, \`panNumber\`, \`formData\`)
+✅ Field values (e.g., \`field.$value\`, \`formData.countryCode\`)
+✅ Results from operations (e.g., \`str.split()[0]\`, \`array[index]\`)
 
 Respond with ONLY the JSON object containing the COMPLETE function code, no markdown formatting.`;
 
