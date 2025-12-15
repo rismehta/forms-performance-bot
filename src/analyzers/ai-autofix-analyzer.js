@@ -1776,23 +1776,46 @@ ${hasAIRefactoring ? '\n REVIEW CHECKLIST:\n- [ ] Test all affected functions\n-
     } else if (fix.type === 'css-background-image-fix') {
       // Apply AI-generated CSS and component refactoring
       
+      // IMPORTANT: Re-read the file to get any changes from previous fixes (e.g., inlined @imports)
+      // This prevents overwriting other fixes that may have been applied in parallel
+      const currentContent = readFileSync(filePath, 'utf-8');
+      
       // 1. Apply CSS fix (comment out or replace background-image)
       if (fix.fixedCSSCode) {
-        content = fix.fixedCSSCode;
-        description = `Refactor background-image in ${fix.file} (AI-generated)`;
-        impact = 'Replaces background-image with <img loading="lazy"> for better performance';
-      } else {
-        // Fallback: just comment out
-        const lines = content.split('\n');
-        const lineIndex = fix.line - 1;
+        // Check if the current content has inlined imports (signature of CSS import fix)
+        const hasInlinedImports = currentContent.includes('/* Inlined from:') || 
+                                   currentContent.includes('CSS content from:');
         
-        if (lines[lineIndex] && lines[lineIndex].includes('background-image')) {
-          lines[lineIndex] = `  /* ${lines[lineIndex].trim()} */`;
-          lines.splice(lineIndex + 1, 0, '  /* Performance: Replace with <img loading="lazy"> in HTML - see Performance Bot PR comment */');
-          content = lines.join('\n');
-          description = `Comment out background-image in ${fix.file}`;
-          impact = 'Enables lazy loading when replaced with <img>';
+        if (hasInlinedImports && !fix.fixedCSSCode.includes('/* Inlined from:')) {
+          // The file was already modified by CSS import fix, but AI-generated code doesn't have it
+          // We need to apply the background-image fix to the CURRENT content, not replace it entirely
+          core.warning(`  Detected inlined imports in ${fix.file} - applying background-image fix to current content`);
+          
+          // Extract the background-image line from current content and comment it out
+          const lines = currentContent.split('\n');
+          const lineIndex = fix.line - 1;
+          
+          if (lineIndex >= 0 && lineIndex < lines.length && lines[lineIndex].includes('background-image')) {
+            lines[lineIndex] = `  /* ${lines[lineIndex].trim()} */`;
+            lines.splice(lineIndex + 1, 0, '  /* Performance: Replace with <img loading="lazy"> in HTML - see Performance Bot PR comment */');
+            content = lines.join('\n');
+            description = `Comment out background-image in ${fix.file} (preserving inlined imports)`;
+            impact = 'Enables lazy loading when replaced with <img>, preserves inlined CSS';
+          } else {
+            // Fallback: use current content as-is
+            content = currentContent;
+            core.warning(`  Could not find background-image at line ${fix.line} - keeping current content`);
+          }
+        } else {
+          // No conflict, use AI-generated CSS
+          content = fix.fixedCSSCode;
+          description = `Refactor background-image in ${fix.file} (AI-generated)`;
+          impact = 'Replaces background-image with <img loading="lazy"> for better performance';
         }
+      } else {
+        // This should not happen - fixedCSSCode should always exist if component was found
+        core.warning(`No fixedCSSCode provided for ${fix.file} - skipping fix`);
+        return { success: false, filePath, description: 'No CSS fix available', impact: '' };
       }
       
     } else if (fix.type === 'custom-function-runtime-error-fix') {
@@ -2085,6 +2108,13 @@ ${hasAIRefactoring ? '\n REVIEW CHECKLIST:\n- [ ] Test all affected functions\n-
         if (!enhancedContext.imagePath) {
           core.warning(`Skipping ${issue.file}:${issue.line} - could not extract image path from CSS`);
           core.warning(`  CSS issue: ${issue.message}`);
+          return null;
+        }
+        
+        // IMPORTANT: Only generate fix if component exists
+        // If no component, the issue is already reported by FormCSSAnalyzer - no auto-fix needed
+        if (!componentContent) {
+          core.info(`No component found for ${issue.file} - skipping auto-fix (issue will be reported only)`);
           return null;
         }
         
