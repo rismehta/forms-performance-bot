@@ -1752,13 +1752,16 @@ ${hasAIRefactoring ? '\n REVIEW CHECKLIST:\n- [ ] Test all affected functions\n-
 
     // Apply fix based on type
     if (fix.type === 'css-import-fix') {
+      // CRITICAL: Re-read file to ensure we have the latest content
+      // This handles cases where Fix #1 already modified the file before Fix #2 is applied
+      content = readFileSync(filePath, 'utf-8');
+      
       // Replace @import with inlined CSS content OR move to head.html
       const originalLine = fix.originalCode;
       const inlinedCSS = fix.fixedCode;
       
       if (!content.includes(originalLine)) {
-        core.warning(`Could not find original @import line in ${fix.file}`);
-        core.warning(`  Looking for: ${originalLine}`);
+        core.info(`  Skipping ${fix.file} - @import already fixed (originalLine not found)`);
         return { success: false, error: '@import line not found' };
       }
       
@@ -1796,7 +1799,9 @@ ${hasAIRefactoring ? '\n REVIEW CHECKLIST:\n- [ ] Test all affected functions\n-
       // 1. Apply CSS fix (comment out or replace background-image)
       if (fix.fixedCSSCode) {
         // Check if the current content has inlined imports (signature of CSS import fix)
-        const hasInlinedImports = currentContent.includes('/* Inlined from:') || 
+        const hasInlinedImports = currentContent.includes('/* ═══════════════') || 
+                                   currentContent.includes('INLINED CSS from:') ||
+                                   currentContent.includes('/* Inlined from:') || 
                                    currentContent.includes('CSS content from:');
         
         if (hasInlinedImports && !fix.fixedCSSCode.includes('/* Inlined from:')) {
@@ -1820,10 +1825,22 @@ ${hasAIRefactoring ? '\n REVIEW CHECKLIST:\n- [ ] Test all affected functions\n-
             core.warning(`  Could not find background-image at line ${fix.line} - keeping current content`);
           }
         } else {
-          // No conflict, use AI-generated CSS
-          content = fix.fixedCSSCode;
-          description = `Refactor background-image in ${fix.file} (AI-generated)`;
-          impact = 'Replaces background-image with <img loading="lazy"> for better performance';
+          // CRITICAL: Never replace entire file with AI-generated code
+          // Always do targeted line replacement to preserve other content
+          const lines = currentContent.split('\n');
+          const lineIndex = fix.line - 1;
+          
+          if (lineIndex >= 0 && lineIndex < lines.length && lines[lineIndex].includes('background-image')) {
+            lines[lineIndex] = `  /* ${lines[lineIndex].trim()} */`;
+            lines.splice(lineIndex + 1, 0, '  /* Performance: Replace with <img loading="lazy"> in HTML - see Performance Bot PR comment */');
+            content = lines.join('\n');
+            description = `Comment out background-image in ${fix.file}`;
+            impact = 'Enables lazy loading when replaced with <img>';
+          } else {
+            // Can't find the line - skip this fix to prevent data loss
+            core.warning(`  Could not find background-image at line ${fix.line} in ${fix.file} - skipping to prevent data loss`);
+            return { success: false, filePath, description: 'background-image line not found', impact: '' };
+          }
         }
       } else {
         // This should not happen - fixedCSSCode should always exist if component was found
@@ -2011,6 +2028,20 @@ ${hasAIRefactoring ? '\n REVIEW CHECKLIST:\n- [ ] Test all affected functions\n-
       try {
         const filePath = resolve(this.workspaceRoot, issue.file);
         const fileContent = readFileSync(filePath, 'utf-8');
+        
+        // SAFETY CHECK: Skip if @import is already fixed
+        // This prevents:
+        // 1. Trying to fix already-inlined imports on subsequent bot runs
+        // 2. Applying stale fixes when multiple @imports exist in the same file
+        //    (Fix #2 and #3 would have stale originalLine if Fix #1 already modified the file)
+        const importPattern = new RegExp(
+          `@import\\s+(?:url\\()?['"]?${issue.importUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}['"]?(?:\\))?\\s*;?`,
+          'i'
+        );
+        if (!importPattern.test(fileContent)) {
+          core.info(`  Skipping ${issue.file}:${issue.line} - @import already fixed (${issue.importUrl})`);
+          continue;
+        }
         
         // Read and inline the imported CSS file
         const inlineResult = await this.inlineImportedCSS(issue, fileContent);
