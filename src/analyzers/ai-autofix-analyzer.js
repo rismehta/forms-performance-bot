@@ -3615,17 +3615,23 @@ Respond with ONLY the JSON object containing the COMPLETE function code, no mark
    * Shows up alongside ESLint, build checks in PR Checks tab
    * 
    * @param {Array} reviewComments - Successfully posted line-level comments (to customize messaging)
+   * @param {Array} autoFixedFiles - List of files that were successfully auto-fixed (to exclude from annotations)
    */
-  createPerformanceCheck = async (results, suggestions, octokit, owner, repo, prNumber, commitSha, reviewComments = []) => {
+  createPerformanceCheck = async (results, suggestions, octokit, owner, repo, prNumber, commitSha, reviewComments = [], autoFixedFiles = []) => {
     const annotations = [];
     
     // Collect all critical issues as annotations
     const criticalIssues = [];
     
+    // Normalize auto-fixed file paths for comparison
+    const autoFixedSet = new Set(autoFixedFiles.map(f => f.replace(/^\/+/, '')));
+    
     // 1. CSS @import issues (critical errors)
+    // SKIP if file was auto-fixed (annotations would point to old line numbers)
     if (results.formCSS?.newIssues) {
       results.formCSS.newIssues
         .filter(i => i.type === 'css-import-blocking')
+        .filter(i => !autoFixedSet.has(i.file.replace(/^\/+/, ''))) // Exclude auto-fixed files
         .forEach(issue => {
           criticalIssues.push({
             path: issue.file,
@@ -3639,9 +3645,11 @@ Respond with ONLY the JSON object containing the COMPLETE function code, no mark
     }
     
     // 2. CSS background-image issues (critical errors)
+    // SKIP if file was auto-fixed (annotations would point to old line numbers)
     if (results.formCSS?.newIssues) {
       results.formCSS.newIssues
         .filter(i => i.type === 'css-background-image')
+        .filter(i => !autoFixedSet.has(i.file.replace(/^\/+/, ''))) // Exclude auto-fixed files
         .forEach(issue => {
           criticalIssues.push({
             path: issue.file,

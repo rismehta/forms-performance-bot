@@ -68,6 +68,41 @@ async function run() {
     const { owner, repo } = context.repo;
 
     core.info(`Analyzing PR #${prNumber} in ${owner}/${repo}`);
+    
+    // LOOP PREVENTION: Check if the triggering commit was made by the bot
+    // If yes, run analysis for verification but SKIP auto-fix to prevent infinite loops
+    const triggeringCommit = context.payload.after || context.sha;
+    let isBotVerificationRun = false;
+    
+    core.info(`Checking triggering commit: ${triggeringCommit?.substring(0, 7) || 'unknown'}`);
+    
+    try {
+      const { data: commit } = await octokit.rest.repos.getCommit({
+        owner,
+        repo,
+        ref: triggeringCommit
+      });
+      
+      const commitMessage = commit.commit.message;
+      const commitAuthor = commit.commit.author.name;
+      
+      // Check if commit was made by the bot (either by commit message or author)
+      isBotVerificationRun = commitMessage.includes('[bot]') || 
+                             commitAuthor.includes('Performance Bot') ||
+                             commitAuthor.includes('github-actions');
+      
+      if (isBotVerificationRun) {
+        core.info(`ℹ️ Verification run detected - bot commit triggered this workflow`);
+        core.info(`  Commit: ${commitMessage.split('\n')[0]}`);
+        core.info(`  Author: ${commitAuthor}`);
+        core.info(`  Will run analysis to verify fixes, but SKIP auto-fix phase (prevents infinite loops)`);
+      } else {
+        core.info(`✓ User commit detected - proceeding with full analysis + auto-fix`);
+      }
+    } catch (error) {
+      core.warning(`Could not check triggering commit: ${error.message}`);
+      core.info(`Proceeding with analysis anyway...`);
+    }
 
     // Extract before/after URLs from PR description
     const prBody = context.payload.pull_request.body || '';
@@ -322,10 +357,15 @@ async function run() {
     }
     
     // APPLY AUTO-FIXES TO CURRENT PR (commit directly to the same PR)
+    // SKIP if this is a bot verification run (prevents infinite loops)
     let autoFixCommit = null;
     let autoFixFailureReason = null;
     
-    if (autoFixSuggestions.enabled && autoFixSuggestions.suggestions.length > 0) {
+    if (isBotVerificationRun) {
+      core.info(' Skipping auto-fix phase - this is a verification run after bot commit');
+      core.info('   This prevents infinite loops where auto-fixes trigger new workflow runs');
+      autoFixFailureReason = 'Verification run (skipped auto-fix to prevent infinite loops)';
+    } else if (autoFixSuggestions.enabled && autoFixSuggestions.suggestions.length > 0) {
       core.info(' Applying auto-fixes to current PR...');
       try {
         autoFixCommit = await aiAutoFixAnalyzer.applyFixesToCurrentPR(
@@ -489,6 +529,13 @@ async function run() {
         
         core.info(`  Creating check on commit: ${checkCommitSha.substring(0, 7)}`);
         
+        // Get list of auto-fixed files to exclude from annotations (line numbers are stale after fixes)
+        const autoFixedFiles = autoFixCommit?.files || [];
+        if (autoFixedFiles.length > 0) {
+          core.info(`  Excluding ${autoFixedFiles.length} auto-fixed file(s) from annotations:`);
+          autoFixedFiles.forEach(f => core.info(`    - ${f}`));
+        }
+        
         await aiAutoFixAnalyzer.createPerformanceCheck(
           results,
           autoFixSuggestions.suggestions,
@@ -497,7 +544,8 @@ async function run() {
           repo,
           prNumber,
           checkCommitSha,  // Use latest commit SHA after auto-fixes
-          postedReviewComments  // Pass which files have line-level comments
+          postedReviewComments,  // Pass which files have line-level comments
+          autoFixedFiles  // Exclude auto-fixed files from annotations (stale line numbers)
         );
       } catch (error) {
         core.warning(` Failed to create performance check: ${error.message}`);
