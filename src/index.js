@@ -306,16 +306,8 @@ async function run() {
     // Check for critical performance issues BEFORE posting report
     const criticalIssues = detectCriticalIssues(results);
     
-    // INFINITE LOOP PREVENTION: If bot committed last time AND still has issues, don't auto-fix again
-    if (lastCommitWasBot && criticalIssues.hasCritical) {
-      core.warning(' Bot previously committed fixes, but issues still exist');
-      core.warning(' Skipping auto-fix to prevent infinite loop');
-      core.warning(' These issues require manual intervention or are not auto-fixable');
-    }
-    
     // AI AUTO-FIX SUGGESTIONS (runs after all analyzers complete)
     // Generates one-click fixable code suggestions for critical issues
-    // BUT: Skip auto-fix application if last commit was by bot (prevents infinite loops)
     core.info(' Running AI Auto-Fix Analysis...');
     const autoFixSuggestions = await aiAutoFixAnalyzer.analyze(results);
     
