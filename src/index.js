@@ -68,28 +68,6 @@ async function run() {
     const { owner, repo } = context.repo;
 
     core.info(`Analyzing PR #${prNumber} in ${owner}/${repo}`);
-    
-    // LOOP PREVENTION: Track bot commits but ALWAYS re-analyze to verify fixes worked
-    // We only skip if the bot has committed multiple times in a row without fixing issues (infinite loop)
-    let lastCommitWasBot = false;
-    try {
-      const lastCommitAuthor = context.payload.pull_request.head.user.login;
-      const lastCommitMessage = context.payload.after 
-        ? (await octokit.rest.repos.getCommit({ owner, repo, ref: context.payload.after })).data.commit.message
-        : '';
-      
-      const botCommitPrefixes = ['[bot]', '[performance-bot]', 'chore: Auto-fix performance'];
-      const isBotCommit = botCommitPrefixes.some(prefix => lastCommitMessage.startsWith(prefix));
-      
-      if (isBotCommit || lastCommitAuthor === 'github-actions[bot]') {
-        lastCommitWasBot = true;
-        core.info(' Last commit was made by the bot - will re-analyze to verify fixes');
-        core.info(`   Last commit: "${lastCommitMessage.substring(0, 60)}..."`);
-      }
-    } catch (error) {
-      core.warning(`Could not check last commit author: ${error.message}`);
-      // Continue with analysis
-    }
 
     // Extract before/after URLs from PR description
     const prBody = context.payload.pull_request.body || '';
@@ -352,15 +330,10 @@ async function run() {
     }
     
     // APPLY AUTO-FIXES TO CURRENT PR (commit directly to the same PR)
-    // SKIP if last commit was by bot and issues still exist (infinite loop prevention)
     let autoFixCommit = null;
     let autoFixFailureReason = null;
-    const shouldSkipAutoFix = lastCommitWasBot && criticalIssues.hasCritical;
     
-    if (shouldSkipAutoFix) {
-      core.info(' Skipping auto-fix application (bot already tried, issues persist)');
-      autoFixFailureReason = 'Bot previously attempted fixes - issues require manual intervention';
-    } else if (autoFixSuggestions.enabled && autoFixSuggestions.suggestions.length > 0) {
+    if (autoFixSuggestions.enabled && autoFixSuggestions.suggestions.length > 0) {
       core.info(' Applying auto-fixes to current PR...');
       try {
         autoFixCommit = await aiAutoFixAnalyzer.applyFixesToCurrentPR(
