@@ -163,21 +163,36 @@ export class FormPRReporter {
       lines.push(`**Impact:** ${suggestion.estimatedImpact}\n`);
     }
     
-    // JS Refactored Code (HTTP/DOM fixes) - SHOW AS PR COMMENT SUGGESTION
+    // JS Refactored Code (HTTP/DOM fixes) - REFERENCE CODE (manual application)
     if (suggestion.refactoredCode && (suggestion.type === 'custom-function-http-fix' || suggestion.type === 'custom-function-dom-fix')) {
       lines.push(`**File:** \`${suggestion.file}\`\n`);
       lines.push(`**Function:** \`${suggestion.functionName}()\`\n`);
       lines.push(`**Issue:** ${suggestion.description}\n`);
-      lines.push(`**Action Required:** Use **Visual Rule Editor** to refactor this function according to AI suggestion below.\n`);
       
-      // GitHub suggestion syntax for one-click apply
-      lines.push('```suggestion');
+      // Different instructions for HTTP vs DOM fixes
+      if (suggestion.type === 'custom-function-http-fix') {
+        lines.push(`**Action Required:**\n`);
+        lines.push(`1. **Refactor function code** (apply code below to remove HTTP call)\n`);
+        lines.push(`2. **Add API integration** via Visual Rule Editor (see form JSON below)\n`);
+      } else {
+        lines.push(`**Action Required:**\n`);
+        lines.push(`1. **Refactor function code** (apply code below to remove DOM access)\n`);
+        lines.push(`2. **Create custom component** for DOM manipulation (see example below)\n`);
+      }
+      
+      // Check if this will also appear as line-level comment with "Apply suggestion" button
+      lines.push(`> ℹ️ **Note:** This code is for reference. Copy and apply manually to your function.\n`);
+      
+      // Use javascript syntax (not 'suggestion') in main PR comment
+      // 'suggestion' syntax only works in line-level comments, not in PR body
+      lines.push('**Step 1: Refactored Function Code**\n');
+      lines.push('```javascript');
       lines.push(suggestion.refactoredCode);
       lines.push('```\n');
       
       // Add form JSON if applicable (HTTP fixes)
       if (suggestion.formJsonSnippet) {
-        lines.push(`**Step 2: Add to Form JSON via Visual Rule Editor**\n`);
+        lines.push(`**Step 2: Add to Form Events via Visual Rule Editor**\n`);
         lines.push('```json');
         lines.push(suggestion.formJsonSnippet);
         lines.push('```\n');
@@ -185,7 +200,7 @@ export class FormPRReporter {
       
       // Add component example if applicable (DOM fixes)
       if (suggestion.componentExample) {
-        lines.push(`**Custom Component (if needed):**\n`);
+        lines.push(`**Step 2: Custom Component Code**\n`);
         lines.push('```javascript');
         lines.push(suggestion.componentExample);
         lines.push('```\n');

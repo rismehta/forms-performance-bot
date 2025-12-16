@@ -455,9 +455,46 @@ async function run() {
       gistUrl, // Direct browser link to HTML report
     }, prNumber, `${owner}/${repo}`);
     
+    // Post PR review comments on specific lines for HTTP/DOM fixes FIRST
+    // (so we know which files have line-level comments for the GitHub Check)
+    let postedReviewComments = [];
+    if (autoFixSuggestions?.enabled && autoFixSuggestions.suggestions.length > 0) {
+      const httpDomFixes = autoFixSuggestions.suggestions.filter(s =>
+        s.type === 'custom-function-http-fix' || s.type === 'custom-function-dom-fix'
+      );
+      
+      if (httpDomFixes.length > 0) {
+        core.info(` Posting ${httpDomFixes.length} line-level PR review comment(s)...`);
+        try {
+          const { reviewComments } = await aiAutoFixAnalyzer.postPRReviewComments(
+            httpDomFixes,
+            octokit,
+            owner,
+            repo,
+            prNumber,
+            context.payload.pull_request.head.sha
+          );
+          
+          postedReviewComments = reviewComments;
+          
+          if (reviewComments.length > 0) {
+            core.info(` Posted ${reviewComments.length} line-level suggestion(s) on PR`);
+          } else {
+            core.info(' No line-level comments posted (files not in PR diff)');
+            core.info('   ✓ Annotations visible in: PR → Checks tab → "AEM Forms Performance Analysis"');
+            core.info('   ✓ Full AI code available in check annotations (click "Show more")');
+          }
+        } catch (error) {
+          core.warning(` Failed to post PR review comments: ${error.message}`);
+          core.warning('AI suggestions still visible in GitHub Checks annotations');
+        }
+      }
+    }
+    
     // Create GitHub Check with all performance issues (not just HTTP/DOM)
     // This makes performance analysis visible in PR Checks tab alongside ESLint, build, etc.
     // IMPORTANT: Use the latest commit SHA (after auto-fixes were pushed)
+    // Pass postedReviewComments to customize annotation messages
     if (autoFixSuggestions?.enabled) {
       core.info(' Creating comprehensive performance check...');
       try {
@@ -494,43 +531,12 @@ async function run() {
           owner,
           repo,
           prNumber,
-          checkCommitSha  // Use latest commit SHA after auto-fixes
+          checkCommitSha,  // Use latest commit SHA after auto-fixes
+          postedReviewComments  // Pass which files have line-level comments
         );
       } catch (error) {
         core.warning(` Failed to create performance check: ${error.message}`);
         core.warning(`  Error details: ${error.stack}`);
-      }
-    }
-    
-    // Post PR review comments on specific lines for HTTP/DOM fixes
-    if (autoFixSuggestions?.enabled && autoFixSuggestions.suggestions.length > 0) {
-      const httpDomFixes = autoFixSuggestions.suggestions.filter(s =>
-        s.type === 'custom-function-http-fix' || s.type === 'custom-function-dom-fix'
-      );
-      
-      if (httpDomFixes.length > 0) {
-        core.info(` Posting ${httpDomFixes.length} line-level PR review comment(s)...`);
-        try {
-          const { reviewComments } = await aiAutoFixAnalyzer.postPRReviewComments(
-            httpDomFixes,
-            octokit,
-            owner,
-            repo,
-            prNumber,
-            context.payload.pull_request.head.sha
-          );
-          
-          if (reviewComments.length > 0) {
-            core.info(` Posted ${reviewComments.length} line-level suggestion(s) on PR`);
-          } else {
-            core.info(' No line-level comments posted (files not in PR diff)');
-            core.info('   ✓ Annotations visible in: PR → Checks tab → "AEM Forms Performance Analysis"');
-            core.info('   ✓ Full AI suggestions in main PR comment body');
-          }
-        } catch (error) {
-          core.warning(` Failed to post PR review comments: ${error.message}`);
-          core.warning('Suggestions are still visible in main PR comment');
-        }
       }
     }
 

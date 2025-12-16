@@ -2395,7 +2395,7 @@ ${fieldNames.length > 5 ? `\n...and ${fieldNames.length - 5} more` : ''}
           file: issue.file,
           line: issue.line || 1,
           title: `Move HTTP request from ${issue.functionName}() to form-level API call`,
-          description: `Custom function "${issue.functionName}()" makes direct HTTP requests. This bypasses error handling, loading states, and retry logic.`,
+          description: `Custom function "${issue.functionName}()" makes direct HTTP requests. This bypasses error handling, loading states, and retry logic.\n\n**FIX:** (1) Refactor function to remove request() call, (2) Use **Visual Rule Editor** to create API Integration (invoke service/HTTP request rule) in form events.`,
           refactoredCode: refactoredCode.jsCode,
           formJsonSnippet: refactoredCode.formJsonSnippet,
           testingSteps: refactoredCode.testingSteps,
@@ -2494,7 +2494,7 @@ export function ${issue.functionName}(field, globals) {
           componentFile: componentInfo.componentFile,
           componentPath: componentInfo.componentPath,
           title: `Move DOM access from ${issue.functionName}() to custom component`,
-          description: `Custom function "${issue.functionName}()" directly manipulates DOM. This breaks AEM Forms architecture and causes maintenance issues.`,
+          description: `Custom function "${issue.functionName}()" directly manipulates DOM. This breaks AEM Forms architecture and causes maintenance issues.\n\n**FIX:** (1) Refactor function to use setProperty() for STATE only, (2) Move DOM manipulation to custom component where it reads state and updates DOM.`,
           refactoredCode: refactoredCode.jsCode,
           componentSuggestion: refactoredCode.componentSuggestion,
           componentExample: refactoredCode.componentExample,
@@ -3574,8 +3574,10 @@ Respond with ONLY the JSON object containing the COMPLETE function code, no mark
   /**
    * Create comprehensive GitHub Check with all performance issues
    * Shows up alongside ESLint, build checks in PR Checks tab
+   * 
+   * @param {Array} reviewComments - Successfully posted line-level comments (to customize messaging)
    */
-  createPerformanceCheck = async (results, suggestions, octokit, owner, repo, prNumber, commitSha) => {
+  createPerformanceCheck = async (results, suggestions, octokit, owner, repo, prNumber, commitSha, reviewComments = []) => {
     const annotations = [];
     
     // Collect all critical issues as annotations
@@ -3627,13 +3629,20 @@ See AI-generated fix in PR comments.`,
       suggestions
         .filter(s => s.type === 'custom-function-http-fix')
         .forEach(fix => {
+          // Check if this file has a line-level comment (file was in PR diff)
+          const hasLineComment = reviewComments.some(rc => rc.file === fix.file && rc.line === fix.line);
+          
+          const message = hasLineComment
+            ? `${fix.description}\n\n**✅ One-Click Fix Available**\n→ Scroll down to line ${fix.line} in this file\n→ Click on inline comment to see "Apply suggestion" button`
+            : `${fix.description}\n\n**📝 Manual Fix Required**\n→ Click "Show more" below for AI-generated refactored code\n→ Copy code and apply manually\n⚠️ File not in PR diff - cannot use "Apply suggestion"`;
+          
           criticalIssues.push({
             path: fix.file,
             start_line: fix.line || 1,
             end_line: fix.line || 1,
             annotation_level: 'failure',
             title: `HTTP Request in ${fix.functionName}()`,
-            message: `${fix.description}\n\n**AI-Generated Fix Available** (see PR comment for details)`,
+            message,
             raw_details: fix.refactoredCode ? `AI-suggested refactoring:\n\n${fix.refactoredCode}` : undefined
           });
         });
@@ -3644,13 +3653,20 @@ See AI-generated fix in PR comments.`,
       suggestions
         .filter(s => s.type === 'custom-function-dom-fix')
         .forEach(fix => {
+          // Check if this file has a line-level comment (file was in PR diff)
+          const hasLineComment = reviewComments.some(rc => rc.file === fix.file && rc.line === fix.line);
+          
+          const message = hasLineComment
+            ? `${fix.description}\n\n**✅ One-Click Fix Available**\n→ Scroll down to line ${fix.line} in this file\n→ Click on inline comment to see "Apply suggestion" button`
+            : `${fix.description}\n\n**📝 Manual Fix Required**\n→ Click "Show more" below for AI-generated refactored code\n→ Copy code and apply manually\n⚠️ File not in PR diff - cannot use "Apply suggestion"`;
+          
           criticalIssues.push({
             path: fix.file,
             start_line: fix.line || 1,
             end_line: fix.line || 1,
             annotation_level: 'failure',
             title: `DOM Access in ${fix.functionName}()`,
-            message: `${fix.description}\n\n**AI-Generated Fix Available** (see PR comment for details)`,
+            message,
             raw_details: fix.refactoredCode ? `AI-suggested refactoring:\n\n${fix.refactoredCode}` : undefined
           });
         });
@@ -3805,7 +3821,7 @@ See AI-generated fix in PR comments.`,
    */
   buildAnnotationMessage = (fix) => {
     if (fix.type === 'custom-function-http-fix') {
-      return `Function ${fix.functionName}() makes direct HTTP call. Use Visual Rule Editor to create API integration and remove request call from custom function.`;
+      return `Function ${fix.functionName}() makes direct HTTP call. FIX: (1) Refactor function code to remove request() call, (2) Add API integration via Visual Rule Editor.`;
     } else if (fix.type === 'custom-function-dom-fix') {
       const componentHint = fix.componentFile ? ` Move DOM logic to component: ${fix.componentFile}.` : ' Move DOM manipulation to a custom component.';
       return `Function ${fix.functionName}() accesses DOM directly.${componentHint} Use setProperty() to store STATE (data/flags), component reads STATE and updates DOM.`;
@@ -3822,70 +3838,39 @@ See AI-generated fix in PR comments.`,
     if (fix.type === 'custom-function-http-fix') {
       lines.push(`##  HTTP Request in Custom Function`);
       lines.push('');
-      lines.push(`**Function:** \`${fix.functionName}()\``);
-      lines.push(`**File:** \`${fix.file}\``);
-      lines.push(`**Issue:** Direct HTTP call bypasses form's request() API`);
+      lines.push(`**Issue:** Function \`${fix.functionName}()\` makes direct HTTP call. Refactor function code (below) + add API integration via Visual Rule Editor.`);
       lines.push('');
-      lines.push('**Recommended Fix:**');
-      lines.push('1. **Use Visual Rule Editor** to create an API integration (e.g., invoke service, HTTP request rule)');
-      lines.push('2. **Remove the request() call** from this custom function');
-      lines.push('3. **Use form events** to trigger the API integration instead');
-      lines.push('');
-      lines.push('**AI-Generated Refactored Code** (for reference):');
+      lines.push('**Step 1: Refactored Function Code** (click "Apply suggestion" below):');
       lines.push('```suggestion');
       lines.push(fix.refactoredCode || '// AI-generated refactored code');
       lines.push('```');
       lines.push('');
-      lines.push('**Why:** Visual Rule Editor provides better error handling, retry logic, and monitoring for API calls.');
-      lines.push('');
-      lines.push('**Testing:**');
-      const httpTestingSteps = this.formatTestingSteps(fix.testingSteps || 'Test form submission and API calls in Visual Rule Editor');
-      lines.push(httpTestingSteps);
-      lines.push('');
-      lines.push('---');
-      lines.push('* AI-powered suggestion by [AEM Forms Performance Analyzer](https://github.com/rismehta/forms-performance-bot)*');
+      if (fix.formJsonSnippet) {
+        lines.push('**Step 2: Add API Integration** (via Visual Rule Editor):');
+        lines.push('```json');
+        lines.push(fix.formJsonSnippet);
+        lines.push('```');
+        lines.push('');
+      }
       
     } else if (fix.type === 'custom-function-dom-fix') {
       lines.push(`##  DOM Access in Custom Function`);
       lines.push('');
-      lines.push(`**Function:** \`${fix.functionName}()\``);
-      lines.push(`**File:** \`${fix.file}\``);
-      lines.push(`**Issue:** Direct DOM manipulation bypasses form architecture`);
+      const componentHint = fix.componentFile ? ` Relevant component: \`${fix.componentFile}\`` : ' Create custom component for DOM logic.';
+      lines.push(`**Issue:** Function \`${fix.functionName}()\` accesses DOM directly.${componentHint}`);
       lines.push('');
-      if (fix.componentFile) {
-        lines.push(`**Relevant Component:** \`${fix.componentFile}\``);
-        lines.push('');
-      }
-      lines.push('**AI-Generated Fix:**');
-      lines.push('');
-      lines.push('**Refactored Function** (use `setProperty` for STATE, not DOM):');
+      lines.push('**Step 1: Refactored Function** (click "Apply suggestion" below):');
       lines.push('```suggestion');
       lines.push(fix.refactoredCode || '// AI-generated refactored code');
       lines.push('```');
       lines.push('');
-      if (fix.componentSuggestion) {
-        lines.push('**Component Suggestion:**');
-        lines.push(fix.componentSuggestion);
-        lines.push('');
-      }
       if (fix.componentExample) {
-        lines.push('**Component Code** (handle DOM here):');
+        lines.push('**Step 2: Custom Component** (create this component for DOM logic):');
         lines.push('```javascript');
         lines.push(fix.componentExample);
         lines.push('```');
         lines.push('');
       }
-      lines.push('**Architecture:**');
-      lines.push('1. Custom function: Process data + store state via `setProperty()`');
-      lines.push('2. Custom component: Read state + update DOM');
-      lines.push('3. Never store DOM elements in state - only data!');
-      lines.push('');
-      lines.push('**Testing:**');
-      const domTestingSteps = this.formatTestingSteps(fix.testingSteps || 'Test UI interactions and state updates');
-      lines.push(domTestingSteps);
-      lines.push('');
-      lines.push('---');
-      lines.push('* AI-powered suggestion by [AEM Forms Performance Analyzer](https://github.com/rismehta/forms-performance-bot)*');
     }
     
     return lines.join('\n');
