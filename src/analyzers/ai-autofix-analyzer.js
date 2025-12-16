@@ -2029,20 +2029,6 @@ ${hasAIRefactoring ? '\n REVIEW CHECKLIST:\n- [ ] Test all affected functions\n-
         const filePath = resolve(this.workspaceRoot, issue.file);
         const fileContent = readFileSync(filePath, 'utf-8');
         
-        // SAFETY CHECK: Skip if @import is already fixed
-        // This prevents:
-        // 1. Trying to fix already-inlined imports on subsequent bot runs
-        // 2. Applying stale fixes when multiple @imports exist in the same file
-        //    (Fix #2 and #3 would have stale originalLine if Fix #1 already modified the file)
-        const importPattern = new RegExp(
-          `@import\\s+(?:url\\()?['"]?${issue.importUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}['"]?(?:\\))?\\s*;?`,
-          'i'
-        );
-        if (!importPattern.test(fileContent)) {
-          core.info(`  Skipping ${issue.file}:${issue.line} - @import already fixed (${issue.importUrl})`);
-          continue;
-        }
-        
         // Read and inline the imported CSS file
         const inlineResult = await this.inlineImportedCSS(issue, fileContent);
         
