@@ -2097,8 +2097,42 @@ ${hasAIRefactoring ? '\n REVIEW CHECKLIST:\n- [ ] Test all affected functions\n-
         const cssFilePath = resolve(this.workspaceRoot, issue.file);
         const cssContent = readFileSync(cssFilePath, 'utf-8');
         
+        // CRITICAL FIX: Detect if this issue is in INLINED CSS
+        // If so, extract the original source file from the comment header
+        // This ensures we find the correct component (e.g., button.js not form.js)
+        let effectiveCSSPath = cssFilePath;
+        const lines = cssContent.split('\n');
+        const issueLine = issue.line - 1; // 0-indexed
+        
+        // Search backwards from issue line to find "INLINED CSS from:" comment
+        for (let i = issueLine; i >= 0; i--) {
+          const line = lines[i];
+          const inlinedMatch = line.match(/INLINED CSS from:\s*(.+)/);
+          if (inlinedMatch) {
+            const originalRelativePath = inlinedMatch[1].trim();
+            // Resolve relative to the parent CSS file's directory
+            const parentDir = dirname(cssFilePath);
+            const originalCSSPath = resolve(parentDir, originalRelativePath);
+            
+            if (existsSync(originalCSSPath)) {
+              effectiveCSSPath = originalCSSPath;
+              core.info(`Detected inlined CSS - original source: ${relative(this.workspaceRoot, originalCSSPath)}`);
+              core.info(`  Will look for component based on original file, not ${basename(cssFilePath)}`);
+            } else {
+              core.warning(`Found inlined CSS marker but original file not found: ${originalCSSPath}`);
+            }
+            break;
+          }
+          
+          // Stop searching if we hit another inlined section or start of file
+          if (line.includes('/* ═══════════════') && i < issueLine) {
+            break;
+          }
+        }
+        
         // NEW: Find associated component file (same base name, different extension)
-        const baseName = cssFilePath.replace(/\.css$/, '');
+        // Use effectiveCSSPath (original source) instead of cssFilePath (inlined file)
+        const baseName = effectiveCSSPath.replace(/\.css$/, '');
         const componentExtensions = ['.js', '.jsx', '.ts', '.tsx'];
         let componentPath = null;
         let componentContent = null;
