@@ -14,10 +14,15 @@ export class FormPRReporter {
    */
   async generateReport(results, urls, prNumber, repo) {
     const report = this.buildMarkdownReport(results, urls, prNumber, repo);
+    const isVerificationRun = urls.isVerificationRun || false;
     
     try {
-      await this.postComment(report);
-      console.log('Performance report posted successfully');
+      await this.postComment(report, isVerificationRun);
+      if (isVerificationRun) {
+        console.log('Performance report updated (verification run)');
+      } else {
+        console.log('Performance report posted successfully');
+      }
     } catch (error) {
       console.error('Error posting comment:', error.message);
       throw error;
@@ -1056,9 +1061,42 @@ export class FormPRReporter {
   }
 
   /**
-   * Post comment to PR
+   * Post or update comment on PR
+   * On verification runs, finds and updates existing bot comment to prevent duplicates
    */
-  async postComment(body) {
+  async postComment(body, isVerificationRun = false) {
+    if (isVerificationRun) {
+      // Find existing bot comment and update it
+      try {
+        const { data: comments } = await this.octokit.rest.issues.listComments({
+          owner: this.owner,
+          repo: this.repo,
+          issue_number: this.prNumber,
+        });
+        
+        // Find the most recent bot comment (contains bot signature)
+        const botComment = comments
+          .reverse() // Start from most recent
+          .find(c => c.body && c.body.includes('🤖 **AEM Forms Performance Analysis'));
+        
+        if (botComment) {
+          // Update existing comment
+          await this.octokit.rest.issues.updateComment({
+            owner: this.owner,
+            repo: this.repo,
+            comment_id: botComment.id,
+            body,
+          });
+          console.log(`Updated existing PR comment #${botComment.id}`);
+          return;
+        }
+      } catch (error) {
+        console.warn(`Could not update existing comment: ${error.message}`);
+        // Fall through to create new comment
+      }
+    }
+    
+    // Create new comment (default behavior or fallback)
     await this.octokit.rest.issues.createComment({
       owner: this.owner,
       repo: this.repo,

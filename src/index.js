@@ -449,6 +449,7 @@ async function run() {
     }
     
     // Generate and post minimal PR comment (with link to gist and artifact)
+    // On verification run, this updates the status (e.g., "issues fixed")
     const reporter = new FormPRReporter(octokit, owner, repo, prNumber);
     await reporter.generateReport(results, {
       before: urls.before,
@@ -458,12 +459,14 @@ async function run() {
       autoFixSuggestions, // Include AI-generated fix suggestions
       autoFixCommit, // Include auto-fix commit details
       gistUrl, // Direct browser link to HTML report
+      isVerificationRun: isBotVerificationRun, // Flag for updating existing comment
     }, prNumber, `${owner}/${repo}`);
     
     // Post PR review comments on specific lines for HTTP/DOM fixes FIRST
     // (so we know which files have line-level comments for the GitHub Check)
+    // SKIP on bot verification run to prevent duplicate comments
     let postedReviewComments = [];
-    if (autoFixSuggestions?.enabled && autoFixSuggestions.suggestions.length > 0) {
+    if (!isBotVerificationRun && autoFixSuggestions?.enabled && autoFixSuggestions.suggestions.length > 0) {
       const httpDomFixes = autoFixSuggestions.suggestions.filter(s =>
         s.type === 'custom-function-http-fix' || s.type === 'custom-function-dom-fix'
       );
@@ -494,13 +497,16 @@ async function run() {
           core.warning('AI suggestions still visible in GitHub Checks annotations');
         }
       }
+    } else if (isBotVerificationRun) {
+      core.info(' Skipping PR review comments - this is a verification run (prevents duplicate comments)');
     }
     
     // Create GitHub Check with all performance issues (not just HTTP/DOM)
     // This makes performance analysis visible in PR Checks tab alongside ESLint, build, etc.
     // IMPORTANT: Use the latest commit SHA (after auto-fixes were pushed)
     // Pass postedReviewComments to customize annotation messages
-    if (autoFixSuggestions?.enabled) {
+    // SKIP on verification run to prevent duplicate annotations (HTTP/DOM issues would appear twice)
+    if (!isBotVerificationRun && autoFixSuggestions?.enabled) {
       core.info(' Creating comprehensive performance check...');
       try {
         // If auto-fixes were pushed, fetch the latest commit from GitHub to ensure sync
