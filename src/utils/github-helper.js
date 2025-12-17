@@ -151,15 +151,33 @@ export function filterResultsToPRFiles(results, prFiles) {
   // Filter custom function issues to only files in PR diff
   // Show ALL issues (error + warning) - in PR mode, everything must be fixed
   if (filtered.customFunctions?.newIssues) {
-    filtered.customFunctions.newIssues = filtered.customFunctions.newIssues.filter(issue =>
-      prFiles.includes(issue.file)
-    );
+    const beforeCount = filtered.customFunctions.newIssues.length;
+    filtered.customFunctions.newIssues = filtered.customFunctions.newIssues.filter(issue => {
+      const isInPR = prFiles.includes(issue.file);
+      if (!isInPR) {
+        console.log(`  ✗ Filtered out custom function issue in ${issue.file} (not in PR diff)`);
+      }
+      return isInPR;
+    });
+    const afterCount = filtered.customFunctions.newIssues.length;
+    if (beforeCount > afterCount) {
+      console.log(`  Filtered custom function newIssues: ${beforeCount} → ${afterCount} (removed ${beforeCount - afterCount})`);
+    }
   }
   
   if (filtered.customFunctions?.after?.issues) {
-    filtered.customFunctions.after.issues = filtered.customFunctions.after.issues.filter(issue =>
-      prFiles.includes(issue.file)
-    );
+    const beforeCount = filtered.customFunctions.after.issues.length;
+    filtered.customFunctions.after.issues = filtered.customFunctions.after.issues.filter(issue => {
+      const isInPR = prFiles.includes(issue.file);
+      if (!isInPR) {
+        console.log(`  ✗ Filtered out custom function issue in ${issue.file} (not in PR diff)`);
+      }
+      return isInPR;
+    });
+    const afterCount = filtered.customFunctions.after.issues.length;
+    if (beforeCount > afterCount) {
+      console.log(`  Filtered custom function after.issues: ${beforeCount} → ${afterCount} (removed ${beforeCount - afterCount})`);
+    }
   }
   
   // NOTE: HTML issues are URL-based (not file-based), always shown in PR mode

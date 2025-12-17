@@ -337,7 +337,23 @@ async function runPRMode(context, octokit, patOctokit, config) {
   core.info(`  PR modified ${prFiles.length} file(s):`);
   prFiles.forEach(f => core.info(`    - ${f}`));
   
+  // Log counts before filtering
+  const beforeFilterCounts = {
+    customFunctions: results.customFunctions?.newIssues?.length || 0,
+    css: results.formCSS?.newIssues?.length || 0,
+    formEvents: results.formEvents?.newIssues?.length || 0
+  };
+  core.info(`  Before filtering: ${beforeFilterCounts.customFunctions} custom function issues, ${beforeFilterCounts.css} CSS issues, ${beforeFilterCounts.formEvents} form event issues`);
+  
   results = filterResultsToPRFiles(results, prFiles);
+  
+  // Log counts after filtering
+  const afterFilterCounts = {
+    customFunctions: results.customFunctions?.newIssues?.length || 0,
+    css: results.formCSS?.newIssues?.length || 0,
+    formEvents: results.formEvents?.newIssues?.length || 0
+  };
+  core.info(`  After filtering: ${afterFilterCounts.customFunctions} custom function issues, ${afterFilterCounts.css} CSS issues, ${afterFilterCounts.formEvents} form event issues`);
   core.info(` Filtered to issues in PR diff files only`);
 
   // Check for critical performance issues BEFORE posting report
@@ -743,15 +759,21 @@ function detectCriticalIssues(results) {
     critical.issues.push(`${results.hiddenFields.newIssues.length} unnecessary hidden field(s)`);
   }
 
-  // 7. Custom function issues (ALL issues in PR mode are critical - must fix)
+  // 7. Custom function runtime errors and other issues
+  // NOTE: DOM and HTTP are already counted in section #3 above, don't double-count
   if (results.customFunctions?.newIssues && results.customFunctions.newIssues.length > 0) {
     critical.hasCritical = true;
     
     // Break down by type
     const runtimeErrors = results.customFunctions.newIssues.filter(i => i.type === 'runtime-error-in-custom-function');
-    const otherIssues = results.customFunctions.newIssues.length - runtimeErrors.length;
+    const domAccessIssues = results.customFunctions.newIssues.filter(i => i.type === 'dom-access-in-custom-function');
+    const httpRequestIssues = results.customFunctions.newIssues.filter(i => i.type === 'http-request-in-custom-function');
     
-    critical.count += results.customFunctions.newIssues.length;
+    // Other issues = everything except runtime, DOM, HTTP (to avoid double counting)
+    const otherIssues = results.customFunctions.newIssues.length - runtimeErrors.length - domAccessIssues.length - httpRequestIssues.length;
+    
+    // Only count runtime errors and "other" here (DOM/HTTP already counted above)
+    critical.count += runtimeErrors.length + otherIssues;
     
     if (runtimeErrors.length > 0) {
       critical.issues.push(`${runtimeErrors.length} custom function(s) with runtime errors`);

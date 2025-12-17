@@ -2917,50 +2917,56 @@ See AI-generated fix in PR comments.`,
     }
     
     // 3. HTTP requests in custom functions
+    // Only create annotations for files that have inline comments (in PR diff)
     if (suggestions) {
       suggestions
         .filter(s => s.type === 'custom-function-http-fix')
         .forEach(fix => {
-          // Check if this file has a line-level comment (file was in PR diff)
+          // Only create annotation if file has a line-level comment (file was in PR diff)
           const hasLineComment = reviewComments.some(rc => rc.file === fix.file && rc.line === fix.line);
           
-          const message = hasLineComment
-            ? `${fix.description}\n\n**✅ One-Click Fix Available**\n→ Scroll down to line ${fix.line} in this file\n→ Click on inline comment to see "Apply suggestion" button`
-            : `${fix.description}\n\n**📝 Manual Fix Required**\n→ Click "Show more" below for AI-generated refactored code\n→ Copy code and apply manually\n⚠️ File not in PR diff - cannot use "Apply suggestion"`;
-          
-          criticalIssues.push({
-            path: fix.file,
-            start_line: fix.line || 1,
-            end_line: fix.line || 1,
-            annotation_level: 'failure',
-            title: `HTTP Request in ${fix.functionName}()`,
-            message,
-            raw_details: fix.refactoredCode ? `AI-suggested refactoring:\n\n${fix.refactoredCode}` : undefined
-          });
+          if (hasLineComment) {
+            const message = `${fix.description}\n\n**✅ Fix Available Below**\n→ Scroll down to line ${fix.line} in this file\n→ View inline comment for guidance`;
+            
+            criticalIssues.push({
+              path: fix.file,
+              start_line: fix.line || 1,
+              end_line: fix.line || 1,
+              annotation_level: 'failure',
+              title: `HTTP Request in ${fix.functionName}()`,
+              message
+            });
+          } else {
+            // File not in PR diff - skip annotation (already filtered)
+            core.info(`  Skipped annotation for ${fix.file} (not in PR diff)`);
+          }
         });
     }
     
     // 4. DOM access in custom functions
+    // Only create annotations for files that have inline comments (in PR diff)
     if (suggestions) {
       suggestions
         .filter(s => s.type === 'custom-function-dom-fix')
         .forEach(fix => {
-          // Check if this file has a line-level comment (file was in PR diff)
+          // Only create annotation if file has a line-level comment (file was in PR diff)
           const hasLineComment = reviewComments.some(rc => rc.file === fix.file && rc.line === fix.line);
           
-          const message = hasLineComment
-            ? `${fix.description}\n\n**✅ One-Click Fix Available**\n→ Scroll down to line ${fix.line} in this file\n→ Click on inline comment to see "Apply suggestion" button`
-            : `${fix.description}\n\n**📝 Manual Fix Required**\n→ Click "Show more" below for AI-generated refactored code\n→ Copy code and apply manually\n⚠️ File not in PR diff - cannot use "Apply suggestion"`;
-          
-          criticalIssues.push({
-            path: fix.file,
-            start_line: fix.line || 1,
-            end_line: fix.line || 1,
-            annotation_level: 'failure',
-            title: `DOM Access in ${fix.functionName}()`,
-            message,
-            raw_details: fix.refactoredCode ? `AI-suggested refactoring:\n\n${fix.refactoredCode}` : undefined
-          });
+          if (hasLineComment) {
+            const message = `${fix.description}\n\n**✅ Fix Available Below**\n→ Scroll down to line ${fix.line} in this file\n→ View inline comment for guidance`;
+            
+            criticalIssues.push({
+              path: fix.file,
+              start_line: fix.line || 1,
+              end_line: fix.line || 1,
+              annotation_level: 'failure',
+              title: `DOM Access in ${fix.functionName}()`,
+              message
+            });
+          } else {
+            // File not in PR diff - skip annotation (already filtered)
+            core.info(`  Skipped annotation for ${fix.file} (not in PR diff)`);
+          }
         });
     }
     
