@@ -1714,6 +1714,7 @@ ${fieldNames.length > 5 ? `\n...and ${fieldNames.length - 5} more` : ''}
         functionName: issue.functionName,
         file: issue.file,
         line: issue.line || 1,
+        details: issue.details || [], // Pass through specific HTTP request details
         title: `Move HTTP request from ${issue.functionName}() to form-level API call`,
         description: `Custom function "${issue.functionName}()" makes direct HTTP requests. This bypasses error handling, loading states, and retry logic.\n\n**FIX:** (1) Refactor function to remove request() call, (2) Use **Visual Rule Editor** to create API Integration (invoke service/HTTP request rule) in form events.`,
         guidance: `
@@ -1747,6 +1748,7 @@ ${fieldNames.length > 5 ? `\n...and ${fieldNames.length - 5} more` : ''}
         functionName: issue.functionName,
         file: issue.file,
         line: issue.line || 1,
+        details: issue.details || [], // Pass through specific DOM access details
         title: `Move DOM access from ${issue.functionName}() to custom component`,
         description: `Custom function "${issue.functionName}()" directly manipulates DOM. This breaks AEM Forms architecture and causes maintenance issues.\n\n**FIX:** (1) Refactor function to use setProperty() for STATE only, (2) Move DOM manipulation to custom component where it reads state and updates DOM.`,
         guidance: `
@@ -2856,181 +2858,6 @@ Respond with ONLY the JSON object containing the COMPLETE function code, no mark
   }
 
   /**
-   * Create comprehensive GitHub Check with all performance issues
-   * Shows up alongside ESLint, build checks in PR Checks tab
-   * 
-   * @param {Array} reviewComments - Successfully posted line-level comments (to customize messaging)
-   * @param {Array} autoFixedFiles - List of files that were successfully auto-fixed (to exclude from annotations)
-   */
-  createPerformanceCheck = async (results, suggestions, octokit, owner, repo, prNumber, commitSha, reviewComments = [], autoFixedFiles = []) => {
-    const annotations = [];
-    
-    // Collect all critical issues as annotations
-    const criticalIssues = [];
-    
-    // Normalize auto-fixed file paths for comparison
-    const autoFixedSet = new Set(autoFixedFiles.map(f => f.replace(/^\/+/, '')));
-    
-    // 1. CSS @import issues (critical errors)
-    // SKIP if file was auto-fixed (annotations would point to old line numbers)
-    if (results.formCSS?.newIssues) {
-      results.formCSS.newIssues
-        .filter(i => i.type === 'css-import-blocking')
-        .filter(i => !autoFixedSet.has(i.file.replace(/^\/+/, ''))) // Exclude auto-fixed files
-        .forEach(issue => {
-          criticalIssues.push({
-            path: issue.file,
-            start_line: issue.line || 1,
-            end_line: issue.line || 1,
-            annotation_level: 'failure',
-            title: 'Blocking CSS @import',
-            message: `${issue.message}\n\nFix: Bundle CSS during build or use <link> tag in HTML.`,
-          });
-        });
-    }
-    
-    // 2. CSS background-image issues (critical errors)
-    // SKIP if file was auto-fixed (annotations would point to old line numbers)
-    if (results.formCSS?.newIssues) {
-      results.formCSS.newIssues
-        .filter(i => i.type === 'css-background-image')
-        .filter(i => !autoFixedSet.has(i.file.replace(/^\/+/, ''))) // Exclude auto-fixed files
-        .forEach(issue => {
-          criticalIssues.push({
-            path: issue.file,
-            start_line: issue.line || 1,
-            end_line: issue.line || 1,
-            annotation_level: 'failure',
-            title: 'CSS background-image blocks page rendering',
-            message: `${issue.message}
-
-WHY THIS IS AN ISSUE:
-• CSS background-image loads immediately (cannot use lazy loading)
-• Browser's loading="lazy" attribute ONLY works on <img> tags
-• Image loads even if user never scrolls to it
-• Blocks page rendering and hurts Core Web Vitals
-
-FIX: Replace with <img loading="lazy"> for lazy loading and better performance.
-See AI-generated fix in PR comments.`,
-          });
-        });
-    }
-    
-    // 3. HTTP requests in custom functions
-    // Only create annotations for files that have inline comments (in PR diff)
-    if (suggestions) {
-      suggestions
-        .filter(s => s.type === 'custom-function-http-fix')
-        .forEach(fix => {
-          // Only create annotation if file has a line-level comment (file was in PR diff)
-          const hasLineComment = reviewComments.some(rc => rc.file === fix.file && rc.line === fix.line);
-          
-          if (hasLineComment) {
-            const message = `${fix.description}\n\n**✅ Fix Available Below**\n→ Scroll down to line ${fix.line} in this file\n→ View inline comment for guidance`;
-            
-            criticalIssues.push({
-              path: fix.file,
-              start_line: fix.line || 1,
-              end_line: fix.line || 1,
-              annotation_level: 'failure',
-              title: `HTTP Request in ${fix.functionName}()`,
-              message
-            });
-          } else {
-            // File not in PR diff - skip annotation (already filtered)
-            core.info(`  Skipped annotation for ${fix.file} (not in PR diff)`);
-          }
-        });
-    }
-    
-    // 4. DOM access in custom functions
-    // Only create annotations for files that have inline comments (in PR diff)
-    if (suggestions) {
-      suggestions
-        .filter(s => s.type === 'custom-function-dom-fix')
-        .forEach(fix => {
-          // Only create annotation if file has a line-level comment (file was in PR diff)
-          const hasLineComment = reviewComments.some(rc => rc.file === fix.file && rc.line === fix.line);
-          
-          if (hasLineComment) {
-            const message = `${fix.description}\n\n**✅ Fix Available Below**\n→ Scroll down to line ${fix.line} in this file\n→ View inline comment for guidance`;
-            
-            criticalIssues.push({
-              path: fix.file,
-              start_line: fix.line || 1,
-              end_line: fix.line || 1,
-              annotation_level: 'failure',
-              title: `DOM Access in ${fix.functionName}()`,
-              message
-            });
-          } else {
-            // File not in PR diff - skip annotation (already filtered)
-            core.info(`  Skipped annotation for ${fix.file} (not in PR diff)`);
-          }
-        });
-    }
-    
-    // 5. Slow rules
-    if (results.ruleCycles?.after?.slowRules?.length > 0) {
-      results.ruleCycles.after.slowRules.slice(0, 10).forEach(rule => {
-        criticalIssues.push({
-          path: 'form.json',
-          start_line: 1,
-          end_line: 1,
-          annotation_level: 'warning',
-          title: `Slow Rule: ${rule.field}`,
-          message: `Rule execution took ${rule.duration}ms (threshold: 50ms)\n\nExpression: ${rule.expression}\n\nOptimize rule logic to improve form responsiveness.`,
-        });
-      });
-    }
-    
-    try {
-      const conclusion = criticalIssues.length > 0 ? 'action_required' : 'success';
-      
-      core.info(`  Annotations prepared: ${criticalIssues.length}`);
-      if (criticalIssues.length > 0) {
-        criticalIssues.slice(0, 5).forEach((ann, i) => {
-          core.info(`    ${i + 1}. ${ann.path}:${ann.start_line} - ${ann.title}`);
-        });
-      }
-      
-      const checkPayload = {
-        owner,
-        repo,
-        name: 'AEM Forms Performance Analysis',
-        head_sha: commitSha,
-        status: 'completed',
-        conclusion,
-        output: {
-          title: criticalIssues.length > 0 
-            ? `${criticalIssues.length} Performance Issue(s) Found` 
-            : 'All Performance Checks Passed',
-          summary: criticalIssues.length > 0
-            ? `Found ${criticalIssues.length} performance issue(s). Review annotations below for AI-powered fix suggestions.`
-            : 'No critical performance issues detected. Form meets performance best practices.',
-          annotations: criticalIssues.slice(0, 50) // GitHub limit: 50 annotations per check
-        }
-      };
-      
-      core.info(`  Sending check to GitHub API...`);
-      const checkResponse = await octokit.rest.checks.create(checkPayload);
-      
-      core.info(`  ✅ Check created successfully!`);
-      core.info(`     Name: ${checkResponse.data.name}`);
-      core.info(`     ID: ${checkResponse.data.id}`);
-      core.info(`     URL: ${checkResponse.data.html_url}`);
-      core.info(`     Conclusion: ${conclusion}`);
-      core.info(`     Annotations: ${criticalIssues.length}`);
-      core.info(`  View in: PR → Checks tab → "AEM Forms Performance Analysis" (left sidebar)`);
-      
-    } catch (error) {
-      core.warning(` Failed to create performance check: ${error.message}`);
-      core.warning(`  Status: ${error.status}`);
-      core.warning(`  Response: ${JSON.stringify(error.response?.data || {})}`);
-    }
-  }
-
-  /**
    * Post PR review comments and check annotations with AI suggestions
    * Uses BOTH:
    * 1. GitHub Checks API (annotations) - Works for ALL files, even not in PR diff
@@ -3147,8 +2974,23 @@ See AI-generated fix in PR comments.`,
     if (fix.type === 'custom-function-http-fix') {
       lines.push(`##  HTTP Request in Custom Function`);
       lines.push('');
-      lines.push(`**Issue:** Function \`${fix.functionName}()\` makes direct HTTP request - this bypasses form's error handling and loading states.`);
+      
+      // Show specific HTTP requests found
+      if (fix.details && Array.isArray(fix.details) && fix.details.length > 0) {
+        const count = fix.details.length;
+        lines.push(`**Issue:** Function \`${fix.functionName}()\` makes ${count} HTTP request${count > 1 ? 's' : ''}:`);
+        lines.push('');
+        fix.details.slice(0, 5).forEach(detail => {
+          lines.push(`- \`${detail.type}()\`${detail.line ? ` at line ${detail.line}` : ''}`);
+        });
+        if (fix.details.length > 5) {
+          lines.push(`- ... and ${fix.details.length - 5} more`);
+        }
+      } else {
+        lines.push(`**Issue:** Function \`${fix.functionName}()\` makes direct HTTP request.`);
+      }
       lines.push('');
+      
       // NO ```suggestion syntax - guidance only (no code to apply)
       if (fix.guidance) {
         lines.push(fix.guidance);
@@ -3157,8 +2999,23 @@ See AI-generated fix in PR comments.`,
     } else if (fix.type === 'custom-function-dom-fix') {
       lines.push(`##  DOM Access in Custom Function`);
       lines.push('');
-      lines.push(`**Issue:** Function \`${fix.functionName}()\` directly manipulates DOM - this breaks form architecture.`);
+      
+      // Show specific DOM accesses found
+      if (fix.details && Array.isArray(fix.details) && fix.details.length > 0) {
+        const count = fix.details.length;
+        lines.push(`**Issue:** Function \`${fix.functionName}()\` has ${count} DOM access${count > 1 ? 'es' : ''}:`);
+        lines.push('');
+        fix.details.slice(0, 5).forEach(detail => {
+          lines.push(`- \`${detail.type}\`${detail.line ? ` at line ${detail.line}` : ''}`);
+        });
+        if (fix.details.length > 5) {
+          lines.push(`- ... and ${fix.details.length - 5} more`);
+        }
+      } else {
+        lines.push(`**Issue:** Function \`${fix.functionName}()\` directly manipulates DOM.`);
+      }
       lines.push('');
+      
       // NO ```suggestion syntax - guidance only (no code to apply)
       if (fix.guidance) {
         lines.push(fix.guidance);
