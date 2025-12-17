@@ -37,7 +37,9 @@ export class FormPRReporter {
     const sections = [];
 
     // Header with issue count
-    const critical = this.countCriticalIssues(results);
+    // If postedInlineComments is available, count only those (accurate count of files in PR diff)
+    // Otherwise, count all newIssues (fallback for scheduled mode)
+    const critical = this.countCriticalIssues(results, urls.postedInlineComments);
     
     if (critical === 0) {
       sections.push('## Performance Analysis\n');
@@ -1063,8 +1065,19 @@ export class FormPRReporter {
 
   /**
    * Count critical issues
+   * @param {Object} results - All analyzer results
+   * @param {Array} postedInlineComments - Successfully posted inline comments (if available)
+   * @returns {number} Count of critical issues
    */
-  countCriticalIssues(results) {
+  countCriticalIssues(results, postedInlineComments = null) {
+    // If we have postedInlineComments, count only those (accurate count of files in PR diff)
+    if (postedInlineComments && Array.isArray(postedInlineComments)) {
+      // Count unique functions/files that got inline comments posted
+      // This is the ACCURATE count of issues in PR diff files
+      return postedInlineComments.length;
+    }
+    
+    // Fallback: Count all newIssues (for scheduled mode or if inline comments not available)
     // In PR mode, count ONLY issues in PR diff files (newIssues arrays)
     // These are already filtered by filterResultsToPRFiles()
     let count = 0;

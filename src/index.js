@@ -404,22 +404,9 @@ async function runPRMode(context, octokit, patOctokit, config) {
     }
   }
   
-  // Generate and post minimal PR comment (NO HTML report link in PR mode)
-  // HTML reports are only for scheduled scans (full codebase analysis)
-  // PR mode only shows issues in PR diff files via inline comments
-  const reporter = new FormPRReporter(octokit, owner, repo, prNumber);
-  await reporter.generateReport(results, {
-    before: urls.before,
-    after: urls.after,
-    beforeData, // Include performance metrics
-    afterData,  // Include performance metrics
-    autoFixSuggestions, // Include AI-generated fix suggestions
-    gistUrl: null, // No HTML report in PR mode
-  }, prNumber, `${owner}/${repo}`);
-  
-  // Post inline PR review comments with suggestions (ALL issues in PR mode are critical)
-  // Note: Results are already filtered to PR diff files only (line 330)
-  // All issues that reach this point are in PR diff files and must be fixed
+  // Post inline PR review comments FIRST to know which ones succeed
+  // Only count issues that have inline comments posted (files in PR diff)
+  let postedInlineComments = [];
   if (autoFixSuggestions?.enabled && autoFixSuggestions.suggestions.length > 0) {
     core.info(` Posting ${autoFixSuggestions.suggestions.length} inline suggestion(s)...`);
     try {
@@ -432,6 +419,8 @@ async function runPRMode(context, octokit, patOctokit, config) {
         context.payload.pull_request.head.sha
       );
       
+      postedInlineComments = reviewComments;
+      
       if (reviewComments.length > 0) {
         core.info(` Posted ${reviewComments.length} inline suggestion(s) on PR`);
       } else {
@@ -441,6 +430,21 @@ async function runPRMode(context, octokit, patOctokit, config) {
       core.warning(` Failed to post PR review comments: ${error.message}`);
     }
   }
+  
+  // Generate and post minimal PR comment (NO HTML report link in PR mode)
+  // HTML reports are only for scheduled scans (full codebase analysis)
+  // PR mode only shows issues in PR diff files via inline comments
+  // Count ONLY issues that have inline comments posted
+  const reporter = new FormPRReporter(octokit, owner, repo, prNumber);
+  await reporter.generateReport(results, {
+    before: urls.before,
+    after: urls.after,
+    beforeData, // Include performance metrics
+    afterData,  // Include performance metrics
+    autoFixSuggestions, // Include AI-generated fix suggestions
+    gistUrl: null, // No HTML report in PR mode
+    postedInlineComments, // Pass successfully posted inline comments for accurate counting
+  }, prNumber, `${owner}/${repo}`);
 
   // Fail the build if critical issues are detected
   if (criticalIssues.hasCritical) {
