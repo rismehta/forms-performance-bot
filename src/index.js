@@ -1,6 +1,6 @@
 import * as core from '@actions/core';
 import * as github from '@actions/github';
-import { readdirSync, readFileSync, statSync, writeFileSync } from 'fs';
+import { readdirSync, readFileSync, existsSync, statSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { URLAnalyzer } from './analyzers/url-analyzer.js';
 import { FormAnalyzer } from './analyzers/form-analyzer.js';
@@ -262,12 +262,42 @@ async function runPRMode(context, octokit, patOctokit, config) {
         fn => fn.functionName === error.functionName
       );
       
+      let lineNumber = functionInfo?.line;
+      
+      // If line number not found (function not in static analysis), search file content
+      if (!lineNumber && error.file && error.file !== 'unknown') {
+        try {
+          const filePath = join(process.cwd(), error.file);
+          if (existsSync(filePath)) {
+            const content = readFileSync(filePath, 'utf-8');
+            const lines = content.split('\n');
+            
+            // Search for function definition (supports: function name(), export function name(), const name =)
+            const functionPattern = new RegExp(
+              `(export\\s+)?(async\\s+)?function\\s+${error.functionName}\\s*\\(|` +
+              `(export\\s+)?const\\s+${error.functionName}\\s*=|` +
+              `${error.functionName}\\s*:\\s*(async\\s+)?function`
+            );
+            
+            for (let i = 0; i < lines.length; i++) {
+              if (functionPattern.test(lines[i])) {
+                lineNumber = i + 1; // Convert to 1-indexed
+                core.info(`  Found ${error.functionName} at line ${lineNumber} in ${error.file}`);
+                break;
+              }
+            }
+          }
+        } catch (err) {
+          core.warning(`  Could not search file for ${error.functionName}: ${err.message}`);
+        }
+      }
+      
       return {
         ...error,
         // error.file already has the correct path from RulePerformanceAnalyzer
         // If not present, try to get from customFunctionAnalysis
         file: error.file || functionInfo?.file || 'unknown',
-        line: functionInfo?.line || 1
+        line: lineNumber || 1  // Fallback to 1 only if search fails
       };
     });
     

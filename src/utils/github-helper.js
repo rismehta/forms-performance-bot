@@ -1,6 +1,7 @@
 /**
  * GitHub helper utilities
  */
+import * as core from '@actions/core';
 
 /**
  * Extract before/after URLs from PR description
@@ -152,16 +153,33 @@ export function filterResultsToPRFiles(results, prFiles) {
   // Show ALL issues (error + warning) - in PR mode, everything must be fixed
   if (filtered.customFunctions?.newIssues) {
     const beforeCount = filtered.customFunctions.newIssues.length;
+    
+    // Log all files before filtering
+    if (beforeCount > 0) {
+      core.info(`  Custom function newIssues BEFORE filter (${beforeCount} total):`);
+      filtered.customFunctions.newIssues.forEach(issue => {
+        core.info(`    - ${issue.file} (${issue.functionName}, type: ${issue.type})`);
+      });
+    }
+    
     filtered.customFunctions.newIssues = filtered.customFunctions.newIssues.filter(issue => {
       const isInPR = prFiles.includes(issue.file);
       if (!isInPR) {
-        console.log(`  ✗ Filtered out custom function issue in ${issue.file} (not in PR diff)`);
+        core.info(`  ✗ Filtered out: ${issue.file} - ${issue.functionName} (not in PR diff)`);
       }
       return isInPR;
     });
+    
     const afterCount = filtered.customFunctions.newIssues.length;
+    if (afterCount > 0) {
+      core.info(`  Custom function newIssues AFTER filter (${afterCount} remaining):`);
+      filtered.customFunctions.newIssues.forEach(issue => {
+        core.info(`    ✓ ${issue.file} (${issue.functionName})`);
+      });
+    }
+    
     if (beforeCount > afterCount) {
-      console.log(`  Filtered custom function newIssues: ${beforeCount} → ${afterCount} (removed ${beforeCount - afterCount})`);
+      core.info(`  Filtered custom function newIssues: ${beforeCount} → ${afterCount} (removed ${beforeCount - afterCount})`);
     }
   }
   
@@ -170,13 +188,13 @@ export function filterResultsToPRFiles(results, prFiles) {
     filtered.customFunctions.after.issues = filtered.customFunctions.after.issues.filter(issue => {
       const isInPR = prFiles.includes(issue.file);
       if (!isInPR) {
-        console.log(`  ✗ Filtered out custom function issue in ${issue.file} (not in PR diff)`);
+        core.info(`  ✗ Filtered out (after.issues): ${issue.file} (not in PR diff)`);
       }
       return isInPR;
     });
     const afterCount = filtered.customFunctions.after.issues.length;
     if (beforeCount > afterCount) {
-      console.log(`  Filtered custom function after.issues: ${beforeCount} → ${afterCount} (removed ${beforeCount - afterCount})`);
+      core.info(`  Filtered custom function after.issues: ${beforeCount} → ${afterCount} (removed ${beforeCount - afterCount})`);
     }
   }
   

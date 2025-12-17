@@ -3039,6 +3039,16 @@ See AI-generated fix in PR comments.`,
   postPRReviewComments = async (httpDomFixes, octokit, owner, repo, prNumber, commitSha) => {
     const reviewComments = [];
     
+    // Log what we're about to post
+    core.info(`  Attempting to post ${httpDomFixes.length} inline comment(s):`);
+    const typeBreakdown = {};
+    httpDomFixes.forEach(fix => {
+      typeBreakdown[fix.type] = (typeBreakdown[fix.type] || 0) + 1;
+    });
+    Object.entries(typeBreakdown).forEach(([type, count]) => {
+      core.info(`    - ${type}: ${count}`);
+    });
+    
     // Try PR Review Comments for files in PR diff (gives "Apply suggestion" button)
     for (const fix of httpDomFixes) {
       try {
@@ -3055,19 +3065,20 @@ See AI-generated fix in PR comments.`,
           side: 'RIGHT'
         });
         
-        core.info(`  Posted review comment on ${fix.file}:${fix.line || 1} (file in PR diff)`);
+        core.info(`  ✓ Posted ${fix.type} comment on ${fix.file}:${fix.line || 1} (${fix.functionName || 'N/A'})`);
         reviewComments.push(fix);
         
       } catch (error) {
         // If file is not in PR diff, GitHub returns 422
         if (error.status === 422) {
-          core.info(`  File ${fix.file} not in PR diff - annotation in "Checks" tab instead`);
+          core.info(`  ✗ File ${fix.file} not in PR diff - ${fix.type} for ${fix.functionName || 'N/A'} skipped`);
         } else {
-          core.warning(`  Failed to post comment on ${fix.file}: ${error.message}`);
+          core.warning(`  ✗ Failed to post comment on ${fix.file}: ${error.message}`);
         }
       }
     }
     
+    core.info(`  Summary: ${reviewComments.length} inline comment(s) posted successfully`);
     return { reviewComments };
   }
   
