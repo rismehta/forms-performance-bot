@@ -1717,65 +1717,15 @@ ${fieldNames.length > 5 ? `\n...and ${fieldNames.length - 5} more` : ''}
         title: `Move HTTP request from ${issue.functionName}() to form-level API call`,
         description: `Custom function "${issue.functionName}()" makes direct HTTP requests. This bypasses error handling, loading states, and retry logic.\n\n**FIX:** (1) Refactor function to remove request() call, (2) Use **Visual Rule Editor** to create API Integration (invoke service/HTTP request rule) in form events.`,
         guidance: `
-**Current (ANTI-PATTERN):**
-\`\`\`javascript
-// In ${issue.file}:
-export function ${issue.functionName}(...args) {
-  // Direct HTTP call in custom function
-  const response = await fetch(...);  // or axios(), etc.
-  return response;
-}
-\`\`\`
+**Action Required:**
 
-**Recommended Fix: Use Form-Level Request API**
+1. Remove HTTP calls (fetch/request/axios) from this function
+2. Use **Visual Rule Editor** to add API Integration:
+   - Select field → Add Rule → When "Value Changes" → Then "Invoke Service"
+   - Configure the request endpoint in the rule editor
+   - Form handles loading states, retries, and encryption automatically
 
-**Option A: Move to event support via Visual Rule Editor (Recommended)**
-\`\`\`javascript
-// In form JSON - field events (set via Visual Rule Editor):
-"events": {
-  "change": [
-    "request(externalize('/api/endpoint'), 'POST', {data: $field.$value})"
-  ]
-}
-\`\`\`
-
-**How to set in Visual Rule Editor:**
-1. Select field in form editor
-2. Add Rule → When "Value Changes"
-3. Then "Invoke Service" → Configure request()
-4. Service returns data and updates form automatically
-
-**Option B: Trigger via custom event (For complex logic)**
-\`\`\`javascript
-// In form JSON - define custom event with request():
-"events": {
-  "custom:fetchData": [
-    "request(externalize('/api/endpoint'), 'POST', encrypt({data: $field.$value}))"
-  ]
-}
-
-// In custom function - trigger the event instead of calling request():
-export function ${issue.functionName}(field, globals) {
-  // Validate/transform data first
-  const processedData = transformData(field.$value);
-  
-  // Trigger form's request handler (don't call request() directly)
-  field.dispatch(new CustomEvent('custom:fetchData', { 
-    detail: processedData 
-  }));
-}
-\`\`\`
-
-**Why form-level request() is better:**
-- Handles loading states automatically (spinner shown to user)
-- Built-in retry logic
-- Proper encryption via encrypt() helper
-- Better debugging and monitoring
-
-**Anti-pattern risks (direct HTTP in custom functions):**
-- No retry on network failure
-- Breaks form's request queue (race conditions)
-- Security: Bypasses encrypt() wrapper
+**Why:** Direct HTTP bypasses form's error handling, loading states, and request queue. Use form-level API integration for reliability.
 `,
         estimatedImpact: 'Improves error handling, adds loading states, enables request queueing'
       });
@@ -1800,79 +1750,14 @@ export function ${issue.functionName}(field, globals) {
         title: `Move DOM access from ${issue.functionName}() to custom component`,
         description: `Custom function "${issue.functionName}()" directly manipulates DOM. This breaks AEM Forms architecture and causes maintenance issues.\n\n**FIX:** (1) Refactor function to use setProperty() for STATE only, (2) Move DOM manipulation to custom component where it reads state and updates DOM.`,
         guidance: `
-**Current (ANTI-PATTERN):**
-\`\`\`javascript
-// In ${issue.file}:
-export function ${issue.functionName}(...args) {
-  // Direct DOM manipulation
-  document.querySelector('.field').style.color = 'red';
-  // or
-  const element = document.getElementById('someId');
-  element.innerHTML = 'Updated';
-}
-\`\`\`
+**Action Required:**
 
-**Recommended Fix: Create Custom Component**
+1. Remove DOM access (document.querySelector, getElementById, innerHTML, etc.) from this function
+2. Create custom component in blocks/form/components/ to handle all DOM updates
+3. Update function to use setProperty() to store STATE/DATA only (not DOM elements)
+4. Component reads state via field properties and updates its own DOM
 
-**Step 1: Create custom component**
-\`\`\`javascript
-// In blocks/form/components/custom-field/custom-field.js:
-class CustomFieldComponent extends HTMLElement {
-  connectedCallback() {
-    this.render();
-  }
-  
-  render() {
-    this.innerHTML = \`
-      <div class="custom-field">
-        <!-- Your custom UI here -->
-      </div>
-    \`;
-  }
-  
-  updateState(newState) {
-    // Component manages its own DOM
-    this.querySelector('.custom-field').textContent = newState;
-  }
-}
-
-customElements.define('custom-field-${issue.functionName}', CustomFieldComponent);
-\`\`\`
-
-**Step 2: Use component in form**
-\`\`\`javascript
-// In form JSON - use custom fieldType:
-{
-  "fieldType": "custom-field-${issue.functionName}",
-  "name": "myCustomField"
-}
-\`\`\`
-
-**Step 3: Interact via setProperty (not DOM)**
-\`\`\`javascript
-// In custom function - use AEM Forms APIs:
-export function ${issue.functionName}(field, newState, globals) {
-  // Update via setProperty (not DOM)
-  globals.functions.setProperty(field, { 
-    value: newState 
-  });
-  
-  // Component automatically re-renders
-}
-\`\`\`
-
-**Why this matters:**
--  Components are self-contained and reusable
--  Proper lifecycle management
--  Works with form validation/rules
--  Easier to test and maintain
--  Follows AEM Forms architecture
-
-**Anti-pattern risks:**
--  DOM changes bypass form's state management
--  Breaks rules/validation that depend on field
--  Hard to debug when things break
--  Doesn't work with form serialization
+**Why:** Direct DOM manipulation bypasses form state management and breaks validation/rules. Move DOM logic to components for proper architecture.
 `,
         estimatedImpact: 'Improves maintainability, enables proper state management, reduces bugs'
       });

@@ -1065,37 +1065,38 @@ export class FormPRReporter {
    * Count critical issues
    */
   countCriticalIssues(results) {
-    // In PR mode, ALL issues are critical (no distinction between error/warning)
+    // In PR mode, count ONLY issues in PR diff files (newIssues arrays)
+    // These are already filtered by filterResultsToPRFiles()
     let count = 0;
     
-    // Form events
-    if (results.formEvents?.after?.apiCallsInInitialize?.length) {
-      count += results.formEvents.after.apiCallsInInitialize.length;
+    // Form events (already filtered to PR)
+    if (results.formEvents?.newIssues?.length) {
+      count += results.formEvents.newIssues.length;
     }
     
-    // Custom functions (all issues)
-    if (results.customFunctions?.after?.issues?.length) {
-      count += results.customFunctions.after.issues.length;
+    // Custom functions (only PR diff files)
+    if (results.customFunctions?.newIssues?.length) {
+      count += results.customFunctions.newIssues.length;
     }
     
-    // CSS (all issues - error + warning)
-    if (results.formCSS?.after?.issues?.length) {
-      count += results.formCSS.after.issues.length;
+    // CSS (only PR diff files)
+    if (results.formCSS?.newIssues?.length) {
+      count += results.formCSS.newIssues.length;
     }
     
-    // HTML (all issues - error + warning)
-    if (results.formHTML?.after?.issues?.length) {
-      count += results.formHTML.after.issues.length;
+    // HTML (only PR diff - URL-based, always shown)
+    if (results.formHTML?.newIssues?.length) {
+      count += results.formHTML.newIssues.length;
     }
     
-    // Rule cycles
-    if (results.ruleCycles?.after?.cycles) {
-      count += results.ruleCycles.after.cycles;
+    // Rule cycles (only if form JSON in PR)
+    if (results.ruleCycles?.newIssues?.length) {
+      count += results.ruleCycles.newIssues.length;
     }
     
-    // Hidden fields
-    if (results.hiddenFields?.after?.unnecessaryHiddenFields) {
-      count += results.hiddenFields.after.unnecessaryHiddenFields;
+    // Hidden fields (only if form JSON in PR)
+    if (results.hiddenFields?.newIssues?.length) {
+      count += results.hiddenFields.newIssues.length;
     }
     
     return count;
