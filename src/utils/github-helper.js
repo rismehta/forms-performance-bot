@@ -15,23 +15,40 @@ export function extractURLsFromPR(prBody) {
 
   if (!prBody) return urls;
 
-  // Pattern 1: "Before: <url>" and "After: <url>"
-  const beforeMatch = prBody.match(/Before:\s*(https?:\/\/[^\s\n]+)/i);
-  const afterMatch = prBody.match(/After:\s*(https?:\/\/[^\s\n]+)/i);
+  // Clean up the PR body (remove markdown formatting, normalize whitespace)
+  const cleanBody = prBody
+    .replace(/\r\n/g, '\n') // Normalize line endings
+    .replace(/\*\*/g, '') // Remove bold
+    .replace(/\*/g, '') // Remove italic
+    .replace(/`/g, ''); // Remove code formatting
 
-  if (beforeMatch) urls.before = beforeMatch[1].trim();
-  if (afterMatch) urls.after = afterMatch[1].trim();
+  // Pattern 1: "Before: <url>" and "After: <url>" (flexible whitespace)
+  // Match URLs that may have trailing slash, query params, etc.
+  const beforeMatch = cleanBody.match(/Before:\s*(https?:\/\/[^\s\n<>]+)/i);
+  const afterMatch = cleanBody.match(/After:\s*(https?:\/\/[^\s\n<>]+)/i);
+
+  if (beforeMatch) {
+    // Clean up trailing punctuation (., /, etc. at the very end)
+    urls.before = beforeMatch[1].trim().replace(/[,;]+$/, '');
+  }
+  if (afterMatch) {
+    urls.after = afterMatch[1].trim().replace(/[,;]+$/, '');
+  }
 
   // Pattern 2: Also try to find URLs in a "Test URLs:" section
   if (!urls.before || !urls.after) {
-    const testURLsSection = prBody.match(/Test URLs?:?\s*([\s\S]*?)(?:\n\n|$)/i);
+    const testURLsSection = cleanBody.match(/Test URLs?:?\s*([\s\S]*?)(?:\n\n|$)/i);
     if (testURLsSection) {
       const section = testURLsSection[1];
-      const beforeMatch2 = section.match(/Before:\s*(https?:\/\/[^\s\n]+)/i);
-      const afterMatch2 = section.match(/After:\s*(https?:\/\/[^\s\n]+)/i);
+      const beforeMatch2 = section.match(/Before:\s*(https?:\/\/[^\s\n<>]+)/i);
+      const afterMatch2 = section.match(/After:\s*(https?:\/\/[^\s\n<>]+)/i);
       
-      if (beforeMatch2 && !urls.before) urls.before = beforeMatch2[1].trim();
-      if (afterMatch2 && !urls.after) urls.after = afterMatch2[1].trim();
+      if (beforeMatch2 && !urls.before) {
+        urls.before = beforeMatch2[1].trim().replace(/[,;]+$/, '');
+      }
+      if (afterMatch2 && !urls.after) {
+        urls.after = afterMatch2[1].trim().replace(/[,;]+$/, '');
+      }
     }
   }
 

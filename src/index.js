@@ -90,11 +90,21 @@ async function runPRMode(context, octokit, patOctokit, config) {
 
   // Extract before/after URLs from PR description
   const prBody = context.payload.pull_request.body || '';
+  core.info(`PR Body length: ${prBody.length} characters`);
+  core.info(`PR Body preview (first 500 chars):\n${prBody.substring(0, 500)}`);
+  
   const urls = extractURLsFromPR(prBody);
 
   if (!urls.before || !urls.after) {
-  core.setFailed('Could not find Before/After URLs in PR description. Expected format:\nTest URLs:\nBefore: <url>\nAfter: <url>');
-  return;
+    core.error('Could not find Before/After URLs in PR description.');
+    core.error(`Found Before URL: ${urls.before || 'null'}`);
+    core.error(`Found After URL: ${urls.after || 'null'}`);
+    core.error('Expected format:');
+    core.error('  Test URLs:');
+    core.error('  Before: https://example.com/before');
+    core.error('  After: https://example.com/after');
+    core.setFailed('Missing Before/After URLs in PR description');
+    return;
   }
 
   core.info(`Before URL: ${urls.before}`);
