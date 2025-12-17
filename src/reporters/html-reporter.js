@@ -912,5 +912,158 @@ export class HTMLReporter {
     if (results.formHTML?.after?.issues?.filter(i => i.severity === 'warning').length) count += results.formHTML.after.issues.filter(i => i.severity === 'warning').length;
     return count;
   }
+
+  /**
+   * Generate scheduled scan HTML report
+   */
+  generateScheduledReport(results, options = {}) {
+    const { repository, analysisUrl, timestamp } = options;
+    const date = new Date(timestamp || Date.now()).toLocaleString();
+    
+    const totalCSSIssues = results.css?.issues?.length || 0;
+    const totalFunctionIssues = results.customFunctions?.issues?.length || 0;
+    const totalFormIssues = results.forms?.issues?.length || 0;
+    const totalRuleIssues = results.rules?.issues?.length || 0;
+    const totalIssues = totalCSSIssues + totalFunctionIssues + totalFormIssues + totalRuleIssues;
+    
+    const criticalCSS = results.css?.issues?.filter(i => i.severity === 'error').length || 0;
+    const criticalFunctions = results.customFunctions?.issues?.filter(i => i.severity === 'error').length || 0;
+    const criticalForms = results.forms?.issues?.filter(i => i.severity === 'error').length || 0;
+    const criticalRules = totalRuleIssues; // All rule cycles are critical
+    const totalCritical = criticalCSS + criticalFunctions + criticalForms + criticalRules;
+    
+    return `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AEM Forms Performance - Daily Scan - ${date}</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }
+    .container { max-width: 1200px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+    h1 { color: #333; border-bottom: 3px solid #0078d4; padding-bottom: 10px; }
+    h2 { color: #0078d4; margin-top: 30px; }
+    .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin: 20px 0; }
+    .summary-card { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 8px; text-align: center; }
+    .summary-card.critical { background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); }
+    .summary-card h3 { margin: 0; font-size: 36px; }
+    .summary-card p { margin: 5px 0 0 0; opacity: 0.9; }
+    .issue-list { margin: 20px 0; }
+    .issue-item { background: #f8f9fa; border-left: 4px solid #dc3545; padding: 15px; margin: 10px 0; border-radius: 4px; }
+    .issue-item.warning { border-left-color: #ffc107; }
+    .issue-item.error { border-left-color: #dc3545; }
+    .meta { color: #666; font-size: 0.9em; margin-top: 30px; padding-top: 20px; border-top: 1px solid #ddd; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>AEM Forms Performance - Daily Codebase Scan</h1>
+    <div class="meta">
+      <strong>Repository:</strong> ${repository || 'Unknown'}<br>
+      <strong>Scan Date:</strong> ${date}<br>
+      ${analysisUrl ? `<strong>Analysis URL:</strong> <a href="${analysisUrl}" target="_blank">${analysisUrl}</a><br>` : ''}
+      <strong>Forms Analyzed:</strong> ${results.forms?.count || 0}
+    </div>
+    
+    <div class="summary">
+      <div class="summary-card">
+        <h3>${totalIssues}</h3>
+        <p>Total Issues</p>
+      </div>
+      <div class="summary-card critical">
+        <h3>${totalCritical}</h3>
+        <p>Critical Issues</p>
+      </div>
+      <div class="summary-card">
+        <h3>${results.css?.filesAnalyzed || 0}</h3>
+        <p>CSS Files Analyzed</p>
+      </div>
+      <div class="summary-card">
+        <h3>${results.forms?.count || 0}</h3>
+        <p>Form Files Analyzed</p>
+      </div>
+    </div>
+    
+    ${totalCSSIssues > 0 ? `
+    <h2>CSS Issues (${totalCSSIssues})</h2>
+    <div class="issue-list">
+      ${results.css.issues.slice(0, 20).map(issue => `
+        <div class="issue-item ${issue.severity || 'warning'}">
+          <strong>${issue.type || 'CSS Issue'}</strong> in <code>${issue.file || 'unknown'}</code><br>
+          ${issue.message || 'No description'}
+        </div>
+      `).join('')}
+      ${results.css.issues.length > 20 ? `<p><em>...and ${results.css.issues.length - 20} more</em></p>` : ''}
+    </div>
+    ` : ''}
+    
+    ${totalFunctionIssues > 0 ? `
+    <h2>Custom Function Issues (${totalFunctionIssues})</h2>
+    <div class="issue-list">
+      ${results.customFunctions.issues.slice(0, 20).map(issue => `
+        <div class="issue-item ${issue.severity || 'warning'}">
+          <strong>${issue.type || 'Function Issue'}</strong> - <code>${issue.functionName || 'unknown'}</code><br>
+          ${issue.message || 'No description'}
+        </div>
+      `).join('')}
+      ${results.customFunctions.issues.length > 20 ? `<p><em>...and ${results.customFunctions.issues.length - 20} more</em></p>` : ''}
+    </div>
+    ` : ''}
+    
+    ${totalRuleIssues > 0 ? `
+    <h2>Rule Cycle Issues (${totalRuleIssues})</h2>
+    <div class="issue-list">
+      ${results.rules.issues.map(issue => `
+        <div class="issue-item error">
+          <strong>Circular Dependency Detected</strong> in <code>${issue.form || 'unknown'}</code><br>
+          ${issue.cycles} cycle(s) found
+          ${issue.details ? `<br><em>${issue.details.map(d => d.fields?.join(' → ')).join(' | ')}</em>` : ''}
+        </div>
+      `).join('')}
+    </div>
+    ` : ''}
+    
+    ${totalFormIssues > 0 ? `
+    <h2>Form Issues (${totalFormIssues})</h2>
+    <div class="issue-list">
+      ${results.forms.issues.slice(0, 20).map(issue => `
+        <div class="issue-item ${issue.severity || 'warning'}">
+          <strong>${issue.type || 'Form Issue'}</strong> in <code>${issue.form || 'unknown'}</code><br>
+          ${issue.message || 'No description'}
+        </div>
+      `).join('')}
+      ${results.forms.issues.length > 20 ? `<p><em>...and ${results.forms.issues.length - 20} more</em></p>` : ''}
+    </div>
+    ` : ''}
+    
+    ${analysisUrl && results.performance ? `
+    <h2>Performance Metrics</h2>
+    <div class="issue-list">
+      <div class="issue-item">
+        <strong>Load Time:</strong> ${results.performance.loadTime}ms<br>
+        <strong>JS Heap Size:</strong> ${Math.round(results.performance.jsHeapSize / 1024 / 1024)}MB<br>
+        <strong>DOM Size:</strong> ${results.html?.domSize || 0} nodes
+      </div>
+    </div>
+    ` : ''}
+    
+    ${totalIssues === 0 ? `
+    <div class="issue-list">
+      <div class="issue-item" style="border-left-color: #28a745;">
+        <strong>No issues found!</strong> Your codebase is looking great.
+      </div>
+    </div>
+    ` : ''}
+    
+    <div class="meta">
+      <p>Generated by <strong>AEM Forms Performance Bot</strong></p>
+      <p><em>This report is sent daily. To modify the schedule or recipients, update your GitHub Actions workflow.</em></p>
+    </div>
+  </div>
+</body>
+</html>
+    `.trim();
+  }
 }
 

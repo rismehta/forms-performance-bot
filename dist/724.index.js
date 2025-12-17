@@ -1,7 +1,19 @@
+export const id = 724;
+export const ids = [724];
+export const modules = {
+
+/***/ 75724:
+/***/ ((__unused_webpack___webpack_module__, __webpack_exports__, __webpack_require__) => {
+
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   sendEmailReport: () => (/* binding */ sendEmailReport)
+/* harmony export */ });
+/* unused harmony export countIssues */
+/* harmony import */ var _actions_core__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(37484);
 /**
  * SendGrid email integration for scheduled reports
  */
-import * as core from '@actions/core';
+
 
 /**
  * Send email report via SendGrid
@@ -10,17 +22,17 @@ import * as core from '@actions/core';
  * @param {Object} options - Email options (repository, analysisUrl, from)
  * @returns {Promise<boolean>} Success status
  */
-export async function sendEmailReport(results, htmlReport, options = {}) {
+async function sendEmailReport(results, htmlReport, options = {}) {
   const apiKey = process.env.SENDGRID_API_KEY;
   const toEmail = process.env.REPORT_EMAIL || 'abc@gmail.com';
   const fromEmail = options.from || 'aemforms-performance-bot@adobe.com';
   
   if (!apiKey) {
-    core.warning('⚠️  SENDGRID_API_KEY not set - skipping email');
-    core.info('  To enable email reports:');
-    core.info('  1. Sign up at https://sendgrid.com (free tier: 100 emails/day)');
-    core.info('  2. Create API key');
-    core.info('  3. Add SENDGRID_API_KEY to repository secrets');
+    _actions_core__WEBPACK_IMPORTED_MODULE_0__.warning('⚠️  SENDGRID_API_KEY not set - skipping email');
+    _actions_core__WEBPACK_IMPORTED_MODULE_0__.info('  To enable email reports:');
+    _actions_core__WEBPACK_IMPORTED_MODULE_0__.info('  1. Sign up at https://sendgrid.com (free tier: 100 emails/day)');
+    _actions_core__WEBPACK_IMPORTED_MODULE_0__.info('  2. Create API key');
+    _actions_core__WEBPACK_IMPORTED_MODULE_0__.info('  3. Add SENDGRID_API_KEY to repository secrets');
     return false;
   }
   
@@ -46,7 +58,7 @@ export async function sendEmailReport(results, htmlReport, options = {}) {
   };
   
   try {
-    core.info(`📧 Sending email to ${toEmail}...`);
+    _actions_core__WEBPACK_IMPORTED_MODULE_0__.info(`📧 Sending email to ${toEmail}...`);
     
     const response = await fetch('https://api.sendgrid.com/v3/mail/send', {
       method: 'POST',
@@ -58,16 +70,16 @@ export async function sendEmailReport(results, htmlReport, options = {}) {
     });
     
     if (response.ok) {
-      core.info(`✅ Email sent successfully to ${toEmail}`);
+      _actions_core__WEBPACK_IMPORTED_MODULE_0__.info(`✅ Email sent successfully to ${toEmail}`);
       return true;
     } else {
       const errorText = await response.text();
-      core.error(`❌ Failed to send email: ${response.status} ${response.statusText}`);
-      core.error(`   Details: ${errorText}`);
+      _actions_core__WEBPACK_IMPORTED_MODULE_0__.error(`❌ Failed to send email: ${response.status} ${response.statusText}`);
+      _actions_core__WEBPACK_IMPORTED_MODULE_0__.error(`   Details: ${errorText}`);
       return false;
     }
   } catch (error) {
-    core.error(`❌ SendGrid API error: ${error.message}`);
+    _actions_core__WEBPACK_IMPORTED_MODULE_0__.error(`❌ SendGrid API error: ${error.message}`);
     return false;
   }
 }
@@ -77,7 +89,7 @@ export async function sendEmailReport(results, htmlReport, options = {}) {
  * @param {Object} results - Analysis results
  * @returns {Object} Issue counts
  */
-export function countIssues(results) {
+function countIssues(results) {
   let totalIssues = 0;
   let criticalIssues = 0;
   
@@ -160,3 +172,8 @@ function countIssuesFromScheduledResults(results) {
   };
 }
 
+
+
+/***/ })
+
+};
