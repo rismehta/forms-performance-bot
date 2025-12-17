@@ -57,14 +57,19 @@ async function run() {
       ? github.getOctokit(tokens.patToken) 
       : octokit;
 
+    // TODO: MODE DETECTION (will be completed in next iteration)
+    // For now, only PR mode is fully implemented
+    // Scheduled mode functions are stubbed out below
+    
     // Verify this is a pull request
     if (!context.payload.pull_request) {
-      core.warning('This action only runs on pull requests');
+      core.warning('This action currently only supports pull request analysis');
+      core.info('Scheduled codebase scan mode is in progress');
       return;
     }
 
     const prNumber = context.payload.pull_request.number;
-    const prBranch = context.payload.pull_request.head.ref; // Feature branch name
+    const prBranch = context.payload.pull_request.head.ref;
     const { owner, repo } = context.repo;
 
     core.info(`Analyzing PR #${prNumber} in ${owner}/${repo}`);
@@ -427,6 +432,28 @@ async function run() {
     core.setFailed(`Performance Bot failed: ${error.message}`);
     core.error(error.stack);
   }
+}
+
+/**
+ * Run PR analysis mode (analyze files in PR diff only)
+ */
+async function runPRMode(context, octokit, patOctokit, config) {
+  // TODO: Extract existing PR logic here
+  // For now, keeping existing inline logic in run()
+  // This will be completed in next iteration
+  core.info('PR mode - using inline implementation');
+}
+
+/**
+ * Run scheduled codebase scan mode (analyze entire codebase)
+ */
+async function runScheduledMode(context, octokit, patOctokit, config) {
+  // TODO: Implement scheduled scan
+  // - Scan all CSS, JS, JSON files
+  // - Optional URL for HTML analysis
+  // - Send email via SendGrid
+  core.info('Scheduled mode - not yet implemented');
+  core.info('This will scan entire codebase and send email report');
 }
 
 /**
