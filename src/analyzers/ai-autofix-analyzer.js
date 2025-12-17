@@ -2441,23 +2441,17 @@ ${fieldNames.length > 5 ? `\n...and ${fieldNames.length - 5} more` : ''}
       issue => issue.type === 'http-request-in-custom-function'
     );
     
-    // PARALLEL: Generate all HTTP fixes at once
-    const httpFixPromises = httpIssues.slice(0, 3).map(async (issue) => {
-      try {
-        const refactoredCode = await this.generateRefactoredCode(issue, 'http');
-        
-        return {
-          type: 'custom-function-http-fix',
-          severity: 'critical',
-          function: issue.functionName,
-          functionName: issue.functionName,
-          file: issue.file,
-          line: issue.line || 1,
-          title: `Move HTTP request from ${issue.functionName}() to form-level API call`,
-          description: `Custom function "${issue.functionName}()" makes direct HTTP requests. This bypasses error handling, loading states, and retry logic.\n\n**FIX:** (1) Refactor function to remove request() call, (2) Use **Visual Rule Editor** to create API Integration (invoke service/HTTP request rule) in form events.`,
-          refactoredCode: refactoredCode.jsCode,
-          formJsonSnippet: refactoredCode.formJsonSnippet,
-          testingSteps: refactoredCode.testingSteps,
+    // HTTP fixes: Static guidance only (NO AI calls)
+    for (const issue of httpIssues.slice(0, 5)) {
+      suggestions.push({
+        type: 'custom-function-http-fix',
+        severity: 'critical',
+        function: issue.functionName,
+        functionName: issue.functionName,
+        file: issue.file,
+        line: issue.line || 1,
+        title: `Move HTTP request from ${issue.functionName}() to form-level API call`,
+        description: `Custom function "${issue.functionName}()" makes direct HTTP requests. This bypasses error handling, loading states, and retry logic.\n\n**FIX:** (1) Refactor function to remove request() call, (2) Use **Visual Rule Editor** to create API Integration (invoke service/HTTP request rule) in form events.`,
         guidance: `
 **Current (ANTI-PATTERN):**
 \`\`\`javascript
@@ -2520,45 +2514,28 @@ export function ${issue.functionName}(field, globals) {
 - Security: Bypasses encrypt() wrapper
 `,
         estimatedImpact: 'Improves error handling, adds loading states, enables request queueing'
-        };
-      } catch (error) {
-        core.warning(`Failed to generate HTTP fix for ${issue.functionName}(): ${error.message}`);
-        return null;
-      }
-    });
+      });
+    }
     
-    const httpResults = await Promise.all(httpFixPromises);
-    suggestions.push(...httpResults.filter(r => r !== null));
+    core.info(`  HTTP fixes: ${suggestions.length} generated (static guidance, no AI)`);
     
     // DOM access in custom functions
     const domIssues = customFunctionsResults.newIssues.filter(
       issue => issue.type === 'dom-access-in-custom-function'
     );
     
-    // PARALLEL: Generate all DOM fixes at once
-    const domFixPromises = domIssues.slice(0, 2).map(async (issue) => {
-      try {
-        // Find relevant component file based on DOM selectors
-        const componentInfo = await this.findRelevantComponent(issue);
-        
-        const refactoredCode = await this.generateRefactoredCode(issue, 'dom', componentInfo);
-        
-        return {
-          type: 'custom-function-dom-fix',
-          severity: 'critical',
-          function: issue.functionName,
-          functionName: issue.functionName,
-          file: issue.file,
-          line: issue.line || 1,
-          componentFile: componentInfo.componentFile,
-          componentPath: componentInfo.componentPath,
-          title: `Move DOM access from ${issue.functionName}() to custom component`,
-          description: `Custom function "${issue.functionName}()" directly manipulates DOM. This breaks AEM Forms architecture and causes maintenance issues.\n\n**FIX:** (1) Refactor function to use setProperty() for STATE only, (2) Move DOM manipulation to custom component where it reads state and updates DOM.`,
-          refactoredCode: refactoredCode.jsCode,
-          componentSuggestion: refactoredCode.componentSuggestion,
-          componentExample: refactoredCode.componentExample,
-          testingSteps: refactoredCode.testingSteps,
-          guidance: `
+    // DOM fixes: Static guidance only (NO AI calls)
+    for (const issue of domIssues.slice(0, 5)) {
+      suggestions.push({
+        type: 'custom-function-dom-fix',
+        severity: 'critical',
+        function: issue.functionName,
+        functionName: issue.functionName,
+        file: issue.file,
+        line: issue.line || 1,
+        title: `Move DOM access from ${issue.functionName}() to custom component`,
+        description: `Custom function "${issue.functionName}()" directly manipulates DOM. This breaks AEM Forms architecture and causes maintenance issues.\n\n**FIX:** (1) Refactor function to use setProperty() for STATE only, (2) Move DOM manipulation to custom component where it reads state and updates DOM.`,
+        guidance: `
 **Current (ANTI-PATTERN):**
 \`\`\`javascript
 // In ${issue.file}:
@@ -2575,7 +2552,7 @@ export function ${issue.functionName}(...args) {
 
 **Step 1: Create custom component**
 \`\`\`javascript
-// In blocks/form/components/${issue.functionName}/
+// In blocks/form/components/custom-field/custom-field.js:
 class CustomFieldComponent extends HTMLElement {
   connectedCallback() {
     this.render();
@@ -2634,15 +2611,10 @@ export function ${issue.functionName}(field, newState, globals) {
 -  Doesn't work with form serialization
 `,
         estimatedImpact: 'Improves maintainability, enables proper state management, reduces bugs'
-        };
-      } catch (error) {
-        core.warning(`Failed to generate DOM fix for ${issue.functionName}(): ${error.message}`);
-        return null;
-      }
-    });
+      });
+    }
     
-    const domResults = await Promise.all(domFixPromises);
-    suggestions.push(...domResults.filter(r => r !== null));
+    core.info(`  DOM fixes: ${suggestions.length - httpIssues.length} generated (static guidance, no AI)`);
     
     return suggestions;
   }
