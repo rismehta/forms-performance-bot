@@ -13,7 +13,7 @@ import { CustomFunctionAnalyzer } from './analyzers/custom-function-analyzer.js'
 import { AIAutoFixAnalyzer } from './analyzers/ai-autofix-analyzer.js';
 import { FormPRReporter } from './reporters/pr-reporter-form.js';
 import { HTMLReporter } from './reporters/html-reporter.js';
-import { extractURLsFromPR } from './utils/github-helper.js';
+import { extractURLsFromPR, getPRDiffFiles, filterResultsToPRFiles } from './utils/github-helper.js';
 import { loadConfig } from './utils/config-loader.js';
 
 /**
@@ -68,41 +68,6 @@ async function run() {
     const { owner, repo } = context.repo;
 
     core.info(`Analyzing PR #${prNumber} in ${owner}/${repo}`);
-    
-    // LOOP PREVENTION: Check if the triggering commit was made by the bot
-    // If yes, run analysis for verification but SKIP auto-fix to prevent infinite loops
-    const triggeringCommit = context.payload.after || context.sha;
-    let isBotVerificationRun = false;
-    
-    core.info(`Checking triggering commit: ${triggeringCommit?.substring(0, 7) || 'unknown'}`);
-    
-    try {
-      const { data: commit } = await octokit.rest.repos.getCommit({
-        owner,
-        repo,
-        ref: triggeringCommit
-      });
-      
-      const commitMessage = commit.commit.message;
-      const commitAuthor = commit.commit.author.name;
-      
-      // Check if commit was made by the bot (either by commit message or author)
-      isBotVerificationRun = commitMessage.includes('[bot]') || 
-                             commitAuthor.includes('Performance Bot') ||
-                             commitAuthor.includes('github-actions');
-      
-      if (isBotVerificationRun) {
-        core.info(`ℹ️ Verification run detected - bot commit triggered this workflow`);
-        core.info(`  Commit: ${commitMessage.split('\n')[0]}`);
-        core.info(`  Author: ${commitAuthor}`);
-        core.info(`  Will run analysis to verify fixes, but SKIP auto-fix phase (prevents infinite loops)`);
-      } else {
-        core.info(`✓ User commit detected - proceeding with full analysis + auto-fix`);
-      }
-    } catch (error) {
-      core.warning(`Could not check triggering commit: ${error.message}`);
-      core.info(`Proceeding with analysis anyway...`);
-    }
 
     // Extract before/after URLs from PR description
     const prBody = context.payload.pull_request.body || '';
@@ -328,7 +293,7 @@ async function run() {
       customFunctionAnalysis.after.runtimeErrorCount = ruleCycleAnalysis.after.runtimeErrorCount;
     }
 
-    const results = {
+    let results = {
       formStructure: formStructureAnalysis,
       formEvents: formEventsAnalysis,
       hiddenFields: hiddenFieldsAnalysis,
@@ -337,6 +302,15 @@ async function run() {
       formCSS: formCSSAnalysis,
       customFunctions: customFunctionAnalysis,
     };
+
+    // FILTER results to PR diff files only
+    core.info(' Filtering results to PR diff files only...');
+    const prFiles = await getPRDiffFiles(octokit, owner, repo, prNumber);
+    core.info(`  PR modified ${prFiles.length} file(s):`);
+    prFiles.forEach(f => core.info(`    - ${f}`));
+    
+    results = filterResultsToPRFiles(results, prFiles);
+    core.info(` Filtered to issues in PR diff files only`);
 
     // Check for critical performance issues BEFORE posting report
     const criticalIssues = detectCriticalIssues(results);
@@ -356,49 +330,6 @@ async function run() {
       }
     }
     
-    // APPLY AUTO-FIXES TO CURRENT PR (commit directly to the same PR)
-    // SKIP if this is a bot verification run (prevents infinite loops)
-    let autoFixCommit = null;
-    let autoFixFailureReason = null;
-    
-    if (isBotVerificationRun) {
-      core.info(' Skipping auto-fix phase - this is a verification run after bot commit');
-      core.info('   This prevents infinite loops where auto-fixes trigger new workflow runs');
-      autoFixFailureReason = 'Verification run (skipped auto-fix to prevent infinite loops)';
-    } else if (autoFixSuggestions.enabled && autoFixSuggestions.suggestions.length > 0) {
-      core.info(' Applying auto-fixes to current PR...');
-      try {
-        autoFixCommit = await aiAutoFixAnalyzer.applyFixesToCurrentPR(
-          autoFixSuggestions.suggestions,
-          patOctokit,  // Use PAT for pushing commits
-          owner,
-          repo,
-          prBranch  // Commit to the feature branch itself
-        );
-        
-        if (autoFixCommit) {
-          core.info(` Auto-fixes committed: ${autoFixCommit.sha.substring(0, 7)}`);
-          core.info(`  Files changed: ${autoFixCommit.filesChanged}`);
-          core.info(`  Commit message: "${autoFixCommit.message}"`);
-        } else {
-          core.info(' No trivial fixes available to auto-commit');
-          autoFixFailureReason = 'No auto-fixable issues (HTTP/DOM fixes require manual review)';
-        }
-      } catch (error) {
-        core.warning(` Could not apply auto-fixes: ${error.message}`);
-        autoFixFailureReason = error.message;
-        
-        // Distinguish between different failure types
-        if (error.message.includes('rebase') || error.message.includes('conflict')) {
-          autoFixFailureReason = 'Push failed due to rebase conflict. Please manually merge and re-run.';
-        } else if (error.message.includes('permission') || error.message.includes('authentication')) {
-          autoFixFailureReason = 'Push failed due to permission issues. Check PAT_TOKEN configuration.';
-        } else if (error.message.includes('protected branch')) {
-          autoFixFailureReason = 'Cannot auto-commit to protected branch (main/master).';
-        }
-      }
-    }
-    
     // Generate HTML report (for GitHub artifact)
     core.info(' Generating detailed HTML report...');
     const htmlReporter = new HTMLReporter();
@@ -407,7 +338,7 @@ async function run() {
       after: urls.after,
       beforeData,
       afterData
-    }, prNumber, `${owner}/${repo}`, autoFixCommit, autoFixFailureReason);
+    }, prNumber, `${owner}/${repo}`);
     
     // Save HTML report to file (will be uploaded as artifact)
     const reportPath = join(process.cwd(), 'performance-report.html');
@@ -449,7 +380,6 @@ async function run() {
     }
     
     // Generate and post minimal PR comment (with link to gist and artifact)
-    // On verification run, this updates the status (e.g., "issues fixed")
     const reporter = new FormPRReporter(octokit, owner, repo, prNumber);
     await reporter.generateReport(results, {
       before: urls.before,
@@ -457,105 +387,29 @@ async function run() {
       beforeData, // Include performance metrics
       afterData,  // Include performance metrics
       autoFixSuggestions, // Include AI-generated fix suggestions
-      autoFixCommit, // Include auto-fix commit details
       gistUrl, // Direct browser link to HTML report
-      isVerificationRun: isBotVerificationRun, // Flag for updating existing comment
     }, prNumber, `${owner}/${repo}`);
     
-    // Post PR review comments on specific lines for HTTP/DOM fixes FIRST
-    // (so we know which files have line-level comments for the GitHub Check)
-    // SKIP on bot verification run to prevent duplicate comments
-    let postedReviewComments = [];
-    if (!isBotVerificationRun && autoFixSuggestions?.enabled && autoFixSuggestions.suggestions.length > 0) {
-      const httpDomFixes = autoFixSuggestions.suggestions.filter(s =>
-        s.type === 'custom-function-http-fix' || s.type === 'custom-function-dom-fix'
-      );
-      
-      if (httpDomFixes.length > 0) {
-        core.info(` Posting ${httpDomFixes.length} line-level PR review comment(s)...`);
-        try {
-          const { reviewComments } = await aiAutoFixAnalyzer.postPRReviewComments(
-            httpDomFixes,
-            octokit,
-            owner,
-            repo,
-            prNumber,
-            context.payload.pull_request.head.sha
-          );
-          
-          postedReviewComments = reviewComments;
-          
-          if (reviewComments.length > 0) {
-            core.info(` Posted ${reviewComments.length} line-level suggestion(s) on PR`);
-          } else {
-            core.info(' No line-level comments posted (files not in PR diff)');
-            core.info('   ✓ Annotations visible in: PR → Checks tab → "AEM Forms Performance Analysis"');
-            core.info('   ✓ Full AI code available in check annotations (click "Show more")');
-          }
-        } catch (error) {
-          core.warning(` Failed to post PR review comments: ${error.message}`);
-          core.warning('AI suggestions still visible in GitHub Checks annotations');
-        }
-      }
-    } else if (isBotVerificationRun) {
-      core.info(' Skipping PR review comments - this is a verification run (prevents duplicate comments)');
-    }
-    
-    // Create GitHub Check with all performance issues (not just HTTP/DOM)
-    // This makes performance analysis visible in PR Checks tab alongside ESLint, build, etc.
-    // IMPORTANT: Use the latest commit SHA (after auto-fixes were pushed)
-    // Pass postedReviewComments to customize annotation messages
-    // SKIP on verification run to prevent duplicate annotations (HTTP/DOM issues would appear twice)
-    if (!isBotVerificationRun && autoFixSuggestions?.enabled) {
-      core.info(' Creating comprehensive performance check...');
+    // Post inline PR review comments with suggestions (all types)
+    if (autoFixSuggestions?.enabled && autoFixSuggestions.suggestions.length > 0) {
+      core.info(` Posting ${autoFixSuggestions.suggestions.length} inline suggestion(s)...`);
       try {
-        // If auto-fixes were pushed, fetch the latest commit from GitHub to ensure sync
-        let checkCommitSha = context.payload.pull_request.head.sha;
-        
-        if (autoFixCommit?.sha) {
-          // Wait a moment for GitHub to process the push
-          await new Promise(resolve => setTimeout(resolve, 2000));
-          
-          // Fetch latest commit from GitHub API to ensure it's visible
-          try {
-            const { data: refData } = await octokit.rest.git.getRef({
-              owner,
-              repo,
-              ref: `heads/${prBranch}`
-            });
-            checkCommitSha = refData.object.sha;
-            core.info(`  Fetched latest commit from GitHub: ${checkCommitSha.substring(0, 7)}`);
-          } catch (fetchError) {
-            // Fallback to local SHA if API fetch fails
-            core.warning(`  Could not fetch latest commit from API: ${fetchError.message}`);
-            checkCommitSha = autoFixCommit.sha;
-            core.info(`  Using local commit SHA: ${checkCommitSha.substring(0, 7)}`);
-          }
-        }
-        
-        core.info(`  Creating check on commit: ${checkCommitSha.substring(0, 7)}`);
-        
-        // Get list of auto-fixed files to exclude from annotations (line numbers are stale after fixes)
-        const autoFixedFiles = autoFixCommit?.files || [];
-        if (autoFixedFiles.length > 0) {
-          core.info(`  Excluding ${autoFixedFiles.length} auto-fixed file(s) from annotations:`);
-          autoFixedFiles.forEach(f => core.info(`    - ${f}`));
-        }
-        
-        await aiAutoFixAnalyzer.createPerformanceCheck(
-          results,
-          autoFixSuggestions.suggestions,
+        const { reviewComments } = await aiAutoFixAnalyzer.postPRReviewComments(
+          autoFixSuggestions.suggestions, // All suggestions (runtime, background, HTTP, DOM)
           octokit,
           owner,
           repo,
           prNumber,
-          checkCommitSha,  // Use latest commit SHA after auto-fixes
-          postedReviewComments,  // Pass which files have line-level comments
-          autoFixedFiles  // Exclude auto-fixed files from annotations (stale line numbers)
+          context.payload.pull_request.head.sha
         );
+        
+        if (reviewComments.length > 0) {
+          core.info(` Posted ${reviewComments.length} inline suggestion(s) on PR`);
+        } else {
+          core.info(' No inline comments posted (files not in PR diff)');
+        }
       } catch (error) {
-        core.warning(` Failed to create performance check: ${error.message}`);
-        core.warning(`  Error details: ${error.stack}`);
+        core.warning(` Failed to post PR review comments: ${error.message}`);
       }
     }
 

@@ -80,3 +80,100 @@ export function isTestFile(filename) {
          filename.includes('/tests/');
 }
 
+/**
+ * Get list of files changed in a PR
+ * @param {Object} octokit - GitHub API client
+ * @param {string} owner - Repository owner
+ * @param {string} repo - Repository name
+ * @param {number} prNumber - PR number
+ * @returns {Promise<Array<string>>} List of changed file paths
+ */
+export async function getPRDiffFiles(octokit, owner, repo, prNumber) {
+  try {
+    const { data: files } = await octokit.rest.pulls.listFiles({
+      owner,
+      repo,
+      pull_number: prNumber,
+      per_page: 100
+    });
+    
+    return files.map(f => f.filename);
+  } catch (error) {
+    console.error(`Failed to get PR diff files: ${error.message}`);
+    return [];
+  }
+}
+
+/**
+ * Filter analysis results to only include issues in PR diff files
+ * @param {Object} results - Analysis results
+ * @param {Array<string>} prFiles - List of files in PR diff
+ * @returns {Object} Filtered results
+ */
+export function filterResultsToPRFiles(results, prFiles) {
+  if (!prFiles || prFiles.length === 0) {
+    return results; // No filtering if no PR files
+  }
+  
+  const filtered = JSON.parse(JSON.stringify(results)); // Deep clone
+  
+  // Filter CSS issues
+  if (filtered.formCSS?.newIssues) {
+    filtered.formCSS.newIssues = filtered.formCSS.newIssues.filter(issue =>
+      prFiles.includes(issue.file)
+    );
+  }
+  
+  if (filtered.formCSS?.after?.issues) {
+    filtered.formCSS.after.issues = filtered.formCSS.after.issues.filter(issue =>
+      prFiles.includes(issue.file)
+    );
+  }
+  
+  // Filter custom function issues
+  if (filtered.customFunctions?.newIssues) {
+    filtered.customFunctions.newIssues = filtered.customFunctions.newIssues.filter(issue =>
+      prFiles.includes(issue.file)
+    );
+  }
+  
+  if (filtered.customFunctions?.after?.issues) {
+    filtered.customFunctions.after.issues = filtered.customFunctions.after.issues.filter(issue =>
+      prFiles.includes(issue.file)
+    );
+  }
+  
+  // Filter hidden fields (check if form JSON is in PR)
+  const hasFormJSON = prFiles.some(file => file.endsWith('.form.json'));
+  if (!hasFormJSON) {
+    if (filtered.hiddenFields?.newIssues) {
+      filtered.hiddenFields.newIssues = [];
+    }
+    if (filtered.hiddenFields?.after?.issues) {
+      filtered.hiddenFields.after.issues = [];
+    }
+  }
+  
+  // Filter form events (check if form JSON is in PR)
+  if (!hasFormJSON) {
+    if (filtered.formEvents?.newIssues) {
+      filtered.formEvents.newIssues = [];
+    }
+    if (filtered.formEvents?.after?.issues) {
+      filtered.formEvents.after.issues = [];
+    }
+  }
+  
+  // Filter rule cycles (check if form JSON is in PR)
+  if (!hasFormJSON) {
+    if (filtered.ruleCycles?.newIssues) {
+      filtered.ruleCycles.newIssues = [];
+    }
+    if (filtered.ruleCycles?.after?.issues) {
+      filtered.ruleCycles.after.issues = [];
+    }
+  }
+  
+  return filtered;
+}
+

@@ -1230,29 +1230,14 @@ export default function decorate(block) {
     const startTime = performance.now();
     
     const fixGenerators = [
-      // 1. CSS @import → comments (CRITICAL, no AI needed)
-      { name: 'CSS @import fixes', fn: () => this.fixCSSImports(results.formCSS) },
-      
-      // 2. CSS background-image → <img> component (CRITICAL, AI-powered)
+      // 1. CSS background-image → <img> component (suggestions only)
       { name: 'CSS background-image fixes', fn: () => this.fixCSSBackgroundImages(results.formCSS) },
       
-      // 3. Blocking scripts → defer (guidance only)
-      { name: 'Blocking scripts fixes', fn: () => this.fixBlockingScripts(results.formHTML) },
-      
-      // 4. Remove unnecessary hidden fields (guidance only)
-      { name: 'Hidden fields fixes', fn: () => this.fixUnnecessaryHiddenFields(results.hiddenFields) },
-      
-      // 5. API calls in initialize → custom events (guidance only)
-      { name: 'API call fixes', fn: () => this.fixAPICallsInInitialize(results.formEvents) },
-      
-      // 6. Custom functions with HTTP/DOM (CRITICAL, AI-powered)
+      // 2. Custom functions with HTTP/DOM (suggestions only)
       { name: 'Custom function fixes', fn: () => this.fixCustomFunctions(results.customFunctions) },
       
-      // 7. Runtime errors → add null checks (AI-powered)
-      { name: 'Runtime error fixes', fn: () => this.fixRuntimeErrors(results.customFunctions) },
-      
-      // 8. Form validation errors → recommendations (no AI)
-      { name: 'Validation recommendations', fn: () => this.generateValidationErrorRecommendations(results.ruleCycles) }
+      // 3. Runtime errors → add null checks (suggestions only)
+      { name: 'Runtime error fixes', fn: () => this.fixRuntimeErrors(results.customFunctions) }
     ];
     
     // Execute all generators in parallel using Promise.allSettled

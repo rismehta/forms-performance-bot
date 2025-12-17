@@ -11,6 +11,9 @@ inputs:
     description: 'GitHub token for API access'
     required: true
     default: ${{ github.token }}
+  analysis-url:
+    description: 'Form URL to analyze (optional, for scheduled scans with HTML analysis)'
+    required: false
 
 runs:
   using: 'node20'
