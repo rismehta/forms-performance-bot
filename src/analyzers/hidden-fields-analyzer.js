@@ -267,7 +267,7 @@ export class HiddenFieldsAnalyzer {
 
       if (isUnnecessary) {
         issues.push({
-          severity: 'warning',
+          severity: 'error', // Critical in PR mode (must fix), shown as warning in scheduled mode
           type: 'unnecessary-hidden-field',
           field: name,
           path,
@@ -279,7 +279,7 @@ export class HiddenFieldsAnalyzer {
       // Additional check: Field has visible rule but it evaluates to a static false
       if (hasVisibleRule && this.isStaticFalse(visibleRule)) {
         issues.push({
-          severity: 'warning',
+          severity: 'error', // Critical in PR mode (must fix), shown as warning in scheduled mode
           type: 'static-false-visibility',
           field: name,
           path,

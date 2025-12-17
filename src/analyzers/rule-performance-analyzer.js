@@ -292,7 +292,7 @@ export class RulePerformanceAnalyzer {
             file: customFunctionsFilePath, // Add the actual file path (e.g., eds-li/blocks/form/functions.js)
             errorCount: failure.count,
             errors: Array.from(failure.errors),
-            severity: 'warning', // Runtime errors are warnings, not critical errors
+            severity: 'error', // Critical in PR mode (must fix), warning in scheduled mode
             type: 'runtime-error-in-custom-function',
             recommendation: `Function "${fnName}" throws errors during execution. Review function logic to handle missing or null values gracefully.`
           });

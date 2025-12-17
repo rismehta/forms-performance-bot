@@ -117,7 +117,8 @@ export function filterResultsToPRFiles(results, prFiles) {
   
   const filtered = JSON.parse(JSON.stringify(results)); // Deep clone
   
-  // Filter CSS issues
+  // Filter CSS issues to only files in PR diff
+  // Show ALL issues (error + warning) - in PR mode, everything must be fixed
   if (filtered.formCSS?.newIssues) {
     filtered.formCSS.newIssues = filtered.formCSS.newIssues.filter(issue =>
       prFiles.includes(issue.file)
@@ -130,7 +131,8 @@ export function filterResultsToPRFiles(results, prFiles) {
     );
   }
   
-  // Filter custom function issues
+  // Filter custom function issues to only files in PR diff
+  // Show ALL issues (error + warning) - in PR mode, everything must be fixed
   if (filtered.customFunctions?.newIssues) {
     filtered.customFunctions.newIssues = filtered.customFunctions.newIssues.filter(issue =>
       prFiles.includes(issue.file)
@@ -142,6 +144,9 @@ export function filterResultsToPRFiles(results, prFiles) {
       prFiles.includes(issue.file)
     );
   }
+  
+  // NOTE: HTML issues are URL-based (not file-based), always shown in PR mode
+  // All HTML issues (error + warning) must be fixed in PR mode
   
   // Filter hidden fields (check if form JSON is in PR)
   const hasFormJSON = prFiles.some(file => file.endsWith('.form.json'));

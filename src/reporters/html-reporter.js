@@ -1101,5 +1101,263 @@ export class HTMLReporter {
 </html>
     `.trim();
   }
+
+  /**
+   * Generate summary HTML report for scheduled scans with multiple forms
+   */
+  generateScheduledSummaryReport(formResults, options = {}) {
+    const { repository, timestamp, formGistLinks = [] } = options;
+    
+    // Count total issues across all forms
+    let totalCritical = 0;
+    let totalWarnings = 0;
+    let totalForms = formResults.length;
+    let formsWithErrors = 0;
+    
+    formResults.forEach(result => {
+      if (result.error) {
+        formsWithErrors++;
+        return;
+      }
+      
+      // Count critical issues
+      totalCritical += (result.css?.issues || []).filter(i => i.severity === 'error').length;
+      totalCritical += (result.customFunctions?.issues || []).filter(i => i.severity === 'critical').length;
+      totalCritical += (result.html?.issues || []).filter(i => i.severity === 'error').length;
+      totalCritical += (result.rules?.issues || []).filter(i => i.cycles > 0).length;
+      
+      // Count warnings
+      totalWarnings += (result.css?.issues || []).filter(i => i.severity === 'warning').length;
+      totalWarnings += (result.customFunctions?.issues || []).filter(i => i.severity === 'warning').length;
+      totalWarnings += (result.forms?.issues || []).length;
+      totalWarnings += (result.html?.issues || []).filter(i => i.severity === 'warning').length;
+    });
+    
+    return `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AEM Forms Performance Summary - ${repository}</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 20px;
+      background: #f6f8fa;
+      color: #24292e;
+    }
+    .header {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      padding: 30px;
+      border-radius: 8px;
+      margin-bottom: 30px;
+    }
+    .header h1 {
+      margin: 0 0 10px 0;
+      font-size: 28px;
+    }
+    .summary-stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 20px;
+      margin-bottom: 30px;
+    }
+    .stat-card {
+      background: white;
+      padding: 20px;
+      border-radius: 8px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+      text-align: center;
+    }
+    .stat-number {
+      font-size: 36px;
+      font-weight: bold;
+      margin: 10px 0;
+    }
+    .stat-number.critical { color: #d73a49; }
+    .stat-number.warning { color: #f9c513; }
+    .stat-number.success { color: #28a745; }
+    .stat-label {
+      color: #586069;
+      font-size: 14px;
+    }
+    .form-grid {
+      display: grid;
+      gap: 20px;
+      margin-bottom: 30px;
+    }
+    .form-card {
+      background: white;
+      padding: 25px;
+      border-radius: 8px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+      border-left: 4px solid #667eea;
+    }
+    .form-card.error {
+      border-left-color: #d73a49;
+      background: #ffeef0;
+    }
+    .form-name {
+      font-size: 18px;
+      font-weight: 600;
+      margin-bottom: 10px;
+      color: #24292e;
+    }
+    .form-url {
+      font-size: 12px;
+      color: #586069;
+      word-break: break-all;
+      margin-bottom: 15px;
+    }
+    .form-stats {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 15px;
+      margin: 15px 0;
+    }
+    .form-stat {
+      text-align: center;
+    }
+    .form-stat-value {
+      font-size: 24px;
+      font-weight: bold;
+    }
+    .form-stat-value.critical { color: #d73a49; }
+    .form-stat-value.warning { color: #f9c513; }
+    .form-stat-label {
+      font-size: 12px;
+      color: #586069;
+      margin-top: 5px;
+    }
+    .gist-link {
+      display: inline-block;
+      background: #667eea;
+      color: white;
+      padding: 10px 20px;
+      border-radius: 6px;
+      text-decoration: none;
+      margin-top: 15px;
+      font-weight: 500;
+    }
+    .gist-link:hover {
+      background: #5568d3;
+    }
+    .error-message {
+      color: #d73a49;
+      background: #ffeef0;
+      padding: 10px;
+      border-radius: 4px;
+      margin-top: 10px;
+    }
+    .meta {
+      text-align: center;
+      color: #586069;
+      margin-top: 40px;
+      padding-top: 20px;
+      border-top: 1px solid #e1e4e8;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>📊 Performance Summary - ${repository}</h1>
+    <p>${new Date(timestamp).toLocaleString()}</p>
+  </div>
+  
+  <div class="summary-stats">
+    <div class="stat-card">
+      <div class="stat-label">Forms Analyzed</div>
+      <div class="stat-number">${totalForms}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Critical Issues</div>
+      <div class="stat-number critical">${totalCritical}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Warnings</div>
+      <div class="stat-number warning">${totalWarnings}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Forms with Errors</div>
+      <div class="stat-number ${formsWithErrors > 0 ? 'critical' : 'success'}">${formsWithErrors}</div>
+    </div>
+  </div>
+  
+  <h2>Individual Form Reports</h2>
+  <div class="form-grid">
+    ${formResults.map((result, index) => {
+      if (result.error) {
+        return `
+          <div class="form-card error">
+            <div class="form-name">${result.formName}</div>
+            <div class="form-url">${result.url}</div>
+            <div class="error-message">❌ Analysis Failed: ${result.error}</div>
+          </div>
+        `;
+      }
+      
+      const formCritical = (
+        (result.css?.issues || []).filter(i => i.severity === 'error').length +
+        (result.customFunctions?.issues || []).filter(i => i.severity === 'critical').length +
+        (result.html?.issues || []).filter(i => i.severity === 'error').length +
+        (result.rules?.issues || []).filter(i => i.cycles > 0).length
+      );
+      
+      const formWarnings = (
+        (result.css?.issues || []).filter(i => i.severity === 'warning').length +
+        (result.customFunctions?.issues || []).filter(i => i.severity === 'warning').length +
+        (result.forms?.issues || []).length +
+        (result.html?.issues || []).filter(i => i.severity === 'warning').length
+      );
+      
+      const formCSSIssues = (result.css?.issues || []).length;
+      const formHTMLIssues = (result.html?.issues || []).length;
+      
+      return `
+        <div class="form-card">
+          <div class="form-name">${result.formName}</div>
+          <div class="form-url">${result.url}</div>
+          
+          <div class="form-stats">
+            <div class="form-stat">
+              <div class="form-stat-value critical">${formCritical}</div>
+              <div class="form-stat-label">Critical</div>
+            </div>
+            <div class="form-stat">
+              <div class="form-stat-value warning">${formWarnings}</div>
+              <div class="form-stat-label">Warnings</div>
+            </div>
+            <div class="form-stat">
+              <div class="form-stat-value">${formCSSIssues}</div>
+              <div class="form-stat-label">CSS Issues</div>
+            </div>
+            <div class="form-stat">
+              <div class="form-stat-value">${formHTMLIssues}</div>
+              <div class="form-stat-label">HTML Issues</div>
+            </div>
+          </div>
+          
+          ${result.gistUrl ? `
+            <a href="${result.gistUrl}" class="gist-link" target="_blank">
+              View Detailed Report →
+            </a>
+          ` : '<div style="color: #d73a49; margin-top: 15px;">⚠️ Detailed report not available</div>'}
+        </div>
+      `;
+    }).join('')}
+  </div>
+  
+  <div class="meta">
+    <p>Generated by <strong>AEM Forms Performance Bot</strong></p>
+    <p><em>This report is sent daily. To modify the schedule or recipients, update your GitHub Actions workflow.</em></p>
+  </div>
+</body>
+</html>
+    `.trim();
+  }
 }
 

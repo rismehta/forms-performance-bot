@@ -82,6 +82,30 @@ You only need to customize if your forms have legitimate reasons for higher thre
 
 ## Advanced Configuration
 
+### Scheduled Scans (Multiple Forms)
+
+Configure multiple form URLs for automated daily scans:
+
+```json
+{
+  "scheduledScan": {
+    "urls": [
+      "https://main--your-project--your-org.aem.live/forms/form-1",
+      "https://main--your-project--your-org.aem.live/forms/form-2",
+      "https://main--your-project--your-org.aem.live/forms/form-3"
+    ]
+  }
+}
+```
+
+**How it works:**
+- Each form gets its own detailed Gist report
+- Summary email shows aggregated stats across all forms with links to individual reports
+- You can add additional URLs via `workflow_dispatch` input to supplement these
+- **Required:** Form JSON only exists at runtime (not in repository), so URLs are needed for form-specific analysis
+
+**Why scheduled scans:** Monitor production forms for performance issues daily without waiting for PRs. Catch issues early!
+
 ### Hero Image Detection
 
 Control which images should NOT be lazy-loaded (for LCP optimization):

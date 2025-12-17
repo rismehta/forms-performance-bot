@@ -348,56 +348,9 @@ async function runPRMode(context, octokit, patOctokit, config) {
     }
   }
   
-  // Generate HTML report (for GitHub artifact)
-  core.info(' Generating detailed HTML report...');
-  const htmlReporter = new HTMLReporter();
-  const htmlReport = htmlReporter.generateReport(results, {
-    before: urls.before,
-    after: urls.after,
-    beforeData,
-    afterData
-  }, prNumber, `${owner}/${repo}`);
-  
-  // Save HTML report to file (will be uploaded as artifact)
-  const reportPath = join(process.cwd(), 'performance-report.html');
-  writeFileSync(reportPath, htmlReport, 'utf-8');
-  core.info(` HTML report saved to: ${reportPath}`);
-  
-  // Upload HTML report to GitHub Gist for direct browser viewing
-  core.info(' Uploading HTML report to GitHub Gist for inline viewing...');
-  let gistUrl = null;
-  try {
-    const gistResponse = await patOctokit.rest.gists.create({
-      description: `Performance Report - PR #${prNumber} - ${repo}`,
-      public: false, // Private gist
-      files: {
-        [`performance-report-pr-${prNumber}.html`]: {
-          content: htmlReport
-        }
-      }
-    });
-    
-    gistUrl = gistResponse.data.html_url;
-    // Use htmlpreview.github.io for direct HTML rendering
-    const previewUrl = `https://htmlpreview.github.io/?${gistResponse.data.files[`performance-report-pr-${prNumber}.html`].raw_url}`;
-    
-    core.info(` Gist created: ${gistUrl}`);
-    core.info(` Preview URL: ${previewUrl}`);
-    
-    // Pass preview URL to reporter
-    gistUrl = previewUrl;
-  } catch (error) {
-    core.warning(`Failed to create gist: ${error.message}`);
-    if (error.message.includes('Not Found')) {
-      core.warning('PAT token missing "gist" scope. To enable inline viewing:');
-      core.warning('  1. Go to GitHub → Settings → Developer Settings → Personal Access Tokens');
-      core.warning('  2. Edit your PAT and enable "gist" scope');
-      core.warning('  3. Update PAT_TOKEN secret in repository settings');
-    }
-    core.warning('Full report will be available as artifact download only');
-  }
-  
-  // Generate and post minimal PR comment (with link to gist and artifact)
+  // Generate and post minimal PR comment (NO HTML report link in PR mode)
+  // HTML reports are only for scheduled scans (full codebase analysis)
+  // PR mode only shows issues in PR diff files via inline comments
   const reporter = new FormPRReporter(octokit, owner, repo, prNumber);
   await reporter.generateReport(results, {
     before: urls.before,
@@ -405,15 +358,17 @@ async function runPRMode(context, octokit, patOctokit, config) {
     beforeData, // Include performance metrics
     afterData,  // Include performance metrics
     autoFixSuggestions, // Include AI-generated fix suggestions
-    gistUrl, // Direct browser link to HTML report
+    gistUrl: null, // No HTML report in PR mode
   }, prNumber, `${owner}/${repo}`);
   
-  // Post inline PR review comments with suggestions (all types)
+  // Post inline PR review comments with suggestions (ALL issues in PR mode are critical)
+  // Note: Results are already filtered to PR diff files only (line 330)
+  // All issues that reach this point are in PR diff files and must be fixed
   if (autoFixSuggestions?.enabled && autoFixSuggestions.suggestions.length > 0) {
     core.info(` Posting ${autoFixSuggestions.suggestions.length} inline suggestion(s)...`);
     try {
       const { reviewComments } = await aiAutoFixAnalyzer.postPRReviewComments(
-        autoFixSuggestions.suggestions, // All suggestions (runtime, background, HTTP, DOM)
+        autoFixSuggestions.suggestions, // All suggestions (already filtered to PR diff files)
         octokit,
         owner,
         repo,
@@ -450,22 +405,30 @@ async function runScheduledMode(context, octokit, patOctokit, config) {
   
   core.info(`Scanning entire codebase in ${owner}/${repo}`);
   
-  // Get optional URL from workflow input
-  const analysisUrl = core.getInput('analysis-url') || config.scheduledScan?.defaultUrl;
+  // Get URLs from config + workflow input
+  const configUrls = config.scheduledScan?.urls || [];
+  const workflowUrl = core.getInput('analysis-url');
   
-  if (!analysisUrl) {
-    core.warning('⚠️  No analysis-url provided for scheduled scan');
+  // Combine URLs (workflow input is added to config URLs)
+  const analysisUrls = [...configUrls];
+  if (workflowUrl && !analysisUrls.includes(workflowUrl)) {
+    analysisUrls.push(workflowUrl);
+  }
+  
+  if (analysisUrls.length === 0) {
+    core.warning('⚠️  No analysis URLs provided for scheduled scan');
     core.info('');
-    core.info('Scheduled mode requires a URL to extract form JSON.');
+    core.info('Scheduled mode requires URLs to extract form JSON.');
     core.info('Form JSON is not stored in repository - it only exists at runtime.');
     core.info('');
-    core.info('To enable full analysis, provide a URL:');
-    core.info('  1. Via workflow_dispatch input: analysis-url');
-    core.info('  2. Via .performance-bot.json: scheduledScan.defaultUrl');
+    core.info('To enable full analysis, provide URLs:');
+    core.info('  1. Via .performance-bot.json: scheduledScan.urls array');
+    core.info('  2. Via workflow_dispatch input: analysis-url (optional, added to config URLs)');
     core.info('');
     core.info('Falling back to static analysis only (CSS/JS files)...');
   } else {
-    core.info(`Analysis URL: ${analysisUrl}`);
+    core.info(`Analyzing ${analysisUrls.length} form(s):`);
+    analysisUrls.forEach((url, i) => core.info(`  ${i + 1}. ${url}`));
   }
   
   // Initialize analyzers
@@ -476,131 +439,188 @@ async function runScheduledMode(context, octokit, patOctokit, config) {
   const formEventsAnalyzer = new FormEventsAnalyzer(config);
   const hiddenFieldsAnalyzer = new HiddenFieldsAnalyzer(config);
   const formHTMLAnalyzer = new FormHTMLAnalyzer(config);
+  const urlAnalyzer = new URLAnalyzer();
   
   // Load all files from workspace (NO filtering - entire codebase)
   core.info(' Loading all files from repository...');
-  const { jsFiles, cssFiles } = await loadFilesFromWorkspace();
+  const { jsFiles, cssFiles} = await loadFilesFromWorkspace();
   core.info(`  Loaded ${jsFiles.length} JS files, ${cssFiles.length} CSS files`);
   
-  const results = {
-    css: { issues: [], filesAnalyzed: cssFiles.length },
-    customFunctions: { issues: [] },
-    rules: { issues: [] },
-    forms: { issues: [] },
-    html: null,
-    performance: null,
-    formJson: null
-  };
-  
-  // 1. CSS ANALYSIS (all CSS files - works without URL)
+  // 1. CSS ANALYSIS (all CSS files - done once for entire codebase)
   core.info(' Analyzing CSS files...');
   const cssAnalysis = formCSSAnalyzer.analyze(cssFiles);
-  results.css.issues = cssAnalysis.issues || [];
-  core.info(`  Found ${results.css.issues.length} CSS issues`);
+  const globalCSSIssues = cssAnalysis.issues || [];
+  core.info(`  Found ${globalCSSIssues.length} CSS issues (codebase-wide)`);
   
-  // 2-5. FORM-SPECIFIC ANALYSIS (only if URL provided to extract JSON)
-  if (analysisUrl) {
-    try {
-      core.info(' Fetching form JSON from URL...');
-      const urlAnalyzer = new URLAnalyzer();
-      const urlData = await urlAnalyzer.analyze(analysisUrl);
+  // 2. FORM-SPECIFIC ANALYSIS (loop through each URL)
+  const formResults = [];
+  const formGistLinks = [];
+  
+  if (analysisUrls.length > 0) {
+    for (let i = 0; i < analysisUrls.length; i++) {
+      const formUrl = analysisUrls[i];
+      core.info(`\n [Form ${i + 1}/${analysisUrls.length}] Analyzing: ${formUrl}`);
       
-      if (!urlData.formJson) {
-        core.warning('  Failed to extract form JSON from URL - skipping form analysis');
-      } else {
+      const formResult = {
+        url: formUrl,
+        formName: extractFormNameFromUrl(formUrl),
+        css: { issues: globalCSSIssues }, // Same CSS issues for all forms
+        customFunctions: { issues: [] },
+        rules: { issues: [] },
+        forms: { issues: [] },
+        html: null,
+        performance: null,
+        formJson: null,
+        gistUrl: null
+      };
+      
+      try {
+        core.info('  Fetching form JSON from URL...');
+        const urlData = await urlAnalyzer.analyze(formUrl);
+        
+        if (!urlData.formJson) {
+          core.warning('  Failed to extract form JSON - skipping this form');
+          formResult.error = 'Failed to extract form JSON';
+          formResults.push(formResult);
+          continue;
+        }
+        
         core.info(`  Form JSON extracted successfully`);
-        results.formJson = urlData.formJson;
+        formResult.formJson = urlData.formJson;
         
-        // 2. CUSTOM FUNCTIONS ANALYSIS
-        core.info(' Analyzing custom functions...');
+        // Analyze this form
+        core.info('  Analyzing custom functions...');
         const customFunctionsAnalysis = customFunctionAnalyzer.analyze(urlData.formJson, jsFiles);
-        results.customFunctions.issues = customFunctionsAnalysis.issues || [];
-        core.info(`  Found ${results.customFunctions.issues.length} custom function issues`);
+        formResult.customFunctions.issues = customFunctionsAnalysis.issues || [];
+        core.info(`    Found ${formResult.customFunctions.issues.length} custom function issues`);
         
-        // 3. FORM EVENTS ANALYSIS
-        core.info(' Analyzing form events...');
+        core.info('  Analyzing form events...');
         const eventsAnalysis = formEventsAnalyzer.analyze(urlData.formJson);
         if (eventsAnalysis.issues) {
-          results.forms.issues.push(...eventsAnalysis.issues);
+          formResult.forms.issues.push(...eventsAnalysis.issues);
         }
-        core.info(`  Found ${eventsAnalysis.issues?.length || 0} form event issues`);
+        core.info(`    Found ${eventsAnalysis.issues?.length || 0} form event issues`);
         
-        // 4. HIDDEN FIELDS ANALYSIS
-        core.info(' Analyzing hidden fields...');
+        core.info('  Analyzing hidden fields...');
         const hiddenFieldsAnalysis = hiddenFieldsAnalyzer.analyze(urlData.formJson, jsFiles);
         if (hiddenFieldsAnalysis.issues) {
-          results.forms.issues.push(...hiddenFieldsAnalysis.issues);
+          formResult.forms.issues.push(...hiddenFieldsAnalysis.issues);
         }
-        core.info(`  Found ${hiddenFieldsAnalysis.issues?.length || 0} hidden field issues`);
+        core.info(`    Found ${hiddenFieldsAnalysis.issues?.length || 0} hidden field issues`);
         
-        // 5. RULE CYCLES ANALYSIS
-        core.info(' Analyzing rule cycles...');
+        core.info('  Analyzing rule cycles...');
         const ruleCyclesAnalysis = await rulePerformanceAnalyzer.analyze(urlData.formJson);
         if (ruleCyclesAnalysis.cycles > 0) {
-          results.rules.issues.push({
+          formResult.rules.issues.push({
             cycles: ruleCyclesAnalysis.cycles,
             details: ruleCyclesAnalysis.cycleDetails,
             totalRules: ruleCyclesAnalysis.totalRules
           });
         }
-        core.info(`  Found ${ruleCyclesAnalysis.cycles || 0} rule cycles`);
+        core.info(`    Found ${ruleCyclesAnalysis.cycles || 0} rule cycles`);
         
-        // 6. HTML ANALYSIS
-        core.info(' Analyzing HTML...');
+        core.info('  Analyzing HTML...');
         const htmlAnalysis = formHTMLAnalyzer.analyze(urlData.html);
         if (htmlAnalysis.issues) {
-          results.html = {
+          formResult.html = {
             domSize: urlData.html?.length || 0,
             formRendered: urlData.formRendered || false,
             issues: htmlAnalysis.issues
           };
         }
-        core.info(`  Found ${htmlAnalysis.issues?.length || 0} HTML issues`);
+        core.info(`    Found ${htmlAnalysis.issues?.length || 0} HTML issues`);
         
-        // 7. PERFORMANCE METRICS
-        results.performance = {
+        formResult.performance = {
           loadTime: urlData.loadTime || 0,
           jsHeapSize: urlData.jsHeapSize || 0
         };
-        core.info(`  Load time: ${results.performance.loadTime}ms`);
+        core.info(`    Load time: ${formResult.performance.loadTime}ms`);
+        
+        // Generate individual HTML report for this form
+        core.info('  Generating HTML report for this form...');
+        const htmlReporter = new HTMLReporter();
+        const formHtmlReport = htmlReporter.generateScheduledReport(formResult, {
+          repository: `${owner}/${repo}`,
+          analysisUrl: formUrl,
+          timestamp: new Date().toISOString()
+        });
+        
+        // Upload to Gist
+        core.info('  Creating Gist for detailed report...');
+        try {
+          const gistResponse = await patOctokit.rest.gists.create({
+            description: `Performance Report - ${formResult.formName} - ${repo} - ${new Date().toDateString()}`,
+            public: false,
+            files: {
+              [`${formResult.formName}-performance-report.html`]: {
+                content: formHtmlReport
+              }
+            }
+          });
+          
+          const previewUrl = `https://htmlpreview.github.io/?${gistResponse.data.files[`${formResult.formName}-performance-report.html`].raw_url}`;
+          formResult.gistUrl = previewUrl;
+          formGistLinks.push({ formName: formResult.formName, url: previewUrl });
+          core.info(`    Gist created: ${previewUrl}`);
+        } catch (error) {
+          core.warning(`    Failed to create gist: ${error.message}`);
+        }
+        
+      } catch (error) {
+        core.error(`  Form analysis failed: ${error.message}`);
+        formResult.error = error.message;
       }
-    } catch (error) {
-      core.error(`  URL analysis failed: ${error.message}`);
-      core.error(error.stack);
+      
+      formResults.push(formResult);
     }
   }
   
-  // Generate HTML report
-  core.info(' Generating HTML report...');
+  // Generate summary HTML report
+  core.info('\n📊 Generating summary report...');
   const htmlReporter = new HTMLReporter();
-  const htmlReport = htmlReporter.generateScheduledReport(results, {
+  const summaryHtmlReport = htmlReporter.generateScheduledSummaryReport(formResults, {
     repository: `${owner}/${repo}`,
-    analysisUrl,
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    formGistLinks
   });
   
-  // Save report
+  // Save summary report
   const reportPath = join(process.cwd(), 'scheduled-performance-report.html');
-  writeFileSync(reportPath, htmlReport, 'utf-8');
-  core.info(` Report saved to: ${reportPath}`);
+  writeFileSync(reportPath, summaryHtmlReport, 'utf-8');
+  core.info(` Summary report saved to: ${reportPath}`);
   
   // Send email via SendGrid
-  core.info(' Sending email report...');
+  core.info('\n📧 Sending email report...');
   const { sendEmailReport } = await import('./utils/email-sender.js');
   
-  const emailSent = await sendEmailReport(results, htmlReport, {
+  const emailSent = await sendEmailReport(formResults, summaryHtmlReport, {
     repository: `${owner}/${repo}`,
-    analysisUrl,
-    from: 'aemforms-performance-bot@adobe.com'
+    from: 'aemforms-performance-bot@adobe.com',
+    formGistLinks
   });
   
   if (emailSent) {
-    core.info(' Email sent successfully');
+    core.info('✅ Email sent successfully');
   } else {
-    core.warning(' Email not sent - check SENDGRID_API_KEY');
+    core.warning('⚠️  Email not sent - check SENDGRID_API_KEY');
   }
   
-  core.info('✓ Scheduled scan completed');
+  core.info(`\n✓ Scheduled scan completed - analyzed ${formResults.length} form(s)`);
+}
+
+/**
+ * Extract form name from URL for display
+ */
+function extractFormNameFromUrl(url) {
+  try {
+    const urlObj = new URL(url);
+    const pathname = urlObj.pathname;
+    const parts = pathname.split('/').filter(p => p);
+    // Return last 2-3 path segments as form name
+    return parts.slice(-3).join('/') || 'form';
+  } catch (error) {
+    return 'form';
+  }
 }
 
 /**
@@ -654,64 +674,81 @@ function detectCriticalIssues(results) {
   }
   }
 
-  // 4. CSS issues (CRITICAL - blocks rendering)
-  if (results.formCSS?.newIssues) {
-  const criticalCSS = results.formCSS.newIssues.filter(i => i.severity === 'error');
-  if (criticalCSS.length > 0) {
+  // 4. CSS issues (ALL issues in PR mode are critical - must fix)
+  if (results.formCSS?.newIssues && results.formCSS.newIssues.length > 0) {
     critical.hasCritical = true;
-    critical.count += criticalCSS.length;
+    critical.count += results.formCSS.newIssues.length;
     
-    // Break down by type
-    const blockingImports = criticalCSS.filter(i => i.type === 'css-import-blocking');
-    const backgroundImages = criticalCSS.filter(i => i.type === 'css-background-image');
+    // Break down by type for reporting
+    const blockingImports = results.formCSS.newIssues.filter(i => i.type === 'css-import-blocking');
+    const backgroundImages = results.formCSS.newIssues.filter(i => i.type === 'css-background-image');
+    const otherCSS = results.formCSS.newIssues.length - blockingImports.length - backgroundImages.length;
     
     if (blockingImports.length > 0) {
-      critical.issues.push(`${blockingImports.length} @import statement(s) in CSS (blocks rendering)`);
+      critical.issues.push(`${blockingImports.length} @import statement(s) in CSS`);
     }
     if (backgroundImages.length > 0) {
-      critical.issues.push(`${backgroundImages.length} CSS background-image(s) (cannot be lazy loaded)`);
+      critical.issues.push(`${backgroundImages.length} CSS background-image(s)`);
     }
-  }
+    if (otherCSS > 0) {
+      critical.issues.push(`${otherCSS} other CSS issue(s)`);
+    }
   }
 
-  // 5. Blocking JavaScript (CRITICAL - blocks parsing and rendering)
-  if (results.formHTML?.newIssues) {
-  const blockingJS = results.formHTML.newIssues.filter(i => 
-    i.type === 'inline-scripts-on-page' || i.type === 'blocking-scripts-on-page'
-  );
-  
-  if (blockingJS.length > 0) {
+  // 5. HTML issues (ALL issues in PR mode are critical - must fix)
+  if (results.formHTML?.newIssues && results.formHTML.newIssues.length > 0) {
     critical.hasCritical = true;
-    critical.count += blockingJS.length;
     
-    const inlineScripts = blockingJS.filter(i => i.type === 'inline-scripts-on-page');
-    const syncScripts = blockingJS.filter(i => i.type === 'blocking-scripts-on-page');
+    // Count all HTML issues
+    results.formHTML.newIssues.forEach(issue => {
+      if (issue.count) {
+        critical.count += 1; // Each issue type counts as 1
+        
+        // Add descriptive message based on type
+        if (issue.type === 'inline-scripts-on-page' && issue.breakdown) {
+          critical.issues.push(`${issue.count} inline script(s) (${issue.breakdown.head || 0} in <head>, ${issue.breakdown.body || 0} in <body>)`);
+        } else if (issue.type === 'blocking-scripts-on-page' && issue.breakdown) {
+          critical.issues.push(`${issue.count} blocking script(s) (${issue.breakdown.head || 0} in <head>, ${issue.breakdown.body || 0} in <body>)`);
+        } else if (issue.type === 'excessive-dom-size') {
+          critical.issues.push(`${issue.count} DOM nodes (threshold: ${issue.threshold})`);
+        } else if (issue.type === 'images-not-lazy-loaded') {
+          critical.issues.push(`${issue.count} image(s) without lazy loading`);
+        } else if (issue.type === 'large-dom-size') {
+          critical.issues.push(`${issue.count} DOM nodes (warning threshold)`);
+        } else if (issue.type === 'iframes-in-form') {
+          critical.issues.push(`${issue.count} iframe(s) in form`);
+        } else if (issue.type === 'autoplay-videos') {
+          critical.issues.push(`${issue.count} autoplay video(s)`);
+        } else {
+          critical.issues.push(`HTML issue: ${issue.message || issue.type}`);
+        }
+      }
+    });
+  }
+
+  // 6. Hidden fields (ALL issues in PR mode are critical - must fix)
+  if (results.hiddenFields?.newIssues && results.hiddenFields.newIssues.length > 0) {
+    critical.hasCritical = true;
+    critical.count += results.hiddenFields.newIssues.length;
+    critical.issues.push(`${results.hiddenFields.newIssues.length} unnecessary hidden field(s)`);
+  }
+
+  // 7. Custom function issues (ALL issues in PR mode are critical - must fix)
+  if (results.customFunctions?.newIssues && results.customFunctions.newIssues.length > 0) {
+    critical.hasCritical = true;
     
-    if (inlineScripts.length > 0 && inlineScripts[0].count) {
-      const breakdown = inlineScripts[0].breakdown || {};
-      critical.issues.push(`${inlineScripts[0].count} inline script(s) on page (${breakdown.head || 0} in <head>, ${breakdown.body || 0} in <body>) - block form rendering`);
+    // Break down by type
+    const runtimeErrors = results.customFunctions.newIssues.filter(i => i.type === 'runtime-error-in-custom-function');
+    const otherIssues = results.customFunctions.newIssues.length - runtimeErrors.length;
+    
+    critical.count += results.customFunctions.newIssues.length;
+    
+    if (runtimeErrors.length > 0) {
+      critical.issues.push(`${runtimeErrors.length} custom function(s) with runtime errors`);
     }
-    if (syncScripts.length > 0 && syncScripts[0].count) {
-      const breakdown = syncScripts[0].breakdown || {};
-      critical.issues.push(`${syncScripts[0].count} synchronous script(s) without defer (${breakdown.head || 0} in <head>, ${breakdown.body || 0} in <body>) - block parsing`);
+    if (otherIssues > 0) {
+      critical.issues.push(`${otherIssues} other custom function issue(s)`);
     }
-  }
-  
-  // Excessive DOM size (CRITICAL - impacts INP and responsiveness)
-  const excessiveDOM = results.formHTML.newIssues.filter(i => i.type === 'excessive-dom-size');
-  if (excessiveDOM.length > 0 && excessiveDOM[0].count) {
-    critical.hasCritical = true;
-    critical.count += excessiveDOM.length;
-    critical.issues.push(`${excessiveDOM[0].count} DOM nodes (threshold: ${excessiveDOM[0].threshold}) - severely impacts INP`);
-  }
-  
-  // Non-lazy-loaded images (CRITICAL - blocks rendering, impacts LCP)
-  const nonLazyImages = results.formHTML.newIssues.filter(i => i.type === 'images-not-lazy-loaded' && i.severity === 'error');
-  if (nonLazyImages.length > 0 && nonLazyImages[0].count) {
-    critical.hasCritical = true;
-    critical.count += nonLazyImages.length;
-    critical.issues.push(`${nonLazyImages[0].count} image(s) without lazy loading (blocks rendering, excludes hero images)`);
-  }
   }
 
   return critical;

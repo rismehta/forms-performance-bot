@@ -307,9 +307,9 @@ export class FormCSSAnalyzer {
         type: 'css-import-blocking',
         file: filename,
         line: lineNumber,
-        message: `@import blocks rendering: "${importUrl}"`,
+        message: `@import detected: "${importUrl}"`,
         importUrl,
-        recommendation: 'Replace @import with <link> tags or bundle CSS files. @import forces sequential loading and delays form rendering.',
+        recommendation: 'Note: @import statements are bundled into a single CSS file during the build process, so this does not impact production performance. This warning is for development awareness only.',
       });
     }
 

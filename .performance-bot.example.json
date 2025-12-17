@@ -43,8 +43,11 @@
   },
   
   "scheduledScan": {
-    "defaultUrl": "https://main--your-project--your-org.aem.live/forms/your-form",
-    "description": "Default URL for scheduled codebase scans. Required because form JSON only exists at runtime, not in repository. Can be overridden via workflow_dispatch input."
+    "urls": [
+      "https://bundled-journey-dev-mocked--forms-engine--hdfc-forms.aem.live/savings-account/insta-savings/open-instant-savings-account-online",
+      "https://main--your-project--your-org.aem.live/forms/another-form"
+    ],
+    "description": "Array of form URLs for scheduled codebase scans. Each form will get its own detailed report. Required because form JSON only exists at runtime. Can be supplemented via workflow_dispatch input."
   },
   
   "autoFix": {

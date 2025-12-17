@@ -17,9 +17,9 @@ export const modules = {
 
 /**
  * Send email report via SendGrid
- * @param {Object} results - Analysis results
+ * @param {Object|Array} results - Analysis results (single form object or array of forms)
  * @param {string} htmlReport - HTML report content
- * @param {Object} options - Email options (repository, analysisUrl, from)
+ * @param {Object} options - Email options (repository, from, formGistLinks)
  * @returns {Promise<boolean>} Success status
  */
 async function sendEmailReport(results, htmlReport, options = {}) {
@@ -37,15 +37,19 @@ async function sendEmailReport(results, htmlReport, options = {}) {
   }
   
   const date = new Date().toDateString();
-  const summary = countIssuesFromScheduledResults(results);
+  const isMultipleForms = Array.isArray(results);
+  const summary = isMultipleForms 
+    ? countIssuesFromMultipleForms(results) 
+    : countIssuesFromScheduledResults(results);
   const issueCount = summary.totalIssues;
   const criticalCount = summary.criticalIssues;
   const repository = options.repository || 'Unknown Repository';
+  const formCount = isMultipleForms ? results.length : 1;
   
   const emailData = {
     personalizations: [{
       to: [{ email: toEmail }],
-      subject: `📊 Daily Performance Report - ${repository} - ${date} (${issueCount} issues${criticalCount > 0 ? `, ${criticalCount} critical` : ''})`
+      subject: `📊 Daily Performance Report - ${repository} - ${date} (${formCount} form${formCount > 1 ? 's' : ''}, ${issueCount} issues${criticalCount > 0 ? `, ${criticalCount} critical` : ''})`
     }],
     from: { 
       email: fromEmail,
@@ -134,7 +138,7 @@ function countIssues(results) {
 }
 
 /**
- * Count issues from scheduled scan results
+ * Count issues from scheduled scan results (single form)
  * @param {Object} results - Scheduled scan results
  * @returns {Object} Issue counts
  */
@@ -171,6 +175,31 @@ function countIssuesFromScheduledResults(results) {
     totalIssues += results.html.issues.length;
     criticalIssues += results.html.issues.filter(i => i.severity === 'error').length;
   }
+  
+  return {
+    totalIssues,
+    criticalIssues
+  };
+}
+
+/**
+ * Count issues from multiple forms
+ * @param {Array} formResults - Array of form results
+ * @returns {Object} Issue counts
+ */
+function countIssuesFromMultipleForms(formResults) {
+  let totalIssues = 0;
+  let criticalIssues = 0;
+  
+  formResults.forEach(result => {
+    if (result.error) {
+      return; // Skip forms with errors
+    }
+    
+    const counts = countIssuesFromScheduledResults(result);
+    totalIssues += counts.totalIssues;
+    criticalIssues += counts.criticalIssues;
+  });
   
   return {
     totalIssues,

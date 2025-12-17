@@ -1237,7 +1237,10 @@ export default function decorate(block) {
       { name: 'Custom function fixes', fn: () => this.fixCustomFunctions(results.customFunctions) },
       
       // 3. Runtime errors → add null checks (suggestions only)
-      { name: 'Runtime error fixes', fn: () => this.fixRuntimeErrors(results.customFunctions) }
+      { name: 'Runtime error fixes', fn: () => this.fixRuntimeErrors(results.customFunctions) },
+      
+      // 4. CSS @import statements (suggestions only)
+      { name: 'CSS import fixes', fn: () => this.fixCSSImportSuggestions(results.formCSS) }
     ];
     
     // Execute all generators in parallel using Promise.allSettled
@@ -2620,6 +2623,111 @@ export function ${issue.functionName}(field, newState, globals) {
   }
 
   /**
+   * Generate inline suggestions for CSS @import statements
+   * Suggests removing/commenting @import and adding <link> to head.html
+   */
+  fixCSSImportSuggestions = async (cssResults) => {
+    if (!cssResults || !cssResults.newIssues) return [];
+    
+    const importIssues = cssResults.newIssues.filter(i => i.type === 'css-import-blocking');
+    if (importIssues.length === 0) return [];
+    
+    core.info(`Generating ${importIssues.length} CSS @import suggestion(s)...`);
+    
+    const suggestions = [];
+    
+    for (const issue of importIssues) {
+      try {
+        const cssFilePath = resolve(this.workspaceRoot, issue.file);
+        
+        if (!existsSync(cssFilePath)) {
+          core.warning(`CSS file not found: ${cssFilePath}`);
+          continue;
+        }
+        
+        const cssContent = readFileSync(cssFilePath, 'utf-8');
+        const lines = cssContent.split('\n');
+        const issueLine = issue.line - 1; // 0-indexed
+        
+        if (issueLine < 0 || issueLine >= lines.length) {
+          core.warning(`Invalid line number ${issue.line} in ${issue.file}`);
+          continue;
+        }
+        
+        const originalLine = lines[issueLine];
+        const importUrl = issue.importUrl;
+        
+        // Determine if it's an external URL
+        const isExternalURL = importUrl.startsWith('http://') || importUrl.startsWith('https://');
+        
+        let suggestedFix;
+        let guidance;
+        
+        if (isExternalURL) {
+          // External URL: Suggest removing @import and moving to head.html
+          suggestedFix = `/* ${originalLine.trim()} - Moved to head.html */`;
+          guidance = `
+**Fix for External CSS Import**
+
+**Step 1: Remove from CSS (click "Apply suggestion" below)**
+
+**Step 2: Add to \`head.html\`**
+\`\`\`html
+<!-- In head.html -->
+<link rel="stylesheet" href="${importUrl}">
+\`\`\`
+
+**Why this matters:**
+- \`@import\` in CSS blocks rendering (even though bundled)
+- \`<link>\` in HTML allows parallel loading
+- Better browser caching and performance
+- Follows web performance best practices
+
+**Note:** During build, imports are bundled. This change improves development server performance and follows production patterns.
+`;
+        } else {
+          // Local file: Note that it's bundled during build
+          suggestedFix = originalLine; // Keep as-is (no change needed)
+          guidance = `
+**Note: Local CSS Import (Bundled During Build)**
+
+This \`@import\` statement will be automatically bundled into a single CSS file during the build process.
+
+**No action required** - this warning is informational only.
+
+If you want to optimize development server performance, you can manually bundle local imports, but it's not necessary for production.
+`;
+        }
+        
+        suggestions.push({
+          type: 'css-import-suggestion',
+          severity: isExternalURL ? 'warning' : 'info',
+          file: issue.file,
+          line: issue.line,
+          title: isExternalURL ? `Move external CSS import to head.html` : `CSS import will be bundled (no action needed)`,
+          description: isExternalURL 
+            ? `External CSS import "${importUrl}" should be moved to head.html for better performance.`
+            : `Local CSS import "${importUrl}" will be bundled during build.`,
+          originalCode: originalLine,
+          suggestedCode: suggestedFix,
+          guidance: guidance,
+          importUrl: importUrl,
+          isExternal: isExternalURL,
+          estimatedImpact: isExternalURL ? 'Enables parallel CSS loading, improves page load time' : 'No impact - bundled during build'
+        });
+        
+        core.info(`  Generated suggestion for ${issue.file}:${issue.line} (${isExternalURL ? 'external' : 'local'})`);
+        
+      } catch (error) {
+        core.warning(`Failed to generate CSS import suggestion for ${issue.file}:${issue.line}: ${error.message}`);
+      }
+    }
+    
+    core.info(`  CSS import fixes: ${suggestions.length} generated (static suggestions, no AI)`);
+    return suggestions;
+  }
+
+  /**
    * Fix runtime errors in custom functions
    * Add null/undefined checks to prevent crashes
    */
@@ -2680,7 +2788,7 @@ export function ${issue.functionName}(field, newState, globals) {
           
           return {
             type: 'custom-function-runtime-error-fix',
-            severity: 'warning',
+            severity: 'critical', // Critical in PR mode (must fix), warning in scheduled mode
             file: issue.file || 'blocks/form/functions.js',
             functionName: issue.functionName,
             title: `Add null checks to ${issue.functionName}()`,
@@ -3876,38 +3984,81 @@ See AI-generated fix in PR comments.`,
     if (fix.type === 'custom-function-http-fix') {
       lines.push(`##  HTTP Request in Custom Function`);
       lines.push('');
-      lines.push(`**Issue:** Function \`${fix.functionName}()\` makes direct HTTP call. Refactor function code (below) + add API integration via Visual Rule Editor.`);
+      lines.push(`**Issue:** Function \`${fix.functionName}()\` makes direct HTTP request - this bypasses form's error handling and loading states.`);
       lines.push('');
-      lines.push('**Step 1: Refactored Function Code** (click "Apply suggestion" below):');
-      lines.push('```suggestion');
-      lines.push(fix.refactoredCode || '// AI-generated refactored code');
-      lines.push('```');
-      lines.push('');
-      if (fix.formJsonSnippet) {
-        lines.push('**Step 2: Add API Integration** (via Visual Rule Editor):');
-        lines.push('```json');
-        lines.push(fix.formJsonSnippet);
-        lines.push('```');
-        lines.push('');
+      // NO ```suggestion syntax - guidance only (no code to apply)
+      if (fix.guidance) {
+        lines.push(fix.guidance);
       }
       
     } else if (fix.type === 'custom-function-dom-fix') {
       lines.push(`##  DOM Access in Custom Function`);
       lines.push('');
-      const componentHint = fix.componentFile ? ` Relevant component: \`${fix.componentFile}\`` : ' Create custom component for DOM logic.';
-      lines.push(`**Issue:** Function \`${fix.functionName}()\` accesses DOM directly.${componentHint}`);
+      lines.push(`**Issue:** Function \`${fix.functionName}()\` directly manipulates DOM - this breaks form architecture.`);
       lines.push('');
-      lines.push('**Step 1: Refactored Function** (click "Apply suggestion" below):');
+      // NO ```suggestion syntax - guidance only (no code to apply)
+      if (fix.guidance) {
+        lines.push(fix.guidance);
+      }
+      
+    } else if (fix.type === 'custom-function-runtime-error-fix') {
+      lines.push(`##  Runtime Error in Custom Function`);
+      lines.push('');
+      lines.push(`**Issue:** Function \`${fix.functionName}()\` throws runtime errors - ${fix.description}`);
+      lines.push('');
+      lines.push('**Fixed function with defensive null checks:**');
       lines.push('```suggestion');
-      lines.push(fix.refactoredCode || '// AI-generated refactored code');
+      lines.push(fix.refactoredCode || '// AI-generated code with null checks');
       lines.push('```');
       lines.push('');
-      if (fix.componentExample) {
-        lines.push('**Step 2: Custom Component** (create this component for DOM logic):');
+      if (fix.testingSteps) {
+        lines.push('**Testing:**');
+        lines.push(fix.testingSteps);
+        lines.push('');
+      }
+      
+    } else if (fix.type === 'css-background-image-fix') {
+      lines.push(`##  CSS Background-Image Performance Issue`);
+      lines.push('');
+      lines.push(fix.description);
+      lines.push('');
+      lines.push('**Step 1: Update CSS** (comment out background-image):');
+      lines.push('```suggestion');
+      lines.push(fix.fixedCSSCode || fix.originalCode);
+      lines.push('```');
+      lines.push('');
+      if (fix.fixedComponentCode) {
+        lines.push('**Step 2: Update Component** (add lazy-loaded <img> tag):');
         lines.push('```javascript');
-        lines.push(fix.componentExample);
+        lines.push(fix.fixedComponentCode);
         lines.push('```');
         lines.push('');
+      }
+      if (fix.htmlSuggestion) {
+        lines.push('**Alternative: Use <img> tag directly:**');
+        lines.push('```html');
+        lines.push(fix.htmlSuggestion);
+        lines.push('```');
+        lines.push('');
+      }
+      
+    } else if (fix.type === 'css-import-suggestion') {
+      lines.push(`##  CSS @import ${fix.isExternal ? 'External URL' : 'Local File'}`);
+      lines.push('');
+      lines.push(fix.description);
+      lines.push('');
+      
+      if (fix.isExternal) {
+        // External URL: GitHub automatically shows "Apply suggestion" button
+        lines.push('```suggestion');
+        lines.push(fix.suggestedCode);
+        lines.push('```');
+        lines.push('');
+      }
+      
+      // Add guidance
+      if (fix.guidance) {
+        lines.push(fix.guidance);
       }
     }
     
