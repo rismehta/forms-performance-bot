@@ -42,6 +42,11 @@
     "description": "Control how performance reports are generated. Options: 'minimal', 'normal', 'verbose'."
   },
   
+  "scheduledScan": {
+    "defaultUrl": "https://main--your-project--your-org.aem.live/forms/your-form",
+    "description": "Default URL for scheduled codebase scans. Required because form JSON only exists at runtime, not in repository. Can be overridden via workflow_dispatch input."
+  },
+  
   "autoFix": {
     "enabled": true,
     "trivialFixes": {

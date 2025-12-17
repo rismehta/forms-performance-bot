@@ -166,6 +166,12 @@ function countIssuesFromScheduledResults(results) {
     criticalIssues += results.rules.issues.length; // All rule cycles are critical
   }
   
+  // HTML issues
+  if (results.html?.issues) {
+    totalIssues += results.html.issues.length;
+    criticalIssues += results.html.issues.filter(i => i.severity === 'error').length;
+  }
+  
   return {
     totalIssues,
     criticalIssues

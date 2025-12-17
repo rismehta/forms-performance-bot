@@ -453,10 +453,19 @@ async function runScheduledMode(context, octokit, patOctokit, config) {
   // Get optional URL from workflow input
   const analysisUrl = core.getInput('analysis-url') || config.scheduledScan?.defaultUrl;
   
-  if (analysisUrl) {
-    core.info(`Analysis URL provided: ${analysisUrl}`);
+  if (!analysisUrl) {
+    core.warning('⚠️  No analysis-url provided for scheduled scan');
+    core.info('');
+    core.info('Scheduled mode requires a URL to extract form JSON.');
+    core.info('Form JSON is not stored in repository - it only exists at runtime.');
+    core.info('');
+    core.info('To enable full analysis, provide a URL:');
+    core.info('  1. Via workflow_dispatch input: analysis-url');
+    core.info('  2. Via .performance-bot.json: scheduledScan.defaultUrl');
+    core.info('');
+    core.info('Falling back to static analysis only (CSS/JS files)...');
   } else {
-    core.info(`No URL provided - static analysis only`);
+    core.info(`Analysis URL: ${analysisUrl}`);
   }
   
   // Initialize analyzers
@@ -466,112 +475,98 @@ async function runScheduledMode(context, octokit, patOctokit, config) {
   const formAnalyzer = new FormAnalyzer(config);
   const formEventsAnalyzer = new FormEventsAnalyzer(config);
   const hiddenFieldsAnalyzer = new HiddenFieldsAnalyzer(config);
-  const aiAutoFixAnalyzer = new AIAutoFixAnalyzer(config);
+  const formHTMLAnalyzer = new FormHTMLAnalyzer(config);
   
   // Load all files from workspace (NO filtering - entire codebase)
   core.info(' Loading all files from repository...');
   const { jsFiles, cssFiles } = await loadFilesFromWorkspace();
   core.info(`  Loaded ${jsFiles.length} JS files, ${cssFiles.length} CSS files`);
   
-  // Find all form JSON files
-  const formJsonFiles = await findFormJSONFiles();
-  core.info(`  Found ${formJsonFiles.length} form JSON files`);
-  
   const results = {
-    css: { issues: [] },
+    css: { issues: [], filesAnalyzed: cssFiles.length },
     customFunctions: { issues: [] },
     rules: { issues: [] },
-    forms: { count: formJsonFiles.length, issues: [] },
-    html: null, // Only if URL provided
-    performance: null // Only if URL provided
+    forms: { issues: [] },
+    html: null,
+    performance: null,
+    formJson: null
   };
   
-  // 1. CSS ANALYSIS (all CSS files)
+  // 1. CSS ANALYSIS (all CSS files - works without URL)
   core.info(' Analyzing CSS files...');
   const cssAnalysis = formCSSAnalyzer.analyze(cssFiles);
-  results.css = {
-    filesAnalyzed: cssFiles.length,
-    issues: cssAnalysis.issues || []
-  };
+  results.css.issues = cssAnalysis.issues || [];
   core.info(`  Found ${results.css.issues.length} CSS issues`);
   
-  // 2. CUSTOM FUNCTIONS ANALYSIS (all JS files)
-  core.info(' Analyzing custom functions...');
-  for (const formFile of formJsonFiles.slice(0, 10)) { // Limit to first 10 forms
-    try {
-      const analysis = customFunctionAnalyzer.analyze(formFile.json, jsFiles);
-      if (analysis.issues) {
-        results.customFunctions.issues.push(...analysis.issues);
-      }
-    } catch (error) {
-      core.warning(`  Error analyzing ${formFile.path}: ${error.message}`);
-    }
-  }
-  core.info(`  Found ${results.customFunctions.issues.length} custom function issues`);
-  
-  // 3. FORM JSON ANALYSIS (all form files)
-  core.info(' Analyzing form structure and rules...');
-  for (const formFile of formJsonFiles.slice(0, 10)) { // Limit to first 10 forms
-    try {
-      // Form structure
-      const structure = formAnalyzer.analyze(formFile.json);
-      
-      // Form events
-      const events = formEventsAnalyzer.analyze(formFile.json);
-      if (events.issues) {
-        results.forms.issues.push(...events.issues.map(i => ({
-          ...i,
-          form: formFile.path
-        })));
-      }
-      
-      // Hidden fields
-      const hiddenFields = hiddenFieldsAnalyzer.analyze(formFile.json, jsFiles);
-      if (hiddenFields.issues) {
-        results.forms.issues.push(...hiddenFields.issues.map(i => ({
-          ...i,
-          form: formFile.path
-        })));
-      }
-      
-      // Rule cycles
-      const ruleCycles = await rulePerformanceAnalyzer.analyze(formFile.json);
-      if (ruleCycles.cycles > 0) {
-        results.rules.issues.push({
-          form: formFile.path,
-          cycles: ruleCycles.cycles,
-          details: ruleCycles.cycleDetails
-        });
-      }
-      
-    } catch (error) {
-      core.warning(`  Error analyzing ${formFile.path}: ${error.message}`);
-    }
-  }
-  core.info(`  Found ${results.forms.issues.length} form issues`);
-  core.info(`  Found ${results.rules.issues.length} rule cycle issues`);
-  
-  // 4. HTML/PERFORMANCE ANALYSIS (only if URL provided)
+  // 2-5. FORM-SPECIFIC ANALYSIS (only if URL provided to extract JSON)
   if (analysisUrl) {
-    core.info(` Analyzing URL: ${analysisUrl}...`);
     try {
-      const urlAnalyzer = new (await import('./analyzers/url-analyzer.js')).URLAnalyzer();
+      core.info(' Fetching form JSON from URL...');
+      const urlAnalyzer = new URLAnalyzer();
       const urlData = await urlAnalyzer.analyze(analysisUrl);
       
-      results.html = {
-        domSize: urlData.html?.length || 0,
-        formRendered: urlData.formRendered || false
-      };
-      
-      results.performance = {
-        loadTime: urlData.loadTime || 0,
-        jsHeapSize: urlData.jsHeapSize || 0
-      };
-      
-      core.info(`  Load time: ${results.performance.loadTime}ms`);
-      core.info(`  DOM size: ${results.html.domSize} nodes`);
+      if (!urlData.formJson) {
+        core.warning('  Failed to extract form JSON from URL - skipping form analysis');
+      } else {
+        core.info(`  Form JSON extracted successfully`);
+        results.formJson = urlData.formJson;
+        
+        // 2. CUSTOM FUNCTIONS ANALYSIS
+        core.info(' Analyzing custom functions...');
+        const customFunctionsAnalysis = customFunctionAnalyzer.analyze(urlData.formJson, jsFiles);
+        results.customFunctions.issues = customFunctionsAnalysis.issues || [];
+        core.info(`  Found ${results.customFunctions.issues.length} custom function issues`);
+        
+        // 3. FORM EVENTS ANALYSIS
+        core.info(' Analyzing form events...');
+        const eventsAnalysis = formEventsAnalyzer.analyze(urlData.formJson);
+        if (eventsAnalysis.issues) {
+          results.forms.issues.push(...eventsAnalysis.issues);
+        }
+        core.info(`  Found ${eventsAnalysis.issues?.length || 0} form event issues`);
+        
+        // 4. HIDDEN FIELDS ANALYSIS
+        core.info(' Analyzing hidden fields...');
+        const hiddenFieldsAnalysis = hiddenFieldsAnalyzer.analyze(urlData.formJson, jsFiles);
+        if (hiddenFieldsAnalysis.issues) {
+          results.forms.issues.push(...hiddenFieldsAnalysis.issues);
+        }
+        core.info(`  Found ${hiddenFieldsAnalysis.issues?.length || 0} hidden field issues`);
+        
+        // 5. RULE CYCLES ANALYSIS
+        core.info(' Analyzing rule cycles...');
+        const ruleCyclesAnalysis = await rulePerformanceAnalyzer.analyze(urlData.formJson);
+        if (ruleCyclesAnalysis.cycles > 0) {
+          results.rules.issues.push({
+            cycles: ruleCyclesAnalysis.cycles,
+            details: ruleCyclesAnalysis.cycleDetails,
+            totalRules: ruleCyclesAnalysis.totalRules
+          });
+        }
+        core.info(`  Found ${ruleCyclesAnalysis.cycles || 0} rule cycles`);
+        
+        // 6. HTML ANALYSIS
+        core.info(' Analyzing HTML...');
+        const htmlAnalysis = formHTMLAnalyzer.analyze(urlData.html);
+        if (htmlAnalysis.issues) {
+          results.html = {
+            domSize: urlData.html?.length || 0,
+            formRendered: urlData.formRendered || false,
+            issues: htmlAnalysis.issues
+          };
+        }
+        core.info(`  Found ${htmlAnalysis.issues?.length || 0} HTML issues`);
+        
+        // 7. PERFORMANCE METRICS
+        results.performance = {
+          loadTime: urlData.loadTime || 0,
+          jsHeapSize: urlData.jsHeapSize || 0
+        };
+        core.info(`  Load time: ${results.performance.loadTime}ms`);
+      }
     } catch (error) {
-      core.warning(`  URL analysis failed: ${error.message}`);
+      core.error(`  URL analysis failed: ${error.message}`);
+      core.error(error.stack);
     }
   }
   
@@ -606,58 +601,6 @@ async function runScheduledMode(context, octokit, patOctokit, config) {
   }
   
   core.info('✓ Scheduled scan completed');
-}
-
-/**
- * Find all form JSON files in the repository
- */
-async function findFormJSONFiles() {
-  const workspaceRoot = process.cwd();
-  const formFiles = [];
-  
-  function scanDirectory(dir, depth = 0) {
-    if (depth > 10) return;
-    
-    try {
-      const entries = readdirSync(dir);
-      
-      for (const entry of entries) {
-        const fullPath = join(dir, entry);
-        
-        // Skip common ignore patterns
-        if (entry === 'node_modules' || entry === '.git' || entry.startsWith('.')) {
-          continue;
-        }
-        
-        try {
-          const stats = statSync(fullPath);
-          
-          if (stats.isDirectory()) {
-            scanDirectory(fullPath, depth + 1);
-          } else if (entry.endsWith('.form.json') || entry.endsWith('.form.model.json')) {
-            const relativePath = fullPath.replace(workspaceRoot + '/', '');
-            try {
-              const content = readFileSync(fullPath, 'utf-8');
-              const json = JSON.parse(content);
-              formFiles.push({
-                path: relativePath,
-                json
-              });
-            } catch (error) {
-              core.warning(`Could not parse ${relativePath}: ${error.message}`);
-            }
-          }
-        } catch (error) {
-          continue;
-        }
-      }
-    } catch (error) {
-      core.warning(`Could not scan directory ${dir}: ${error.message}`);
-    }
-  }
-  
-  scanDirectory(workspaceRoot);
-  return formFiles;
 }
 
 /**

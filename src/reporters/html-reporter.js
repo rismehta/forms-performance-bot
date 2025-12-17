@@ -924,13 +924,17 @@ export class HTMLReporter {
     const totalFunctionIssues = results.customFunctions?.issues?.length || 0;
     const totalFormIssues = results.forms?.issues?.length || 0;
     const totalRuleIssues = results.rules?.issues?.length || 0;
-    const totalIssues = totalCSSIssues + totalFunctionIssues + totalFormIssues + totalRuleIssues;
+    const totalHTMLIssues = results.html?.issues?.length || 0;
+    const totalIssues = totalCSSIssues + totalFunctionIssues + totalFormIssues + totalRuleIssues + totalHTMLIssues;
     
     const criticalCSS = results.css?.issues?.filter(i => i.severity === 'error').length || 0;
     const criticalFunctions = results.customFunctions?.issues?.filter(i => i.severity === 'error').length || 0;
     const criticalForms = results.forms?.issues?.filter(i => i.severity === 'error').length || 0;
     const criticalRules = totalRuleIssues; // All rule cycles are critical
-    const totalCritical = criticalCSS + criticalFunctions + criticalForms + criticalRules;
+    const criticalHTML = results.html?.issues?.filter(i => i.severity === 'error').length || 0;
+    const totalCritical = criticalCSS + criticalFunctions + criticalForms + criticalRules + criticalHTML;
+    
+    const hasFormAnalysis = !!results.formJson;
     
     return `
 <!DOCTYPE html>
@@ -962,9 +966,27 @@ export class HTMLReporter {
     <div class="meta">
       <strong>Repository:</strong> ${repository || 'Unknown'}<br>
       <strong>Scan Date:</strong> ${date}<br>
-      ${analysisUrl ? `<strong>Analysis URL:</strong> <a href="${analysisUrl}" target="_blank">${analysisUrl}</a><br>` : ''}
-      <strong>Forms Analyzed:</strong> ${results.forms?.count || 0}
+      ${analysisUrl ? `<strong>Analysis URL:</strong> <a href="${analysisUrl}" target="_blank">${analysisUrl}</a><br>` : '<strong>Analysis URL:</strong> Not provided (static analysis only)<br>'}
+      <strong>Form Analysis:</strong> ${hasFormAnalysis ? 'Enabled' : 'Disabled (no URL provided)'}
     </div>
+    
+    ${!hasFormAnalysis ? `
+    <div class="issue-item" style="border-left-color: #ffc107; background: #fff3cd;">
+      <strong>⚠️  Limited Analysis Mode</strong><br>
+      Form-specific analysis skipped because no URL was provided. Form JSON only exists at runtime, not in the repository.<br>
+      <br>
+      <strong>What was analyzed:</strong>
+      <ul style="margin: 10px 0;">
+        <li>CSS files (${results.css?.filesAnalyzed || 0} files)</li>
+        <li>JavaScript files (static analysis only)</li>
+      </ul>
+      <strong>To enable full analysis:</strong>
+      <ul style="margin: 10px 0;">
+        <li>Provide <code>analysis-url</code> via workflow_dispatch</li>
+        <li>Or configure <code>scheduledScan.defaultUrl</code> in .performance-bot.json</li>
+      </ul>
+    </div>
+    ` : ''}
     
     <div class="summary">
       <div class="summary-card">
@@ -977,11 +999,11 @@ export class HTMLReporter {
       </div>
       <div class="summary-card">
         <h3>${results.css?.filesAnalyzed || 0}</h3>
-        <p>CSS Files Analyzed</p>
+        <p>CSS Files</p>
       </div>
       <div class="summary-card">
-        <h3>${results.forms?.count || 0}</h3>
-        <p>Form Files Analyzed</p>
+        <h3>${totalHTMLIssues}</h3>
+        <p>HTML Issues</p>
       </div>
     </div>
     
@@ -1029,11 +1051,25 @@ export class HTMLReporter {
     <div class="issue-list">
       ${results.forms.issues.slice(0, 20).map(issue => `
         <div class="issue-item ${issue.severity || 'warning'}">
-          <strong>${issue.type || 'Form Issue'}</strong> in <code>${issue.form || 'unknown'}</code><br>
+          <strong>${issue.type || 'Form Issue'}</strong><br>
           ${issue.message || 'No description'}
         </div>
       `).join('')}
       ${results.forms.issues.length > 20 ? `<p><em>...and ${results.forms.issues.length - 20} more</em></p>` : ''}
+    </div>
+    ` : ''}
+    
+    ${totalHTMLIssues > 0 ? `
+    <h2>HTML Issues (${totalHTMLIssues})</h2>
+    <div class="issue-list">
+      ${results.html.issues.slice(0, 20).map(issue => `
+        <div class="issue-item ${issue.severity || 'warning'}">
+          <strong>${issue.type || 'HTML Issue'}</strong><br>
+          ${issue.message || 'No description'}
+          ${issue.count ? `<br><em>Count: ${issue.count}</em>` : ''}
+        </div>
+      `).join('')}
+      ${results.html.issues.length > 20 ? `<p><em>...and ${results.html.issues.length - 20} more</em></p>` : ''}
     </div>
     ` : ''}
     
