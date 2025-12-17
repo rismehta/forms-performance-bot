@@ -1,28 +1,56 @@
 /**
- * SendGrid email integration for scheduled reports
+ * Email integration for scheduled reports
+ * Supports: SendGrid API, Gmail SMTP, or generic SMTP
  */
 import * as core from '@actions/core';
 
 /**
- * Send email report via SendGrid
+ * Send email report via configured email provider
  * @param {Object|Array} results - Analysis results (single form object or array of forms)
  * @param {string} htmlReport - HTML report content
  * @param {Object} options - Email options (repository, from, formGistLinks)
  * @returns {Promise<boolean>} Success status
  */
 export async function sendEmailReport(results, htmlReport, options = {}) {
-  const apiKey = process.env.SENDGRID_API_KEY;
-  const toEmail = process.env.REPORT_EMAIL || 'abc@gmail.com';
-  const fromEmail = options.from || 'aemforms-performance-bot@adobe.com';
+  // Check which email provider is configured
+  const sendgridKey = process.env.SENDGRID_API_KEY;
+  const gmailUser = process.env.GMAIL_USER;
+  const gmailPassword = process.env.GMAIL_APP_PASSWORD;
+  const smtpHost = process.env.SMTP_HOST;
   
-  if (!apiKey) {
-    core.warning('⚠️  SENDGRID_API_KEY not set - skipping email');
-    core.info('  To enable email reports:');
-    core.info('  1. Sign up at https://sendgrid.com (free tier: 100 emails/day)');
-    core.info('  2. Create API key');
-    core.info('  3. Add SENDGRID_API_KEY to repository secrets');
+  const toEmail = process.env.REPORT_EMAIL || 'abc@gmail.com';
+  
+  // Determine which provider to use
+  if (sendgridKey) {
+    return await sendViaSendGrid(results, htmlReport, options, sendgridKey, toEmail);
+  } else if (gmailUser && gmailPassword) {
+    return await sendViaGmail(results, htmlReport, options, gmailUser, gmailPassword, toEmail);
+  } else if (smtpHost) {
+    return await sendViaSMTP(results, htmlReport, options, toEmail);
+  } else {
+    core.warning('⚠️  No email provider configured - skipping email');
+    core.info('  To enable email reports, configure ONE of:');
+    core.info('  ');
+    core.info('  Option 1: SendGrid (API)');
+    core.info('    - Set SENDGRID_API_KEY');
+    core.info('  ');
+    core.info('  Option 2: Gmail (SMTP - No signup!)');
+    core.info('    - Set GMAIL_USER (your Gmail address)');
+    core.info('    - Set GMAIL_APP_PASSWORD (from https://myaccount.google.com/apppasswords)');
+    core.info('  ');
+    core.info('  Option 3: Generic SMTP');
+    core.info('    - Set SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD');
+    core.info('  ');
+    core.info('  All options also require: REPORT_EMAIL (recipient)');
     return false;
   }
+}
+
+/**
+ * Send email via SendGrid API
+ */
+async function sendViaSendGrid(results, htmlReport, options, apiKey, toEmail) {
+  const fromEmail = options.from || 'aemforms-performance-bot@adobe.com';
   
   const date = new Date().toDateString();
   const isMultipleForms = Array.isArray(results);
@@ -34,10 +62,12 @@ export async function sendEmailReport(results, htmlReport, options = {}) {
   const repository = options.repository || 'Unknown Repository';
   const formCount = isMultipleForms ? results.length : 1;
   
+  const subject = `📊 Daily Performance Report - ${repository} - ${date} (${formCount} form${formCount > 1 ? 's' : ''}, ${issueCount} issues${criticalCount > 0 ? `, ${criticalCount} critical` : ''})`;
+  
   const emailData = {
     personalizations: [{
       to: [{ email: toEmail }],
-      subject: `📊 Daily Performance Report - ${repository} - ${date} (${formCount} form${formCount > 1 ? 's' : ''}, ${issueCount} issues${criticalCount > 0 ? `, ${criticalCount} critical` : ''})`
+      subject
     }],
     from: { 
       email: fromEmail,
@@ -50,7 +80,7 @@ export async function sendEmailReport(results, htmlReport, options = {}) {
   };
   
   try {
-    core.info(`📧 Sending email to ${toEmail}...`);
+    core.info(`📧 Sending email via SendGrid to ${toEmail}...`);
     
     const response = await fetch('https://api.sendgrid.com/v3/mail/send', {
       method: 'POST',
@@ -72,6 +102,122 @@ export async function sendEmailReport(results, htmlReport, options = {}) {
     }
   } catch (error) {
     core.error(`❌ SendGrid API error: ${error.message}`);
+    return false;
+  }
+}
+
+/**
+ * Send email via Gmail SMTP
+ * Uses Gmail's SMTP with app password authentication
+ */
+async function sendViaGmail(results, htmlReport, options, gmailUser, gmailPassword, toEmail) {
+  const date = new Date().toDateString();
+  const isMultipleForms = Array.isArray(results);
+  const summary = isMultipleForms 
+    ? countIssuesFromMultipleForms(results) 
+    : countIssuesFromScheduledResults(results);
+  const issueCount = summary.totalIssues;
+  const criticalCount = summary.criticalIssues;
+  const repository = options.repository || 'Unknown Repository';
+  const formCount = isMultipleForms ? results.length : 1;
+  
+  const subject = `📊 Daily Performance Report - ${repository} - ${date} (${formCount} form${formCount > 1 ? 's' : ''}, ${issueCount} issues${criticalCount > 0 ? `, ${criticalCount} critical` : ''})`;
+  
+  try {
+    core.info(`📧 Sending email via Gmail SMTP to ${toEmail}...`);
+    
+    // Use Gmail's REST API with OAuth-style authentication
+    // This is simpler than implementing full SMTP protocol
+    const nodemailer = await import('nodemailer').catch(() => null);
+    
+    if (!nodemailer) {
+      core.warning('⚠️  Gmail SMTP requires nodemailer package');
+      core.info('  Install: npm install nodemailer');
+      return false;
+    }
+    
+    const transporter = nodemailer.default.createTransport({
+      host: 'smtp.gmail.com',
+      port: 587,
+      secure: false, // use TLS
+      auth: {
+        user: gmailUser,
+        pass: gmailPassword
+      }
+    });
+    
+    await transporter.sendMail({
+      from: `"AEM Forms Performance Bot" <${gmailUser}>`,
+      to: toEmail,
+      subject,
+      html: htmlReport
+    });
+    
+    core.info(`✅ Email sent successfully via Gmail to ${toEmail}`);
+    return true;
+  } catch (error) {
+    core.error(`❌ Gmail SMTP error: ${error.message}`);
+    core.info('  Troubleshooting:');
+    core.info('  1. Enable "Less secure app access" or use App Password');
+    core.info('  2. Go to: https://myaccount.google.com/apppasswords');
+    core.info('  3. Generate app-specific password');
+    return false;
+  }
+}
+
+/**
+ * Send email via generic SMTP
+ */
+async function sendViaSMTP(results, htmlReport, options, toEmail) {
+  const host = process.env.SMTP_HOST;
+  const port = process.env.SMTP_PORT || 587;
+  const user = process.env.SMTP_USER;
+  const password = process.env.SMTP_PASSWORD;
+  const fromEmail = process.env.SMTP_FROM || user;
+  
+  const date = new Date().toDateString();
+  const isMultipleForms = Array.isArray(results);
+  const summary = isMultipleForms 
+    ? countIssuesFromMultipleForms(results) 
+    : countIssuesFromScheduledResults(results);
+  const issueCount = summary.totalIssues;
+  const criticalCount = summary.criticalIssues;
+  const repository = options.repository || 'Unknown Repository';
+  const formCount = isMultipleForms ? results.length : 1;
+  
+  const subject = `📊 Daily Performance Report - ${repository} - ${date} (${formCount} form${formCount > 1 ? 's' : ''}, ${issueCount} issues${criticalCount > 0 ? `, ${criticalCount} critical` : ''})`;
+  
+  try {
+    core.info(`📧 Sending email via SMTP (${host}:${port}) to ${toEmail}...`);
+    
+    const nodemailer = await import('nodemailer').catch(() => null);
+    
+    if (!nodemailer) {
+      core.warning('⚠️  SMTP requires nodemailer package');
+      return false;
+    }
+    
+    const transporter = nodemailer.default.createTransport({
+      host,
+      port: parseInt(port),
+      secure: port == 465, // true for 465, false for other ports
+      auth: {
+        user,
+        pass: password
+      }
+    });
+    
+    await transporter.sendMail({
+      from: `"AEM Forms Performance Bot" <${fromEmail}>`,
+      to: toEmail,
+      subject,
+      html: htmlReport
+    });
+    
+    core.info(`✅ Email sent successfully via SMTP to ${toEmail}`);
+    return true;
+  } catch (error) {
+    core.error(`❌ SMTP error: ${error.message}`);
     return false;
   }
 }
