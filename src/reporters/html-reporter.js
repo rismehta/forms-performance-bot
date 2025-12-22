@@ -1359,5 +1359,35 @@ export class HTMLReporter {
 </html>
     `.trim();
   }
+
+  /**
+   * Convert dark theme HTML to email-safe light theme
+   * Email clients often strip background colors, making light text invisible
+   * This method converts the report to use dark text on light background
+   */
+  convertToEmailSafeHTML(darkHTML) {
+    return darkHTML
+      // Body: Dark bg + light text → Light bg + dark text
+      .replace(/background:\s*#0d1117/g, 'background: #f6f8fa')
+      .replace(/color:\s*#c9d1d9/g, 'color: #24292f')
+      
+      // Cards: Dark bg → Light bg
+      .replace(/background:\s*#161b22/g, 'background: #ffffff')
+      .replace(/border:\s*1px solid #30363d/g, 'border: 1px solid #d0d7de')
+      
+      // Muted text: Light gray → Dark gray
+      .replace(/color:\s*#8b949e/g, 'color: #57606a')
+      .replace(/color:\s*rgba\(255,255,255,0.8\)/g, 'color: rgba(0,0,0,0.7)')
+      
+      // Code blocks: Dark → Light
+      .replace(/background:\s*#0d1117/g, 'background: #f6f8fa')
+      .replace(/color:\s*#79c0ff/g, 'color: #0969da')
+      
+      // Keep error/warning/success colors (they work on both themes)
+      // #f85149 (red), #d29922 (yellow), #3fb950 (green), #58a6ff (blue)
+      
+      // White text → Dark text
+      .replace(/color:\s*#fff/g, 'color: #24292f');
+  }
 }
 

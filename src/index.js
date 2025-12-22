@@ -731,7 +731,11 @@ async function runScheduledMode(context, octokit, patOctokit, config) {
   core.info('\n📧 Sending email report...');
   const { sendEmailReport } = await import('./utils/email-sender.js');
   
-  const emailSent = await sendEmailReport(formResults, summaryHtmlReport, {
+  // Convert dark theme HTML to email-safe light theme
+  // (Email clients strip background colors, making light text invisible)
+  const emailSafeHtml = htmlReporter.convertToEmailSafeHTML(summaryHtmlReport);
+  
+  const emailSent = await sendEmailReport(formResults, emailSafeHtml, {
     repository: `${owner}/${repo}`,
     from: 'aemforms-performance-bot@adobe.com',
     formGistLinks

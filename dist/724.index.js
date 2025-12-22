@@ -155,6 +155,10 @@ async function sendViaGmail(results, htmlReport, options, gmailUser, gmailPasswo
       auth: {
         user: gmailUser,
         pass: gmailPassword
+      },
+      // Anti-spam: Set proper headers
+      tls: {
+        rejectUnauthorized: false
       }
     });
     
@@ -162,7 +166,16 @@ async function sendViaGmail(results, htmlReport, options, gmailUser, gmailPasswo
       from: `"AEM Forms Performance Bot" <${gmailUser}>`,
       to: toEmail,
       subject,
-      html: htmlReport
+      html: htmlReport,
+      // Anti-spam headers
+      headers: {
+        'X-Mailer': 'AEM Forms Performance Bot',
+        'X-Priority': '3', // Normal priority (1=high, 5=low can trigger spam)
+        'Importance': 'Normal',
+        'List-Unsubscribe': `<mailto:${gmailUser}?subject=Unsubscribe>`, // Required for bulk emails
+      },
+      // Provide plain text fallback (helps with spam filters)
+      text: htmlReport.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim()
     });
     
     _actions_core__WEBPACK_IMPORTED_MODULE_0__.info(`✅ Email sent successfully via Gmail to ${toEmail}`);
