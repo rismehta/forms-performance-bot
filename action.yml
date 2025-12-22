@@ -12,7 +12,7 @@ inputs:
     required: true
     default: ${{ github.token }}
   analysis-url:
-    description: 'Form URL to analyze (optional, for scheduled scans with HTML analysis)'
+    description: 'Form URL(s) to analyze (optional, comma-separated for multiple URLs, added to config URLs)'
     required: false
 
 runs:

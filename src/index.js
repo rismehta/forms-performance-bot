@@ -537,13 +537,20 @@ async function runScheduledMode(context, octokit, patOctokit, config) {
   
   // Get URLs from config + workflow input
   const configUrls = config.scheduledScan?.urls || [];
-  const workflowUrl = core.getInput('analysis-url');
+  const workflowUrlInput = core.getInput('analysis-url');
   
-  // Combine URLs (workflow input is added to config URLs)
+  // Parse workflow input (supports comma-separated URLs)
+  const workflowUrls = workflowUrlInput
+    ? workflowUrlInput.split(',').map(url => url.trim()).filter(url => url.length > 0)
+    : [];
+  
+  // Combine URLs (workflow input is added to config URLs, avoiding duplicates)
   const analysisUrls = [...configUrls];
-  if (workflowUrl && !analysisUrls.includes(workflowUrl)) {
-    analysisUrls.push(workflowUrl);
-  }
+  workflowUrls.forEach(url => {
+    if (!analysisUrls.includes(url)) {
+      analysisUrls.push(url);
+    }
+  });
   
   if (analysisUrls.length === 0) {
     core.warning('⚠️  No analysis URLs provided for scheduled scan');
@@ -552,8 +559,9 @@ async function runScheduledMode(context, octokit, patOctokit, config) {
     core.info('Form JSON is not stored in repository - it only exists at runtime.');
     core.info('');
     core.info('To enable full analysis, provide URLs:');
-    core.info('  1. Via .performance-bot.json: scheduledScan.urls array');
-    core.info('  2. Via workflow_dispatch input: analysis-url (optional, added to config URLs)');
+    core.info('  1. Via .performance-bot.json: scheduledScan.urls array (multiple URLs)');
+    core.info('  2. Via workflow_dispatch input: analysis-url (comma-separated, added to config URLs)');
+    core.info('     Example: "https://example.com/form1,https://example.com/form2"');
     core.info('');
     core.info('Falling back to static analysis only (CSS/JS files)...');
   } else {
