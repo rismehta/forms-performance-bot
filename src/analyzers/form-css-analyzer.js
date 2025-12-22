@@ -55,10 +55,17 @@ export class FormCSSAnalyzer {
   /**
    * Strip CSS comments from content
    * This ensures we don't flag commented-out code
+   * Handles both standard CSS and preprocessor (//) comments and HTML comments <!-- -->
    */
   stripComments(content) {
-    // Remove /* ... */ style comments
-    return content.replace(/\/\*[\s\S]*?\*\//g, '');
+    // Remove /* ... */ style comments (standard CSS)
+    let cleaned = content.replace(/\/\*[\s\S]*?\*\//g, '');
+    
+    // Remove // style comments (SCSS/LESS/SASS)
+    // Match // to end of line, but preserve the newline for accurate line numbers
+    cleaned = cleaned.replace(/\/\/.*$/gm, '');
+    
+    return cleaned;
   }
 
   /**
