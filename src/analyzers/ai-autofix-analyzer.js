@@ -1434,14 +1434,47 @@ export default function decorate(block) {
           return null;
         }
         
-        // IMPORTANT: Only generate fix if component exists
-        // If no component, the issue is already reported by FormCSSAnalyzer - no auto-fix needed
-        if (!componentContent) {
-          core.info(`No component found for ${issue.file} - skipping auto-fix (issue will be reported only)`);
-          return null;
-        }
+        // Generate fix (with or without component)
+        let fix;
         
-        const fix = await this.generateBackgroundImageFix(issue, enhancedContext, cssContent, componentContent);
+        if (!componentContent) {
+          // No component found - provide manual guidance only
+          core.info(`No component found for ${issue.file} - generating manual guidance`);
+          fix = {
+            type: 'css-background-image-fix',
+            severity: 'critical',
+            file: issue.file,
+            line: issue.line,
+            selector: issue.selector,
+            imagePath: enhancedContext.imagePath,
+            title: `Replace CSS background-image with <img> tag`,
+            description: `CSS background-image at \`${issue.selector}\` cannot be lazy loaded. Replace with \`<img loading="lazy">\` for better performance.`,
+            guidance: `
+**Why this is an issue:**
+- CSS \`background-image\` loads immediately (even if user never scrolls to it)
+- Browser's \`loading="lazy"\` attribute ONLY works on \`<img>\` tags
+- This hurts Core Web Vitals (LCP, CLS)
+
+**How to fix:**
+1. Remove \`background-image\` from CSS (\`${issue.selector}\`)
+2. Add an \`<img>\` tag in your HTML/component:
+   \`\`\`html
+   <img src="${enhancedContext.imagePath}" 
+        loading="lazy" 
+        width="${enhancedContext.width || 'auto'}" 
+        height="${enhancedContext.height || 'auto'}"
+        alt="Description">
+   \`\`\`
+3. Style the image with CSS classes as needed
+
+**Note:** If this is a hero image (above the fold), use \`loading="eager"\` instead.
+`,
+            estimatedImpact: 'Enables lazy loading, reduces initial page load, improves LCP'
+          };
+        } else {
+          // Component found - generate AI-powered fix
+          fix = await this.generateBackgroundImageFix(issue, enhancedContext, cssContent, componentContent);
+        }
         
         if (fix) {
           // VALIDATE: If component was provided, ensure AI preserved all critical code
@@ -3076,24 +3109,31 @@ Respond with ONLY the JSON object containing the COMPLETE function code, no mark
       lines.push('');
       lines.push(fix.description);
       lines.push('');
-      lines.push('**Step 1: Update CSS** (comment out background-image):');
-      lines.push('```suggestion');
-      lines.push(fix.fixedCSSCode || fix.originalCode);
-      lines.push('```');
-      lines.push('');
-      if (fix.fixedComponentCode) {
-        lines.push('**Step 2: Update Component** (add lazy-loaded <img> tag):');
-        lines.push('```javascript');
-        lines.push(fix.fixedComponentCode);
+      
+      // If AI-generated fix available (component found)
+      if (fix.fixedCSSCode || fix.fixedComponentCode) {
+        lines.push('**Step 1: Update CSS** (comment out background-image):');
+        lines.push('```suggestion');
+        lines.push(fix.fixedCSSCode || fix.originalCode);
         lines.push('```');
         lines.push('');
-      }
-      if (fix.htmlSuggestion) {
-        lines.push('**Alternative: Use <img> tag directly:**');
-        lines.push('```html');
-        lines.push(fix.htmlSuggestion);
-        lines.push('```');
-        lines.push('');
+        if (fix.fixedComponentCode) {
+          lines.push('**Step 2: Update Component** (add lazy-loaded <img> tag):');
+          lines.push('```javascript');
+          lines.push(fix.fixedComponentCode);
+          lines.push('```');
+          lines.push('');
+        }
+        if (fix.htmlSuggestion) {
+          lines.push('**Alternative: Use <img> tag directly:**');
+          lines.push('```html');
+          lines.push(fix.htmlSuggestion);
+          lines.push('```');
+          lines.push('');
+        }
+      } else if (fix.guidance) {
+        // Manual guidance only (no component found)
+        lines.push(fix.guidance);
       }
       
     } else if (fix.type === 'css-import-suggestion') {
