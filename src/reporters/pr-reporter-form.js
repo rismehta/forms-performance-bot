@@ -37,9 +37,8 @@ export class FormPRReporter {
     const sections = [];
 
     // Header with issue count
-    // If postedInlineComments is available, count only those (accurate count of files in PR diff)
-    // Otherwise, count all newIssues (fallback for scheduled mode)
-    const critical = this.countCriticalIssues(results, urls.postedInlineComments);
+    // Always count from results.*.newIssues (total issues in PR, regardless of which comments were posted on this run)
+    const critical = this.countCriticalIssues(results);
     
     if (critical === 0) {
       sections.push('## Performance Analysis\n');
@@ -1063,22 +1062,21 @@ export class FormPRReporter {
   }
 
   /**
-   * Count critical issues
-   * @param {Object} results - All analyzer results
-   * @param {Array} postedInlineComments - Successfully posted inline comments (if available)
-   * @returns {number} Count of critical issues
+   * Count critical issues (always counts total issues in PR, not just newly posted comments)
+   * 
+   * IMPORTANT: This counts from results.*.newIssues which represent ALL issues in the current PR.
+   * On re-runs, this ensures we show the correct total count, not just newly posted comments.
+   * 
+   * Example:
+   * - First run: 6 issues → 6 inline comments posted → "6 critical issues"
+   * - Re-run: Same 6 issues → 4 skipped (duplicates), 2 posted → "6 critical issues" (not 2!)
+   * 
+   * @param {Object} results - All analyzer results (with newIssues arrays filtered to PR diff files)
+   * @returns {number} Total count of critical issues in PR
    */
-  countCriticalIssues(results, postedInlineComments = null) {
-    // If we have postedInlineComments, count only those (accurate count of files in PR diff)
-    if (postedInlineComments && Array.isArray(postedInlineComments)) {
-      // Count unique functions/files that got inline comments posted
-      // This is the ACCURATE count of issues in PR diff files
-      return postedInlineComments.length;
-    }
-    
-    // Fallback: Count all newIssues (for scheduled mode or if inline comments not available)
-    // In PR mode, count ONLY issues in PR diff files (newIssues arrays)
-    // These are already filtered by filterResultsToPRFiles()
+  countCriticalIssues(results) {
+    // Count all newIssues arrays (represent current state of issues in PR)
+    // These are already filtered by filterResultsToPRFiles() to only include PR diff files
     let count = 0;
     
     // Form events (already filtered to PR)
