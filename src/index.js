@@ -814,63 +814,82 @@ function detectCriticalIssues(results, totalVisibleComments = null) {
   }
   }
 
-  // 4. CSS issues (ALL issues in PR mode are critical - must fix)
+  // 4. CSS issues (ONLY severity: 'error' are critical in PR mode)
   if (results.formCSS?.newIssues && results.formCSS.newIssues.length > 0) {
-    critical.hasCritical = true;
-    critical.count += results.formCSS.newIssues.length;
+    // Filter to only ERROR severity issues (not 'warning' or 'info')
+    const criticalCSSIssues = results.formCSS.newIssues.filter(i => i.severity === 'error');
     
-    // Break down by type for reporting
-    const blockingImports = results.formCSS.newIssues.filter(i => i.type === 'css-import-blocking');
-    const backgroundImages = results.formCSS.newIssues.filter(i => i.type === 'css-background-image');
-    const otherCSS = results.formCSS.newIssues.length - blockingImports.length - backgroundImages.length;
-    
-    if (blockingImports.length > 0) {
-      critical.issues.push(`${blockingImports.length} @import statement(s) in CSS`);
-    }
-    if (backgroundImages.length > 0) {
-      critical.issues.push(`${backgroundImages.length} CSS background-image(s)`);
-    }
-    if (otherCSS > 0) {
-      critical.issues.push(`${otherCSS} other CSS issue(s)`);
-    }
-  }
-
-  // 5. HTML issues (ALL issues in PR mode are critical - must fix)
-  if (results.formHTML?.newIssues && results.formHTML.newIssues.length > 0) {
-    critical.hasCritical = true;
-    
-    // Count all HTML issues
-    results.formHTML.newIssues.forEach(issue => {
-      if (issue.count) {
-        critical.count += 1; // Each issue type counts as 1
-        
-        // Add descriptive message based on type
-        if (issue.type === 'inline-scripts-on-page' && issue.breakdown) {
-          critical.issues.push(`${issue.count} inline script(s) (${issue.breakdown.head || 0} in <head>, ${issue.breakdown.body || 0} in <body>)`);
-        } else if (issue.type === 'blocking-scripts-on-page' && issue.breakdown) {
-          critical.issues.push(`${issue.count} blocking script(s) (${issue.breakdown.head || 0} in <head>, ${issue.breakdown.body || 0} in <body>)`);
-        } else if (issue.type === 'excessive-dom-size') {
-          critical.issues.push(`${issue.count} DOM nodes (threshold: ${issue.threshold})`);
-        } else if (issue.type === 'images-not-lazy-loaded') {
-          critical.issues.push(`${issue.count} image(s) without lazy loading`);
-        } else if (issue.type === 'large-dom-size') {
-          critical.issues.push(`${issue.count} DOM nodes (warning threshold)`);
-        } else if (issue.type === 'iframes-in-form') {
-          critical.issues.push(`${issue.count} iframe(s) in form`);
-        } else if (issue.type === 'autoplay-videos') {
-          critical.issues.push(`${issue.count} autoplay video(s)`);
-        } else {
-          critical.issues.push(`HTML issue: ${issue.message || issue.type}`);
-        }
+    if (criticalCSSIssues.length > 0) {
+      critical.hasCritical = true;
+      critical.count += criticalCSSIssues.length;
+      
+      // Break down by type for reporting
+      const blockingImports = criticalCSSIssues.filter(i => i.type === 'css-import-blocking');
+      const backgroundImages = criticalCSSIssues.filter(i => i.type === 'css-background-image');
+      const inlineDataURIs = criticalCSSIssues.filter(i => i.type === 'inline-data-uri');
+      const otherCSS = criticalCSSIssues.length - blockingImports.length - backgroundImages.length - inlineDataURIs.length;
+      
+      if (blockingImports.length > 0) {
+        critical.issues.push(`${blockingImports.length} @import statement(s) in CSS`);
       }
-    });
+      if (backgroundImages.length > 0) {
+        critical.issues.push(`${backgroundImages.length} CSS background-image(s)`);
+      }
+      if (inlineDataURIs.length > 0) {
+        critical.issues.push(`${inlineDataURIs.length} large inline data URI(s)`);
+      }
+      if (otherCSS > 0) {
+        critical.issues.push(`${otherCSS} other critical CSS issue(s)`);
+      }
+    }
   }
 
-  // 6. Hidden fields (ALL issues in PR mode are critical - must fix)
+  // 5. HTML issues (ONLY severity: 'error' are critical in PR mode)
+  if (results.formHTML?.newIssues && results.formHTML.newIssues.length > 0) {
+    // Filter to only ERROR severity issues (not 'warning' or 'info')
+    const criticalHTMLIssues = results.formHTML.newIssues.filter(i => i.severity === 'error');
+    
+    if (criticalHTMLIssues.length > 0) {
+      critical.hasCritical = true;
+      
+      // Count critical HTML issues
+      criticalHTMLIssues.forEach(issue => {
+        if (issue.count) {
+          critical.count += 1; // Each issue type counts as 1
+          
+          // Add descriptive message based on type
+          if (issue.type === 'inline-scripts-on-page' && issue.breakdown) {
+            critical.issues.push(`${issue.count} inline script(s) (${issue.breakdown.head || 0} in <head>, ${issue.breakdown.body || 0} in <body>)`);
+          } else if (issue.type === 'blocking-scripts-on-page' && issue.breakdown) {
+            critical.issues.push(`${issue.count} blocking script(s) (${issue.breakdown.head || 0} in <head>, ${issue.breakdown.body || 0} in <body>)`);
+          } else if (issue.type === 'excessive-dom-size') {
+            critical.issues.push(`${issue.count} DOM nodes (threshold: ${issue.threshold})`);
+          } else if (issue.type === 'images-not-lazy-loaded') {
+            critical.issues.push(`${issue.count} image(s) without lazy loading`);
+          } else if (issue.type === 'large-dom-size') {
+            critical.issues.push(`${issue.count} DOM nodes (warning threshold)`);
+          } else if (issue.type === 'iframes-in-form') {
+            critical.issues.push(`${issue.count} iframe(s) in form`);
+          } else if (issue.type === 'autoplay-videos') {
+            critical.issues.push(`${issue.count} autoplay video(s)`);
+          } else {
+            critical.issues.push(`HTML issue: ${issue.message || issue.type}`);
+          }
+        }
+      });
+    }
+  }
+
+  // 6. Hidden fields (ONLY severity: 'error' are critical in PR mode)
   if (results.hiddenFields?.newIssues && results.hiddenFields.newIssues.length > 0) {
-    critical.hasCritical = true;
-    critical.count += results.hiddenFields.newIssues.length;
-    critical.issues.push(`${results.hiddenFields.newIssues.length} unnecessary hidden field(s)`);
+    // Filter to only ERROR severity issues (not 'warning' or 'info')
+    const criticalHiddenFields = results.hiddenFields.newIssues.filter(i => i.severity === 'error');
+    
+    if (criticalHiddenFields.length > 0) {
+      critical.hasCritical = true;
+      critical.count += criticalHiddenFields.length;
+      critical.issues.push(`${criticalHiddenFields.length} unnecessary hidden field(s)`);
+    }
   }
 
   // 7. Custom function runtime errors and other issues
