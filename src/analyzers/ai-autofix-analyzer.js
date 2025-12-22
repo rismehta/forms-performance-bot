@@ -1418,13 +1418,14 @@ export default function decorate(block) {
           componentFile: componentPath ? relative(this.workspaceRoot, componentPath) : null,
           componentContent: componentContent,
           imagePath: issue.imageUrl || issue.imagePath || '',  // CSS analyzer uses 'imageUrl'
-          selector: issue.selector || '',
+          selector: issue.selector || 'this CSS rule',  // Fallback if selector not found
           cssWidth,  // Extracted from CSS or 'auto'
           cssHeight, // Extracted from CSS or 'auto'
         };
         
         // Log what we extracted for debugging
         core.info(`  Image path: ${enhancedContext.imagePath || 'NOT FOUND'}`);
+        core.info(`  Selector: ${enhancedContext.selector}`);
         core.info(`  CSS dimensions: ${cssWidth} x ${cssHeight}`);
         
         // Skip if we couldn't extract the image path
