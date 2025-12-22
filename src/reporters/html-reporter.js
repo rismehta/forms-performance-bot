@@ -566,17 +566,15 @@ export class HTMLReporter {
     }
 
     const fields = data.issues || [];
-    const displayFields = fields.slice(0, 20);
 
     return `
     <div class="section">
       <h2> Hidden Fields (${data.unnecessaryHiddenFields} Unnecessary)</h2>
       <p><strong>Total Hidden:</strong> ${data.totalHiddenFields} | <strong>Unnecessary:</strong> ${data.unnecessaryHiddenFields}</p>
       
-      <button class="collapsible">View Field Names (${fields.length})</button>
-      <div class="content">
-        <p>${displayFields.map(f => `<code>${f.field || f.name}</code>`).join(', ')}</p>
-        ${fields.length > 20 ? `<p>... and ${fields.length - 20} more</p>` : ''}
+      <h3>All Unnecessary Hidden Field Names (${fields.length})</h3>
+      <div class="issue-list" style="max-height: 400px; overflow-y: auto; border: 1px solid #30363d; padding: 15px; border-radius: 6px; background: #0d1117; margin-bottom: 20px;">
+        ${fields.map((f, idx) => `<div style="margin-bottom: 8px;"><strong>${idx + 1}.</strong> <code style="background: #161b22; padding: 2px 6px; border-radius: 3px; color: #79c0ff;">${f.field || f.name}</code></div>`).join('')}
       </div>
       
       <p><strong>Recommendation:</strong> Use <strong>Visual Rule Editor</strong> to replace hidden fields with Form Variables (<code>setVariable()</code> instead of field-based storage). Remove the hidden fields from form JSON. Hidden fields that are never shown bloat the DOM (each adds ~50-100 bytes) and slow down rendering. Configure state management via the rule editor's variable actions.</p>
@@ -614,7 +612,7 @@ export class HTMLReporter {
     return `
     <div class="section">
       <h2> Form HTML & Rendering</h2>
-      ${data.issues.slice(0, 10).map(issue => `
+      ${data.issues.map(issue => `
         <div class="issue-item ${issue.severity === 'error' ? '' : 'warning'}">
           <h4>${issue.message}</h4>
           ${issue.scripts && issue.scripts.length > 0 ? `
@@ -626,7 +624,6 @@ export class HTMLReporter {
           ${issue.recommendation ? `<p><strong>Fix:</strong> ${issue.recommendation}</p>` : ''}
         </div>
       `).join('')}
-      ${data.issues.length > 10 ? `<p><em>... and ${data.issues.length - 10} more issues</em></p>` : ''}
     </div>`;
   }
 
@@ -661,15 +658,14 @@ export class HTMLReporter {
       ` : ''}
       
       ${warnings.length > 0 ? `
-        <button class="collapsible">View Warnings (${warnings.length})</button>
-        <div class="content">
-          ${warnings.slice(0, 20).map(issue => `
+        <h3>Warnings (${warnings.length})</h3>
+        <div class="issue-list" style="max-height: 500px; overflow-y: auto;">
+          ${warnings.map(issue => `
             <div class="issue-item warning">
               <h4>${issue.type}</h4>
               <p><code>${issue.file}${issue.line ? ':' + issue.line : ''}</code></p>
             </div>
           `).join('')}
-          ${warnings.length > 20 ? `<p><em>... and ${warnings.length - 20} more</em></p>` : ''}
         </div>
       ` : ''}
     </div>`;
@@ -802,7 +798,7 @@ export class HTMLReporter {
             html += `<p><strong>Current dataRef:</strong> <code>null</code> ← This breaks data binding for all descendants</p>`;
             html += `<p><strong>Affected descendant fields (${group.fields.length}):</strong></p>`;
             html += '<ul>';
-            group.fields.slice(0, 10).forEach(error => {
+            group.fields.forEach(error => {
               // Show the path from ancestor to field
               const pathFromAncestor = error.nullAncestor?.path ? `${error.nullAncestor.path} > ${error.fieldName}` : error.fieldName;
               html += `<li><code>${error.fieldName}</code> (dataRef: <code>${error.dataRef}</code>)`;
@@ -840,7 +836,7 @@ export class HTMLReporter {
           html += `<p><strong>${noNullFoundIssues.length} field(s)</strong> failed dataRef parsing, but the bot could not find an ancestor with <code>dataRef: null</code>.</p>`;
           html += '<p><em>This is unexpected since dataRef parsing errors typically come from null ancestor bindings. The ancestor chain is shown below for investigation.</em></p>';
           html += '<ul>';
-          noNullFoundIssues.slice(0, 5).forEach(error => {
+          noNullFoundIssues.forEach(error => {
             html += `<li><code>${error.fieldName}</code> (dataRef: <code>${error.dataRef}</code>)`;
             if (error.ancestorChain && error.ancestorChain.length > 0) {
               html += '<br><details style="margin-top: 5px;"><summary style="cursor: pointer; color: #58a6ff;">View ancestor chain</summary>';
@@ -875,12 +871,9 @@ export class HTMLReporter {
           html += '<h4>Root Cause: dataRef Syntax Error (Rare)</h4>';
           html += `<p><strong>${parsingIssues.length} field(s)</strong> have malformed dataRef syntax that af-core cannot parse. This is unusual as Forms Editor usually validates syntax.</p>`;
           html += '<ul>';
-          parsingIssues.slice(0, 10).forEach(error => {
+          parsingIssues.forEach(error => {
             html += `<li><code>${error.fieldName}</code> - dataRef: <code>${error.dataRef}</code></li>`;
           });
-          if (parsingIssues.length > 10) {
-            html += `<li><em>... and ${parsingIssues.length - 10} more</em></li>`;
-          }
           html += '</ul>';
           html += '<p><strong>✓ Fix:</strong> Open form in <strong>AEM Forms Editor</strong> → Visual Rule Editor validates dataRef syntax automatically. Re-open each field\'s properties to trigger validation and see the exact syntax error.</p>';
           html += '</div>';
@@ -894,7 +887,7 @@ export class HTMLReporter {
       <h3>Data Type Conflicts (${typeConflicts.length})</h3>
       <p><strong>Issue:</strong> Multiple fields are mapped to the same <code>dataRef</code> but have different data types. This causes type coercion and potential data loss.</p>
       <div class="issue-list">
-        ${typeConflicts.slice(0, 10).map(conflict => `
+        ${typeConflicts.map(conflict => `
           <div class="issue-item">
             <h4>DataRef: <code>${conflict.dataRef}</code></h4>
             <p><strong>New field:</strong> <code>${conflict.newField}</code> (type: <code>${conflict.newFieldType}</code>)</p>
@@ -907,7 +900,6 @@ export class HTMLReporter {
             </ul>
           </div>
         `).join('')}
-        ${typeConflicts.length > 10 ? `<p>... and ${typeConflicts.length - 10} more. See action logs for full list.</p>` : ''}
       </div>
       ` : ''}
       
@@ -1028,27 +1020,25 @@ export class HTMLReporter {
     
     ${totalCSSIssues > 0 ? `
     <h2>CSS Issues (${totalCSSIssues})</h2>
-    <div class="issue-list">
-      ${results.css.issues.slice(0, 20).map(issue => `
+    <div class="issue-list" style="max-height: 500px; overflow-y: auto;">
+      ${results.css.issues.map(issue => `
         <div class="issue-item ${issue.severity || 'warning'}">
           <strong>${issue.type || 'CSS Issue'}</strong> in <code>${issue.file || 'unknown'}</code><br>
           ${issue.message || 'No description'}
         </div>
       `).join('')}
-      ${results.css.issues.length > 20 ? `<p><em>...and ${results.css.issues.length - 20} more</em></p>` : ''}
     </div>
     ` : ''}
     
     ${totalFunctionIssues > 0 ? `
     <h2>Custom Function Issues (${totalFunctionIssues})</h2>
-    <div class="issue-list">
-      ${results.customFunctions.issues.slice(0, 20).map(issue => `
+    <div class="issue-list" style="max-height: 500px; overflow-y: auto;">
+      ${results.customFunctions.issues.map(issue => `
         <div class="issue-item ${issue.severity || 'warning'}">
           <strong>${issue.type || 'Function Issue'}</strong> - <code>${issue.functionName || 'unknown'}</code><br>
           ${issue.message || 'No description'}
         </div>
       `).join('')}
-      ${results.customFunctions.issues.length > 20 ? `<p><em>...and ${results.customFunctions.issues.length - 20} more</em></p>` : ''}
     </div>
     ` : ''}
     
@@ -1067,28 +1057,26 @@ export class HTMLReporter {
     
     ${totalFormIssues > 0 ? `
     <h2>Form Issues (${totalFormIssues})</h2>
-    <div class="issue-list">
-      ${results.forms.issues.slice(0, 20).map(issue => `
+    <div class="issue-list" style="max-height: 500px; overflow-y: auto;">
+      ${results.forms.issues.map(issue => `
         <div class="issue-item ${issue.severity || 'warning'}">
           <strong>${issue.type || 'Form Issue'}</strong><br>
           ${issue.message || 'No description'}
         </div>
       `).join('')}
-      ${results.forms.issues.length > 20 ? `<p><em>...and ${results.forms.issues.length - 20} more</em></p>` : ''}
     </div>
     ` : ''}
     
     ${totalHTMLIssues > 0 ? `
     <h2>HTML Issues (${totalHTMLIssues})</h2>
-    <div class="issue-list">
-      ${results.html.issues.slice(0, 20).map(issue => `
+    <div class="issue-list" style="max-height: 500px; overflow-y: auto;">
+      ${results.html.issues.map(issue => `
         <div class="issue-item ${issue.severity || 'warning'}">
           <strong>${issue.type || 'HTML Issue'}</strong><br>
           ${issue.message || 'No description'}
           ${issue.count ? `<br><em>Count: ${issue.count}</em>` : ''}
         </div>
       `).join('')}
-      ${results.html.issues.length > 20 ? `<p><em>...and ${results.html.issues.length - 20} more</em></p>` : ''}
     </div>
     ` : ''}
     
@@ -1282,9 +1270,9 @@ export class HTMLReporter {
   </style>
 </head>
 <body>
-  <div class="header">
-    <h1>📊 Performance Summary - ${repository}</h1>
-    <p style="color: white !important; font-size: 16px;">${this.formatTimestampIST(timestamp)}</p>
+  <div class="header" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; border-radius: 8px; margin-bottom: 30px;">
+    <h1 style="margin: 0 0 10px 0; font-size: 28px; color: white !important;">📊 Performance Summary - ${repository}</h1>
+    <p style="color: white !important; font-size: 16px; margin: 5px 0 0 0;">${this.formatTimestampIST(timestamp)}</p>
   </div>
   
   <div class="summary-stats">
@@ -1306,15 +1294,15 @@ export class HTMLReporter {
     </div>
   </div>
   
-  <h2>Individual Form Reports</h2>
+  <h2 style="color: #24292e !important; margin-top: 30px; margin-bottom: 20px; font-size: 24px; font-weight: 600;">Individual Form Reports</h2>
   <div class="form-grid">
     ${formResults.map((result, index) => {
       if (result.error) {
         return `
           <div class="form-card error">
-            <div class="form-name">${result.formName}</div>
-            <div class="form-url">${result.url}</div>
-            <div class="error-message">❌ Analysis Failed: ${result.error}</div>
+            <div class="form-name" style="font-size: 18px; font-weight: 600; margin-bottom: 10px; color: #24292e !important;">${result.formName}</div>
+            <div class="form-url" style="font-size: 12px; color: #24292e !important; word-break: break-all; margin-bottom: 15px; opacity: 0.8;">${result.url}</div>
+            <div class="error-message" style="color: #d73a49 !important; font-weight: 600; margin-top: 10px;">❌ Analysis Failed: ${result.error}</div>
           </div>
         `;
       }
@@ -1338,33 +1326,33 @@ export class HTMLReporter {
       
       return `
         <div class="form-card">
-          <div class="form-name">${result.formName}</div>
-          <div class="form-url">${result.url}</div>
+          <div class="form-name" style="font-size: 18px; font-weight: 600; margin-bottom: 10px; color: #24292e !important;">${result.formName}</div>
+          <div class="form-url" style="font-size: 12px; color: #24292e !important; word-break: break-all; margin-bottom: 15px; opacity: 0.8;">${result.url}</div>
           
-          <div class="form-stats">
-            <div class="form-stat">
-              <div class="form-stat-value critical">${formCritical}</div>
-              <div class="form-stat-label">Critical</div>
+          <div class="form-stats" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 15px; margin-top: 15px;">
+            <div class="form-stat" style="text-align: center;">
+              <div class="form-stat-value critical" style="font-size: 24px; font-weight: bold; color: #d73a49 !important;">${formCritical}</div>
+              <div class="form-stat-label" style="color: #24292e !important; font-size: 12px; font-weight: 500;">Critical</div>
             </div>
-            <div class="form-stat">
-              <div class="form-stat-value warning">${formWarnings}</div>
-              <div class="form-stat-label">Warnings</div>
+            <div class="form-stat" style="text-align: center;">
+              <div class="form-stat-value warning" style="font-size: 24px; font-weight: bold; color: #f9c513 !important;">${formWarnings}</div>
+              <div class="form-stat-label" style="color: #24292e !important; font-size: 12px; font-weight: 500;">Warnings</div>
             </div>
-            <div class="form-stat">
-              <div class="form-stat-value">${formCSSIssues}</div>
-              <div class="form-stat-label">CSS Issues</div>
+            <div class="form-stat" style="text-align: center;">
+              <div class="form-stat-value" style="font-size: 24px; font-weight: bold; color: #24292e !important;">${formCSSIssues}</div>
+              <div class="form-stat-label" style="color: #24292e !important; font-size: 12px; font-weight: 500;">CSS Issues</div>
             </div>
-            <div class="form-stat">
-              <div class="form-stat-value">${formHTMLIssues}</div>
-              <div class="form-stat-label">HTML Issues</div>
+            <div class="form-stat" style="text-align: center;">
+              <div class="form-stat-value" style="font-size: 24px; font-weight: bold; color: #24292e !important;">${formHTMLIssues}</div>
+              <div class="form-stat-label" style="color: #24292e !important; font-size: 12px; font-weight: 500;">HTML Issues</div>
             </div>
           </div>
           
           ${result.gistUrl ? `
-            <a href="${result.gistUrl}" class="gist-link" target="_blank">
+            <a href="${result.gistUrl}" class="gist-link" style="display: inline-block; margin-top: 15px; padding: 10px 20px; background: #0969da; color: white !important; text-decoration: none; border-radius: 6px; font-weight: 500; font-size: 14px;" target="_blank">
               View Detailed Report →
             </a>
-          ` : '<div style="color: #d73a49; margin-top: 15px;">⚠️ Detailed report not available</div>'}
+          ` : '<div style="color: #d73a49 !important; margin-top: 15px; font-weight: 600;">⚠️ Detailed report not available</div>'}
         </div>
       `;
     }).join('')}
