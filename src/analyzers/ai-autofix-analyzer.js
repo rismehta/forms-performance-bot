@@ -1239,7 +1239,10 @@ export default function decorate(block) {
       { name: 'Runtime error fixes', fn: () => this.fixRuntimeErrors(results.customFunctions) },
       
       // 4. CSS @import statements (suggestions only)
-      { name: 'CSS import fixes', fn: () => this.fixCSSImportSuggestions(results.formCSS) }
+      { name: 'CSS import fixes', fn: () => this.fixCSSImportSuggestions(results.formCSS) },
+      
+      // 5. Inline data URIs (suggestions only)
+      { name: 'Inline data URI fixes', fn: () => this.fixInlineDataURIs(results.formCSS) }
     ];
     
     // Execute all generators in parallel using Promise.allSettled
@@ -1906,6 +1909,75 @@ If you want to optimize development server performance, you can manually bundle 
     }
     
     core.info(`  CSS import fixes: ${suggestions.length} generated (static suggestions, no AI)`);
+    return suggestions;
+  }
+
+  /**
+   * Fix inline data URIs in CSS (>5KB)
+   * Suggests extracting to separate image files
+   */
+  fixInlineDataURIs = async (cssResults) => {
+    if (!cssResults || !cssResults.newIssues) return [];
+    
+    const dataURIIssues = cssResults.newIssues.filter(i => i.type === 'inline-data-uri');
+    if (dataURIIssues.length === 0) return [];
+    
+    core.info(`Generating ${dataURIIssues.length} inline data URI suggestion(s)...`);
+    
+    const suggestions = [];
+    
+    for (const issue of dataURIIssues) {
+      try {
+        const sizeKB = (issue.size / 1024).toFixed(2);
+        
+        suggestions.push({
+          type: 'inline-data-uri-fix',
+          severity: 'critical',
+          file: issue.file,
+          line: issue.line,
+          title: `Extract large inline data URI (${sizeKB} KB) to separate file`,
+          description: `Large inline data URI (${sizeKB} KB) bloats CSS and blocks rendering. Extract to separate image file for better caching and lazy loading.`,
+          dataSize: issue.size,
+          guidance: `
+**Why this is an issue:**
+- Inline data URIs >5KB significantly bloat CSS file size
+- Block page rendering until entire CSS loads
+- Cannot be cached separately or lazy loaded
+- Increase memory usage in browser
+
+**How to fix:**
+1. Extract the base64 data to a separate image file:
+   - Save as: \`../assets/icon-[name].png\` (or appropriate format)
+   - Use image optimization tools to compress
+   
+2. Replace the data URI with a file reference:
+   \`\`\`css
+   /* Before: */
+   background-image: url('data:image/png;base64,...');
+   
+   /* After: */
+   background-image: url('../assets/icon-[name].png');
+   \`\`\`
+
+3. Consider using SVG format for icons (smaller file size)
+
+**Performance Impact:**
+- Reduces CSS file size by ${sizeKB} KB
+- Enables browser caching of the image
+- Allows lazy loading if used with <img> tag
+- Improves initial page load time
+`,
+          estimatedImpact: `Reduces CSS size by ${sizeKB} KB, enables caching and lazy loading`
+        });
+        
+        core.info(`  Generated suggestion for ${issue.file}:${issue.line} (${sizeKB} KB)`);
+        
+      } catch (error) {
+        core.warning(`Failed to generate data URI suggestion for ${issue.file}:${issue.line}: ${error.message}`);
+      }
+    }
+    
+    core.info(`  Inline data URI fixes: ${suggestions.length} generated (static suggestions, no AI)`);
     return suggestions;
   }
 
@@ -3155,6 +3227,14 @@ Respond with ONLY the JSON object containing the COMPLETE function code, no mark
       }
       
       // Add guidance
+      if (fix.guidance) {
+        lines.push(fix.guidance);
+      }
+    } else if (fix.type === 'inline-data-uri-fix') {
+      lines.push(`##  Large Inline Data URI (${(fix.dataSize / 1024).toFixed(2)} KB)`);
+      lines.push('');
+      lines.push(fix.description);
+      lines.push('');
       if (fix.guidance) {
         lines.push(fix.guidance);
       }
