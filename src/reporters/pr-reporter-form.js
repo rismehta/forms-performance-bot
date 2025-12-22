@@ -1020,47 +1020,46 @@ export class FormPRReporter {
 
   /**
    * Post or update comment on PR
-   * On verification runs, finds and updates existing bot comment to prevent duplicates
+   * Always tries to update existing bot comment to prevent duplicates on re-runs
    */
   async postComment(body, isVerificationRun = false) {
-    if (isVerificationRun) {
-      // Find existing bot comment and update it
-      try {
-        const { data: comments } = await this.octokit.rest.issues.listComments({
+    // Always try to find and update existing bot comment (not just on verification runs)
+    try {
+      const { data: comments } = await this.octokit.rest.issues.listComments({
+        owner: this.owner,
+        repo: this.repo,
+        issue_number: this.prNumber,
+      });
+      
+      // Find the most recent bot comment (contains bot signature)
+      const botComment = comments
+        .reverse() // Start from most recent
+        .find(c => c.body && c.body.includes('Performance Analysis'));
+      
+      if (botComment) {
+        // Update existing comment
+        await this.octokit.rest.issues.updateComment({
           owner: this.owner,
           repo: this.repo,
-          issue_number: this.prNumber,
+          comment_id: botComment.id,
+          body,
         });
-        
-        // Find the most recent bot comment (contains bot signature)
-        const botComment = comments
-          .reverse() // Start from most recent
-          .find(c => c.body && c.body.includes('🤖 **AEM Forms Performance Analysis'));
-        
-        if (botComment) {
-          // Update existing comment
-          await this.octokit.rest.issues.updateComment({
-            owner: this.owner,
-            repo: this.repo,
-            comment_id: botComment.id,
-            body,
-          });
-          console.log(`Updated existing PR comment #${botComment.id}`);
-          return;
-        }
-      } catch (error) {
-        console.warn(`Could not update existing comment: ${error.message}`);
-        // Fall through to create new comment
+        console.log(`✓ Updated existing PR comment #${botComment.id} (avoiding duplicate)`);
+        return;
       }
+    } catch (error) {
+      console.warn(`Could not update existing comment: ${error.message}`);
+      // Fall through to create new comment
     }
     
-    // Create new comment (default behavior or fallback)
+    // Create new comment if no existing comment found
     await this.octokit.rest.issues.createComment({
       owner: this.owner,
       repo: this.repo,
       issue_number: this.prNumber,
       body,
     });
+    console.log(`✓ Created new PR comment`);
   }
 
   /**

@@ -27,7 +27,12 @@ export class CustomFunctionAnalyzer {
       const allFunctionAnalyses = [];
       for (const jsFile of jsFiles) {
         try {
-          const ast = acorn.parse(jsFile.content, { ecmaVersion: 2020, sourceType: 'module' });
+          // Parse with locations enabled to get line numbers
+          const ast = acorn.parse(jsFile.content, { 
+            ecmaVersion: 2020, 
+            sourceType: 'module',
+            locations: true  // ← CRITICAL: Required for line numbers!
+          });
           walk.simple(ast, {
             ExportNamedDeclaration: (node) => {
               if (node.declaration && node.declaration.type === 'FunctionDeclaration') {

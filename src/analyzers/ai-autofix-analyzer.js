@@ -2877,9 +2877,37 @@ Respond with ONLY the JSON object containing the COMPLETE function code, no mark
       core.info(`    - ${type}: ${count}`);
     });
     
+    // Fetch existing review comments to avoid duplicates
+    core.info(`  Fetching existing PR comments to avoid duplicates...`);
+    let existingComments = [];
+    try {
+      const { data: comments } = await octokit.rest.pulls.listReviewComments({
+        owner,
+        repo,
+        pull_number: prNumber,
+      });
+      existingComments = comments;
+      core.info(`  Found ${existingComments.length} existing comment(s) on this PR`);
+    } catch (error) {
+      core.warning(`  Failed to fetch existing comments: ${error.message}`);
+    }
+    
     // Try PR Review Comments for files in PR diff (gives "Apply suggestion" button)
     for (const fix of httpDomFixes) {
       try {
+        // Check if comment already exists on this line
+        const existingComment = existingComments.find(comment => 
+          comment.path === fix.file && 
+          comment.line === (fix.line || 1) &&
+          (comment.user.login === 'github-actions[bot]' || 
+           comment.body.includes('AEM Forms Performance'))
+        );
+        
+        if (existingComment) {
+          core.info(`  ⊘ Skipped ${fix.file}:${fix.line} (${fix.functionName}) - comment already exists (ID: ${existingComment.id})`);
+          continue;
+        }
+        
         const commentBody = this.buildPRLineCommentBody(fix);
         
         core.info(`  Posting comment: ${fix.file}:${fix.line} (${fix.functionName}, ${fix.type})`);
