@@ -1361,33 +1361,109 @@ export class HTMLReporter {
   }
 
   /**
-   * Convert dark theme HTML to email-safe light theme
-   * Email clients often strip background colors, making light text invisible
-   * This method converts the report to use dark text on light background
+   * Convert HTML to email-safe format with inline styles
+   * Email clients strip <style> tags, so we need to inline critical styles
    */
-  convertToEmailSafeHTML(darkHTML) {
-    return darkHTML
-      // Body: Dark bg + light text → Light bg + dark text
-      .replace(/background:\s*#0d1117/g, 'background: #f6f8fa')
-      .replace(/color:\s*#c9d1d9/g, 'color: #24292f')
-      
-      // Cards: Dark bg → Light bg
-      .replace(/background:\s*#161b22/g, 'background: #ffffff')
-      .replace(/border:\s*1px solid #30363d/g, 'border: 1px solid #d0d7de')
-      
-      // Muted text: Light gray → Dark gray
-      .replace(/color:\s*#8b949e/g, 'color: #57606a')
-      .replace(/color:\s*rgba\(255,255,255,0.8\)/g, 'color: rgba(0,0,0,0.7)')
-      
-      // Code blocks: Dark → Light
-      .replace(/background:\s*#0d1117/g, 'background: #f6f8fa')
-      .replace(/color:\s*#79c0ff/g, 'color: #0969da')
-      
-      // Keep error/warning/success colors (they work on both themes)
-      // #f85149 (red), #d29922 (yellow), #3fb950 (green), #58a6ff (blue)
-      
-      // White text → Dark text
-      .replace(/color:\s*#fff/g, 'color: #24292f');
+  convertToEmailSafeHTML(html) {
+    // Step 1: Add inline styles to body tag
+    html = html.replace(
+      /<body>/g,
+      '<body style="font-family: -apple-system, BlinkMacSystemFont, \'Segoe UI\', Roboto, sans-serif; max-width: 1200px; margin: 0 auto; padding: 20px; background: #f6f8fa; color: #24292e;">'
+    );
+    
+    // Step 2: Add inline styles to header
+    html = html.replace(
+      /<div class="header">/g,
+      '<div class="header" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; border-radius: 8px; margin-bottom: 30px;">'
+    );
+    
+    // Step 3: Add inline styles to stat cards
+    html = html.replace(
+      /<div class="stat-card">/g,
+      '<div class="stat-card" style="background: white; padding: 20px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); text-align: center;">'
+    );
+    
+    // Step 4: Add inline styles to stat numbers
+    html = html.replace(
+      /<div class="stat-number critical">/g,
+      '<div class="stat-number critical" style="font-size: 36px; font-weight: bold; margin: 10px 0; color: #d73a49;">'
+    );
+    html = html.replace(
+      /<div class="stat-number warning">/g,
+      '<div class="stat-number warning" style="font-size: 36px; font-weight: bold; margin: 10px 0; color: #f9c513;">'
+    );
+    html = html.replace(
+      /<div class="stat-number success">/g,
+      '<div class="stat-number success" style="font-size: 36px; font-weight: bold; margin: 10px 0; color: #28a745;">'
+    );
+    html = html.replace(
+      /<div class="stat-number">/g,
+      '<div class="stat-number" style="font-size: 36px; font-weight: bold; margin: 10px 0; color: #24292e;">'
+    );
+    
+    // Step 5: Add inline styles to stat labels
+    html = html.replace(
+      /<div class="stat-label">/g,
+      '<div class="stat-label" style="color: #586069; font-size: 14px;">'
+    );
+    
+    // Step 6: Add inline styles to form cards
+    html = html.replace(
+      /<div class="form-card">/g,
+      '<div class="form-card" style="background: white; padding: 25px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">'
+    );
+    
+    // Step 7: Add inline styles to form stats
+    html = html.replace(
+      /<div class="form-stat-value critical">/g,
+      '<div class="form-stat-value critical" style="font-size: 24px; font-weight: bold; color: #d73a49;">'
+    );
+    html = html.replace(
+      /<div class="form-stat-value warning">/g,
+      '<div class="form-stat-value warning" style="font-size: 24px; font-weight: bold; color: #f9c513;">'
+    );
+    html = html.replace(
+      /<div class="form-stat-value">/g,
+      '<div class="form-stat-value" style="font-size: 24px; font-weight: bold; color: #24292e;">'
+    );
+    
+    // Step 8: Add inline styles to form stat labels
+    html = html.replace(
+      /<div class="form-stat-label">/g,
+      '<div class="form-stat-label" style="color: #586069; font-size: 12px;">'
+    );
+    
+    // Step 9: Add inline styles to h1, h2, h3
+    html = html.replace(
+      /<h1>/g,
+      '<h1 style="margin: 0 0 10px 0; font-size: 28px; color: white;">'
+    );
+    html = html.replace(
+      /<h2>/g,
+      '<h2 style="color: #24292e; margin-top: 20px; margin-bottom: 10px; font-size: 24px; font-weight: 600;">'
+    );
+    html = html.replace(
+      /<h3>/g,
+      '<h3 style="color: #24292e; margin: 15px 0 10px 0; font-size: 18px; font-weight: 600;">'
+    );
+    
+    // Step 10: Add inline styles to paragraphs and divs with text
+    html = html.replace(
+      /<p>/g,
+      '<p style="color: #24292e; line-height: 1.6; margin: 10px 0;">'
+    );
+    
+    // Step 11: Ensure all text is dark by default
+    html = html.replace(
+      /color:\s*#586069/g,
+      'color: #586069 !important'
+    );
+    html = html.replace(
+      /color:\s*#24292e/g,
+      'color: #24292e !important'
+    );
+    
+    return html;
   }
 }
 
