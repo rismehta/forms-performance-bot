@@ -453,8 +453,8 @@ async function runPRMode(context, octokit, patOctokit, config) {
   core.info(`  After filtering: ${afterFilterCounts.customFunctions} custom function issues, ${afterFilterCounts.css} CSS issues, ${afterFilterCounts.formEvents} form event issues`);
   core.info(` Filtered to issues in PR diff files only`);
 
-  // Check for critical performance issues BEFORE posting report
-  const criticalIssues = detectCriticalIssues(results);
+  // Check for critical performance issues using totalVisibleComments for accurate count
+  const criticalIssues = detectCriticalIssues(results, totalVisibleComments);
   
   // AI AUTO-FIX SUGGESTIONS (runs after all analyzers complete)
   // Generates one-click fixable code suggestions for critical issues
@@ -474,10 +474,11 @@ async function runPRMode(context, octokit, patOctokit, config) {
   // Post inline PR review comments FIRST to know which ones succeed
   // Only count issues that have inline comments posted (files in PR diff)
   let postedInlineComments = [];
+  let totalVisibleComments = 0;
   if (autoFixSuggestions?.enabled && autoFixSuggestions.suggestions.length > 0) {
     core.info(` Posting ${autoFixSuggestions.suggestions.length} inline suggestion(s)...`);
     try {
-      const { reviewComments } = await aiAutoFixAnalyzer.postPRReviewComments(
+      const { reviewComments, totalVisible } = await aiAutoFixAnalyzer.postPRReviewComments(
         autoFixSuggestions.suggestions, // All suggestions (already filtered to PR diff files)
         octokit,
         owner,
@@ -487,6 +488,7 @@ async function runPRMode(context, octokit, patOctokit, config) {
       );
       
       postedInlineComments = reviewComments;
+      totalVisibleComments = totalVisible;
       
       if (reviewComments.length > 0) {
         core.info(` Posted ${reviewComments.length} inline suggestion(s) on PR`);
@@ -501,7 +503,7 @@ async function runPRMode(context, octokit, patOctokit, config) {
   // Generate and post minimal PR comment (NO HTML report link in PR mode)
   // HTML reports are only for scheduled scans (full codebase analysis)
   // PR mode only shows issues in PR diff files via inline comments
-  // Count ONLY issues that have inline comments posted
+  // Count ONLY issues that are actually visible in PR (posted + skipped = total visible)
   const reporter = new FormPRReporter(octokit, owner, repo, prNumber);
   await reporter.generateReport(results, {
     before: urls.before,
@@ -510,7 +512,7 @@ async function runPRMode(context, octokit, patOctokit, config) {
     afterData,  // Include performance metrics
     autoFixSuggestions, // Include AI-generated fix suggestions
     gistUrl: null, // No HTML report in PR mode
-    postedInlineComments, // Pass successfully posted inline comments for accurate counting
+    totalVisibleComments, // Pass total visible comments (posted + existing) for accurate counting
   }, prNumber, `${owner}/${repo}`);
 
   // Fail the build if critical issues are detected
@@ -753,14 +755,24 @@ function extractFormNameFromUrl(url) {
 /**
  * Detect critical performance issues that should fail the build
  * @param {Object} results - Analysis results
+ * @param {number} totalVisibleComments - Count of inline comments actually visible in PR (most accurate)
  * @returns {Object} Critical issues summary
  */
-function detectCriticalIssues(results) {
+function detectCriticalIssues(results, totalVisibleComments = null) {
   const critical = {
   hasCritical: false,
   count: 0,
   issues: [],
   };
+  
+  // If we have totalVisibleComments, use it directly (most accurate for PR mode)
+  // This represents issues that are ACTUALLY visible in the PR, not just detected
+  if (typeof totalVisibleComments === 'number' && totalVisibleComments > 0) {
+    critical.hasCritical = true;
+    critical.count = totalVisibleComments;
+    critical.issues.push(`${totalVisibleComments} issue(s) found in PR diff (see inline comments)`);
+    return critical;
+  }
 
   // 1. API calls in initialize events (CRITICAL - blocks form rendering)
   if (results.formEvents?.newIssues && results.formEvents.newIssues.length > 0) {

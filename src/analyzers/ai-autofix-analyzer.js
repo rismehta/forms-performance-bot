@@ -1445,10 +1445,10 @@ export default function decorate(block) {
             severity: 'critical',
             file: issue.file,
             line: issue.line,
-            selector: issue.selector,
+            selector: enhancedContext.selector,
             imagePath: enhancedContext.imagePath,
             title: `Replace CSS background-image with <img> tag`,
-            description: `CSS background-image at \`${issue.selector}\` cannot be lazy loaded. Replace with \`<img loading="lazy">\` for better performance.`,
+            description: `CSS background-image at \`${enhancedContext.selector}\` cannot be lazy loaded. Replace with \`<img loading="lazy">\` for better performance.`,
             guidance: `
 **Why this is an issue:**
 - CSS \`background-image\` loads immediately (even if user never scrolls to it)
@@ -1456,13 +1456,13 @@ export default function decorate(block) {
 - This hurts Core Web Vitals (LCP, CLS)
 
 **How to fix:**
-1. Remove \`background-image\` from CSS (\`${issue.selector}\`)
+1. Remove \`background-image\` from CSS (\`${enhancedContext.selector}\`)
 2. Add an \`<img>\` tag in your HTML/component:
    \`\`\`html
    <img src="${enhancedContext.imagePath}" 
         loading="lazy" 
-        width="${enhancedContext.width || 'auto'}" 
-        height="${enhancedContext.height || 'auto'}"
+        width="${enhancedContext.cssWidth}" 
+        height="${enhancedContext.cssHeight}"
         alt="Description">
    \`\`\`
 3. Style the image with CSS classes as needed
@@ -2898,6 +2898,7 @@ Respond with ONLY the JSON object containing the COMPLETE function code, no mark
    */
   postPRReviewComments = async (httpDomFixes, octokit, owner, repo, prNumber, commitSha) => {
     const reviewComments = [];
+    const skippedComments = [];
     
     // Log what we're about to post
     core.info(`  Attempting to post ${httpDomFixes.length} inline comment(s):`);
@@ -2938,6 +2939,7 @@ Respond with ONLY the JSON object containing the COMPLETE function code, no mark
         
         if (existingComment) {
           core.info(`  ⊘ Skipped ${fix.file}:${fix.line} (${fix.functionName}) - comment already exists (ID: ${existingComment.id})`);
+          skippedComments.push(fix); // Track skipped comments for counting
           continue;
         }
         
@@ -2972,8 +2974,9 @@ Respond with ONLY the JSON object containing the COMPLETE function code, no mark
       }
     }
     
-    core.info(`  Summary: ${reviewComments.length} inline comment(s) posted successfully`);
-    return { reviewComments };
+    const totalVisible = reviewComments.length + skippedComments.length;
+    core.info(`  Summary: ${reviewComments.length} posted, ${skippedComments.length} skipped, ${totalVisible} total visible on PR`);
+    return { reviewComments, skippedComments, totalVisible };
   }
   
   /**

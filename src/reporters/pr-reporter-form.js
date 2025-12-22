@@ -37,8 +37,9 @@ export class FormPRReporter {
     const sections = [];
 
     // Header with issue count
-    // Always count from results.*.newIssues (total issues in PR, regardless of which comments were posted on this run)
-    const critical = this.countCriticalIssues(results);
+    // Count from totalVisibleComments (accurately reflects what user sees in PR)
+    // Falls back to counting from results.*.newIssues if totalVisibleComments not provided
+    const critical = this.countCriticalIssues(results, urls.totalVisibleComments);
     
     if (critical === 0) {
       sections.push('## Performance Analysis\n');
@@ -1062,21 +1063,33 @@ export class FormPRReporter {
   }
 
   /**
-   * Count critical issues (always counts total issues in PR, not just newly posted comments)
+   * Count critical issues (counts only issues that are actually visible in PR as inline comments)
    * 
-   * IMPORTANT: This counts from results.*.newIssues which represent ALL issues in the current PR.
-   * On re-runs, this ensures we show the correct total count, not just newly posted comments.
+   * IMPORTANT: Use totalVisibleComments if available - this is the MOST ACCURATE count.
+   * Why? Because filterResultsToPRFiles() only filters by FILE, not by LINE.
+   * GitHub rejects comments on lines not in the diff, so totalVisibleComments = actual visible issues.
    * 
-   * Example:
-   * - First run: 6 issues → 6 inline comments posted → "6 critical issues"
-   * - Re-run: Same 6 issues → 4 skipped (duplicates), 2 posted → "6 critical issues" (not 2!)
+   * Example (without totalVisibleComments):
+   * - results.*.newIssues = 21 issues in file (file is in PR)
+   * - Try to post 21 comments → GitHub rejects 18 (lines not in diff)
+   * - Main comment says "21 issues" but only 3 are visible ❌
    * 
-   * @param {Object} results - All analyzer results (with newIssues arrays filtered to PR diff files)
-   * @returns {number} Total count of critical issues in PR
+   * Example (with totalVisibleComments):
+   * - totalVisibleComments = 3 (1 posted + 2 existing)
+   * - Main comment says "3 issues" → matches what user sees ✓
+   * 
+   * @param {Object} results - All analyzer results
+   * @param {number} totalVisibleComments - Count of inline comments actually visible in PR (if available)
+   * @returns {number} Total count of critical issues visible in PR
    */
-  countCriticalIssues(results) {
-    // Count all newIssues arrays (represent current state of issues in PR)
-    // These are already filtered by filterResultsToPRFiles() to only include PR diff files
+  countCriticalIssues(results, totalVisibleComments = null) {
+    // If we have totalVisibleComments, use it (most accurate)
+    if (typeof totalVisibleComments === 'number' && totalVisibleComments >= 0) {
+      return totalVisibleComments;
+    }
+    
+    // Fallback: Count all newIssues arrays (for scheduled mode or if totalVisibleComments not available)
+    // Note: This may overcount in PR mode if lines aren't in the actual diff
     let count = 0;
     
     // Form events (already filtered to PR)
