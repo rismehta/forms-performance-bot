@@ -8,6 +8,25 @@ export class HTMLReporter {
     this.autoFixCommit = null; // Will be set in generateReport
     this.repoUrl = null; // Will be set in generateReport
   }
+  
+  /**
+   * Convert timestamp to IST (Indian Standard Time)
+   * @param {string|Date} timestamp - ISO string or Date object
+   * @returns {string} - Formatted date in IST
+   */
+  formatTimestampIST(timestamp) {
+    const date = new Date(timestamp);
+    return date.toLocaleString('en-IN', {
+      timeZone: 'Asia/Kolkata',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: true
+    }) + ' IST';
+  }
 
   /**
    * Check if a specific file was auto-fixed
@@ -312,7 +331,7 @@ export class HTMLReporter {
     <header>
       <h1> Performance Analysis Report</h1>
       <div class="meta">
-        <strong>PR #${prNumber}</strong> | ${repo} | ${new Date(this.timestamp).toLocaleString()}
+        <strong>PR #${prNumber}</strong> | ${repo} | ${this.formatTimestampIST(this.timestamp)}
       </div>
     </header>
 
@@ -918,7 +937,7 @@ export class HTMLReporter {
    */
   generateScheduledReport(results, options = {}) {
     const { repository, analysisUrl, timestamp } = options;
-    const date = new Date(timestamp || Date.now()).toLocaleString();
+    const date = this.formatTimestampIST(timestamp || Date.now());
     
     const totalCSSIssues = results.css?.issues?.length || 0;
     const totalFunctionIssues = results.customFunctions?.issues?.length || 0;
@@ -1265,7 +1284,7 @@ export class HTMLReporter {
 <body>
   <div class="header">
     <h1>📊 Performance Summary - ${repository}</h1>
-    <p>${new Date(timestamp).toLocaleString()}</p>
+    <p style="color: white !important; font-size: 16px;">${this.formatTimestampIST(timestamp)}</p>
   </div>
   
   <div class="summary-stats">
@@ -1401,10 +1420,10 @@ export class HTMLReporter {
       '<div class="stat-number" style="font-size: 36px; font-weight: bold; margin: 10px 0; color: #24292e;">'
     );
     
-    // Step 5: Add inline styles to stat labels
+    // Step 5: Add inline styles to stat labels (MUCH DARKER for email visibility)
     html = html.replace(
       /<div class="stat-label">/g,
-      '<div class="stat-label" style="color: #586069; font-size: 14px;">'
+      '<div class="stat-label" style="color: #24292e !important; font-size: 14px; font-weight: 500;">'
     );
     
     // Step 6: Add inline styles to form cards
@@ -1427,40 +1446,46 @@ export class HTMLReporter {
       '<div class="form-stat-value" style="font-size: 24px; font-weight: bold; color: #24292e;">'
     );
     
-    // Step 8: Add inline styles to form stat labels
+    // Step 8: Add inline styles to form stat labels (MUCH DARKER for email visibility)
     html = html.replace(
       /<div class="form-stat-label">/g,
-      '<div class="form-stat-label" style="color: #586069; font-size: 12px;">'
+      '<div class="form-stat-label" style="color: #24292e !important; font-size: 12px; font-weight: 500;">'
     );
     
-    // Step 9: Add inline styles to h1, h2, h3
+    // Step 9: Add inline styles to form names and URLs
+    html = html.replace(
+      /<div class="form-name">/g,
+      '<div class="form-name" style="font-size: 18px; font-weight: 600; margin-bottom: 10px; color: #24292e !important;">'
+    );
+    html = html.replace(
+      /<div class="form-url">/g,
+      '<div class="form-url" style="font-size: 12px; color: #24292e !important; word-break: break-all; margin-bottom: 15px; opacity: 0.8;">'
+    );
+    
+    // Step 10: Add inline styles to h1, h2, h3
     html = html.replace(
       /<h1>/g,
-      '<h1 style="margin: 0 0 10px 0; font-size: 28px; color: white;">'
+      '<h1 style="margin: 0 0 10px 0; font-size: 28px; color: white !important;">'
     );
     html = html.replace(
       /<h2>/g,
-      '<h2 style="color: #24292e; margin-top: 20px; margin-bottom: 10px; font-size: 24px; font-weight: 600;">'
+      '<h2 style="color: #24292e !important; margin-top: 20px; margin-bottom: 10px; font-size: 24px; font-weight: 600;">'
     );
     html = html.replace(
       /<h3>/g,
-      '<h3 style="color: #24292e; margin: 15px 0 10px 0; font-size: 18px; font-weight: 600;">'
+      '<h3 style="color: #24292e !important; margin: 15px 0 10px 0; font-size: 18px; font-weight: 600;">'
     );
     
-    // Step 10: Add inline styles to paragraphs and divs with text
+    // Step 11: Add inline styles to paragraphs and divs with text
     html = html.replace(
       /<p>/g,
-      '<p style="color: #24292e; line-height: 1.6; margin: 10px 0;">'
+      '<p style="color: #24292e !important; line-height: 1.6; margin: 10px 0;">'
     );
     
-    // Step 11: Ensure all text is dark by default
+    // Step 12: Add inline styles to error messages and other divs
     html = html.replace(
-      /color:\s*#586069/g,
-      'color: #586069 !important'
-    );
-    html = html.replace(
-      /color:\s*#24292e/g,
-      'color: #24292e !important'
+      /<div class="error-message">/g,
+      '<div class="error-message" style="color: #d73a49 !important; font-weight: 600; margin-top: 10px;">'
     );
     
     return html;
