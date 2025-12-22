@@ -453,9 +453,6 @@ async function runPRMode(context, octokit, patOctokit, config) {
   core.info(`  After filtering: ${afterFilterCounts.customFunctions} custom function issues, ${afterFilterCounts.css} CSS issues, ${afterFilterCounts.formEvents} form event issues`);
   core.info(` Filtered to issues in PR diff files only`);
 
-  // Check for critical performance issues using totalVisibleComments for accurate count
-  const criticalIssues = detectCriticalIssues(results, totalVisibleComments);
-  
   // AI AUTO-FIX SUGGESTIONS (runs after all analyzers complete)
   // Generates one-click fixable code suggestions for critical issues
   core.info(' Running AI Auto-Fix Analysis...');
@@ -499,6 +496,10 @@ async function runPRMode(context, octokit, patOctokit, config) {
       core.warning(` Failed to post PR review comments: ${error.message}`);
     }
   }
+  
+  // Check for critical performance issues using totalVisibleComments for accurate count
+  // Must be AFTER postPRReviewComments so totalVisibleComments is set
+  const criticalIssues = detectCriticalIssues(results, totalVisibleComments);
   
   // Generate and post minimal PR comment (NO HTML report link in PR mode)
   // HTML reports are only for scheduled scans (full codebase analysis)
