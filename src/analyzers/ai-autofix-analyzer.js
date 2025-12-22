@@ -1509,8 +1509,9 @@ export default function decorate(block) {
             file: issue.file,
             componentFile: componentPath ? relative(this.workspaceRoot, componentPath) : null,
             line: issue.line,
+            selector: enhancedContext.selector, // Include selector for inline comment
             title: `Replace background-image with Image component in ${basename(issue.file)}`,
-            description: `CSS background-images cannot be lazy loaded. ${fix.explanation}`,
+            description: `CSS background-image at \`${enhancedContext.selector}\` cannot be lazy loaded. Replace with \`<img loading="lazy">\` for better performance.`,
             originalCode: fix.originalCSSCode,
             fixedCSSCode: fix.fixedCSSCode,
             originalComponentCode: fix.originalComponentCode,
