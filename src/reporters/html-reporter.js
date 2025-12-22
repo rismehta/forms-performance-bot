@@ -1270,9 +1270,9 @@ export class HTMLReporter {
   </style>
 </head>
 <body>
-  <div class="header" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; border-radius: 8px; margin-bottom: 30px;">
-    <h1 style="margin: 0 0 10px 0; font-size: 28px; color: white !important;">📊 Performance Summary - ${repository}</h1>
-    <p style="color: white !important; font-size: 16px; margin: 5px 0 0 0;">${this.formatTimestampIST(timestamp)}</p>
+  <div class="header" style="background-color: #667eea !important; background: #667eea; color: white !important; padding: 30px; border-radius: 8px; margin-bottom: 30px;">
+    <h1 style="margin: 0 0 10px 0; font-size: 28px; color: white !important; font-weight: 600;">📊 Performance Summary - ${repository}</h1>
+    <p style="color: white !important; font-size: 16px; margin: 5px 0 0 0; opacity: 0.95;">${this.formatTimestampIST(timestamp)}</p>
   </div>
   
   <div class="summary-stats">
