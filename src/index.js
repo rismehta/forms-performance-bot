@@ -686,17 +686,21 @@ async function runScheduledMode(context, octokit, patOctokit, config) {
         // Upload to Gist
         core.info('  Creating Gist for detailed report...');
         try {
+          // Sanitize filename: Remove slashes and special chars (GitHub Gist filenames can't contain /)
+          const sanitizedName = formResult.formName.replace(/[\/\\:*?"<>|]/g, '-');
+          const gistFilename = `${sanitizedName}-performance-report.html`;
+          
           const gistResponse = await patOctokit.rest.gists.create({
             description: `Performance Report - ${formResult.formName} - ${repo} - ${new Date().toDateString()}`,
             public: false,
             files: {
-              [`${formResult.formName}-performance-report.html`]: {
+              [gistFilename]: {
                 content: formHtmlReport
               }
             }
           });
           
-          const previewUrl = `https://htmlpreview.github.io/?${gistResponse.data.files[`${formResult.formName}-performance-report.html`].raw_url}`;
+          const previewUrl = `https://htmlpreview.github.io/?${gistResponse.data.files[gistFilename].raw_url}`;
           formResult.gistUrl = previewUrl;
           formGistLinks.push({ formName: formResult.formName, url: previewUrl });
           core.info(`    Gist created: ${previewUrl}`);
