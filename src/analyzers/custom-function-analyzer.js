@@ -19,8 +19,42 @@ export class CustomFunctionAnalyzer {
    * @returns {Object} Analysis results
    */
   analyze(formJson, jsFiles = []) {
+    // If no form JSON provided, analyze ALL exported functions from all JS files
     if (!formJson) {
-      return { error: 'No form JSON provided' };
+      core.info(`[CustomFunctions] No form JSON provided - analyzing all exported functions in ${jsFiles.length} JS file(s)`);
+      
+      // Analyze all JS files for exported functions
+      const allFunctionAnalyses = [];
+      for (const jsFile of jsFiles) {
+        try {
+          const ast = acorn.parse(jsFile.content, { ecmaVersion: 2020, sourceType: 'module' });
+          walk.simple(ast, {
+            ExportNamedDeclaration: (node) => {
+              if (node.declaration && node.declaration.type === 'FunctionDeclaration') {
+                const funcName = node.declaration.id.name;
+                const analysis = this.analyzeFunctionNode(node.declaration, jsFile, funcName);
+                if (analysis) {
+                  allFunctionAnalyses.push(analysis);
+                }
+              }
+            }
+          });
+        } catch (error) {
+          core.warning(`[CustomFunctions] Failed to parse ${jsFile.filename}: ${error.message}`);
+        }
+      }
+      
+      const violations = this.detectViolations(allFunctionAnalyses);
+      core.info(`[CustomFunctions] Found ${allFunctionAnalyses.length} exported function(s), ${violations.length} violation(s)`);
+      
+      return {
+        functionsFound: allFunctionAnalyses.length,
+        functionNames: allFunctionAnalyses.map(f => f.functionName),
+        functionsAnalyzed: allFunctionAnalyses.length,
+        violations: violations.length,
+        issues: violations,
+        details: allFunctionAnalyses,
+      };
     }
 
     // Filter jsFiles to only the custom functions file specified in form JSON
@@ -402,11 +436,31 @@ export class CustomFunctionAnalyzer {
    */
   compare(beforeAnalysis, afterAnalysis) {
     if (!beforeAnalysis || !afterAnalysis) {
-      return { error: 'Missing analysis for comparison' };
+      return { 
+        error: 'Missing analysis for comparison',
+        before: { functionsFound: 0, violations: 0, issues: [] },
+        after: { functionsFound: 0, violations: 0, issues: [] },
+        newIssues: [],
+        resolvedIssues: []
+      };
     }
 
-    const resolvedIssues = beforeAnalysis.issues.filter(beforeIssue =>
-      !afterAnalysis.issues.some(afterIssue =>
+    // Handle cases where analysis returned an error (e.g., no form JSON)
+    if (beforeAnalysis.error || afterAnalysis.error) {
+      return {
+        before: beforeAnalysis.error ? { functionsFound: 0, violations: 0, issues: [] } : beforeAnalysis,
+        after: afterAnalysis.error ? { functionsFound: 0, violations: 0, issues: [] } : afterAnalysis,
+        newIssues: afterAnalysis.issues || [],
+        resolvedIssues: [],
+        delta: {
+          functionsAdded: (afterAnalysis.functionsFound || 0) - (beforeAnalysis.functionsFound || 0),
+          violationsAdded: (afterAnalysis.violations || 0) - (beforeAnalysis.violations || 0),
+        }
+      };
+    }
+
+    const resolvedIssues = (beforeAnalysis.issues || []).filter(beforeIssue =>
+      !(afterAnalysis.issues || []).some(afterIssue =>
         afterIssue.functionName === beforeIssue.functionName &&
         afterIssue.type === beforeIssue.type
       )
@@ -419,7 +473,7 @@ export class CustomFunctionAnalyzer {
         functionsAdded: afterAnalysis.functionsFound - beforeAnalysis.functionsFound,
         violationsAdded: afterAnalysis.violations - beforeAnalysis.violations,
       },
-      newIssues: afterAnalysis.issues, // Report ALL issues found in current state
+      newIssues: afterAnalysis.issues || [], // Report ALL issues found in current state
       resolvedIssues,
     };
   }
