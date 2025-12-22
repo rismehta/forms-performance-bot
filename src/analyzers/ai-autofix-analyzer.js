@@ -1817,7 +1817,7 @@ ${fieldNames.length > 5 ? `\n...and ${fieldNames.length - 5} more` : ''}
           guidance = `
 **Fix for External CSS Import**
 
-**Step 1: Remove from CSS (click "Apply suggestion" below)**
+**Step 1: Remove from CSS (click "Commit suggestion" at the top)**
 
 **Step 2: Add to \`head.html\`**
 \`\`\`html
@@ -2868,6 +2868,7 @@ Respond with ONLY the JSON object containing the COMPLETE function code, no mark
     
     // Log what we're about to post
     core.info(`  Attempting to post ${httpDomFixes.length} inline comment(s):`);
+    core.info(`  Using commit SHA: ${commitSha}`);
     const typeBreakdown = {};
     httpDomFixes.forEach(fix => {
       typeBreakdown[fix.type] = (typeBreakdown[fix.type] || 0) + 1;
@@ -2880,6 +2881,8 @@ Respond with ONLY the JSON object containing the COMPLETE function code, no mark
     for (const fix of httpDomFixes) {
       try {
         const commentBody = this.buildPRLineCommentBody(fix);
+        
+        core.info(`  Posting comment: ${fix.file}:${fix.line} (${fix.functionName}, ${fix.type})`);
         
         await octokit.rest.pulls.createReviewComment({
           owner,
@@ -2896,9 +2899,12 @@ Respond with ONLY the JSON object containing the COMPLETE function code, no mark
         reviewComments.push(fix);
         
       } catch (error) {
-        // If file is not in PR diff, GitHub returns 422
+        // GitHub returns 422 for various reasons (file/line not in diff, invalid SHA, etc.)
         if (error.status === 422) {
-          core.info(`  ✗ File ${fix.file} not in PR diff - ${fix.type} for ${fix.functionName || 'N/A'} skipped`);
+          const errorDetails = error.response?.data?.message || error.message;
+          core.info(`  ✗ GitHub rejected comment on ${fix.file}:${fix.line} - ${fix.type} for ${fix.functionName || 'N/A'}`);
+          core.info(`     Reason: ${errorDetails}`);
+          core.info(`     This usually means the line is not in the PR diff (only changed lines can have comments)`);
         } else {
           core.warning(`  ✗ Failed to post comment on ${fix.file}: ${error.message}`);
         }
