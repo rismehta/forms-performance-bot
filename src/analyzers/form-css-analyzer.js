@@ -53,33 +53,45 @@ export class FormCSSAnalyzer {
   }
 
   /**
+   * Strip CSS comments from content
+   * This ensures we don't flag commented-out code
+   */
+  stripComments(content) {
+    // Remove /* ... */ style comments
+    return content.replace(/\/\*[\s\S]*?\*\//g, '');
+  }
+
+  /**
    * Analyze a single CSS file
    */
   analyzeFile(filename, content) {
     const issues = [];
 
+    // Strip comments to avoid flagging commented-out code
+    const activeContent = this.stripComments(content);
+
     // Check for background-image usage (should use Image component)
-    issues.push(...this.detectBackgroundImages(filename, content));
+    issues.push(...this.detectBackgroundImages(filename, activeContent, content));
 
     // Check for inline data URIs (bloat CSS)
-    issues.push(...this.detectInlineDataURIs(filename, content));
+    issues.push(...this.detectInlineDataURIs(filename, activeContent, content));
 
     // Check for excessive !important usage
-    issues.push(...this.detectExcessiveImportant(filename, content));
+    issues.push(...this.detectExcessiveImportant(filename, activeContent, content));
 
     // Check for overly specific selectors (performance)
-    issues.push(...this.detectDeepSelectors(filename, content));
+    issues.push(...this.detectDeepSelectors(filename, activeContent, content));
 
     // Check for duplicate selectors (maintainability)
-    issues.push(...this.detectDuplicateSelectors(filename, content));
+    issues.push(...this.detectDuplicateSelectors(filename, activeContent, content));
 
     // Check for render-blocking CSS patterns
-    issues.push(...this.detectRenderBlockingPatterns(filename, content));
+    issues.push(...this.detectRenderBlockingPatterns(filename, activeContent, content));
 
     // Check for missing CSS custom properties for theming
-    issues.push(...this.detectHardcodedColors(filename, content));
+    issues.push(...this.detectHardcodedColors(filename, activeContent, content));
 
-    // Check for large CSS files
+    // Check for large CSS files (use original content for size)
     issues.push(...this.detectLargeFiles(filename, content));
 
     return issues;
@@ -88,25 +100,28 @@ export class FormCSSAnalyzer {
   /**
    * Detect CSS background-image usage
    * Issue: Should use Image component for lazy loading and optimization
+   * @param {string} filename - The CSS filename
+   * @param {string} activeContent - Content with comments stripped
+   * @param {string} originalContent - Original content with comments (for line numbers)
    */
-  detectBackgroundImages(filename, content) {
+  detectBackgroundImages(filename, activeContent, originalContent) {
     const issues = [];
     const backgroundImagePattern = /background(-image)?:\s*url\(['"]?([^'"()]+)['"]?\)/gi;
     
     let match;
-    while ((match = backgroundImagePattern.exec(content)) !== null) {
+    while ((match = backgroundImagePattern.exec(activeContent)) !== null) {
       const imageUrl = match[2];
       
       // Skip data URIs (handled separately)
       if (imageUrl.startsWith('data:')) continue;
       
       // Skip SVG patterns/gradients
-      if (imageUrl.includes('.svg') && content.includes('background-repeat')) continue;
+      if (imageUrl.includes('.svg') && activeContent.includes('background-repeat')) continue;
       
-      const lineNumber = this.getLineNumber(content, match.index);
+      const lineNumber = this.getLineNumber(activeContent, match.index);
       
       // Extract the CSS selector that contains this background-image
-      const selector = this.extractSelectorAtPosition(content, match.index);
+      const selector = this.extractSelectorAtPosition(activeContent, match.index);
 
       issues.push({
         severity: 'error',
@@ -154,18 +169,18 @@ export class FormCSSAnalyzer {
    * Detect inline data URIs in CSS
    * Issue: Bloats CSS file size and blocks rendering
    */
-  detectInlineDataURIs(filename, content) {
+  detectInlineDataURIs(filename, activeContent, originalContent) {
     const issues = [];
     const dataUriPattern = /url\(['"]?(data:[^'"()]+)['"]?\)/gi;
     
     let match;
-    while ((match = dataUriPattern.exec(content)) !== null) {
+    while ((match = dataUriPattern.exec(activeContent)) !== null) {
       const dataUri = match[1];
       const size = dataUri.length;
       
       // Flag data URIs larger than 5KB (they bloat CSS and block rendering)
       if (size > 5120) { // 5KB threshold
-        const lineNumber = this.getLineNumber(content, match.index);
+        const lineNumber = this.getLineNumber(activeContent, match.index);
         
         // All large data URIs are critical (>5KB) - they block rendering
         const dataSize = size; // Use actual data URI size, not match[0]
@@ -190,10 +205,10 @@ export class FormCSSAnalyzer {
    * Detect excessive !important usage
    * Issue: Makes CSS hard to maintain and override
    */
-  detectExcessiveImportant(filename, content) {
+  detectExcessiveImportant(filename, activeContent, originalContent) {
     const issues = [];
     const importantPattern = /!important/gi;
-    const matches = content.match(importantPattern);
+    const matches = activeContent.match(importantPattern);
     
     if (matches && matches.length > 10) {
       issues.push({
@@ -213,7 +228,8 @@ export class FormCSSAnalyzer {
    * Detect overly specific selectors
    * Issue: Slow selector matching, hard to maintain
    */
-  detectDeepSelectors(filename, content) {
+  detectDeepSelectors(filename, activeContent, originalContent) {
+    const content = activeContent;
     const issues = [];
     
     // Match selectors (simplified - captures most cases)
@@ -253,7 +269,8 @@ export class FormCSSAnalyzer {
    * Detect duplicate selectors
    * Issue: Maintainability and file size
    */
-  detectDuplicateSelectors(filename, content) {
+  detectDuplicateSelectors(filename, activeContent, originalContent) {
+    const content = activeContent;
     const issues = [];
     const selectorMap = new Map();
     const selectorPattern = /([^{]+)\{/g;
@@ -297,16 +314,16 @@ export class FormCSSAnalyzer {
    * Detect render-blocking CSS patterns
    * Issue: Delays form interactivity
    */
-  detectRenderBlockingPatterns(filename, content) {
+  detectRenderBlockingPatterns(filename, activeContent, originalContent) {
     const issues = [];
 
     // Check for @import (blocks rendering)
     const importPattern = /@import\s+(?:url\()?['"]([^'"]+)['"](?:\))?/gi;
     let match;
     
-    while ((match = importPattern.exec(content)) !== null) {
+    while ((match = importPattern.exec(activeContent)) !== null) {
       const importUrl = match[1];
-      const lineNumber = this.getLineNumber(content, match.index);
+      const lineNumber = this.getLineNumber(activeContent, match.index);
 
       issues.push({
         severity: 'error',
@@ -321,10 +338,10 @@ export class FormCSSAnalyzer {
 
     // Check for large font files inline
     const fontFacePattern = /@font-face\s*\{[^}]+url\(['"]?(data:[^'"()]+)['"]?\)/gi;
-    while ((match = fontFacePattern.exec(content)) !== null) {
+    while ((match = fontFacePattern.exec(activeContent)) !== null) {
       const dataUri = match[1];
       if (dataUri.length > 10000) {
-        const lineNumber = this.getLineNumber(content, match.index);
+        const lineNumber = this.getLineNumber(activeContent, match.index);
 
         issues.push({
           severity: 'warning',
@@ -345,7 +362,8 @@ export class FormCSSAnalyzer {
    * Detect hardcoded colors (should use CSS variables for theming)
    * Issue: Forms cannot be easily themed/customized
    */
-  detectHardcodedColors(filename, content) {
+  detectHardcodedColors(filename, activeContent, originalContent) {
+    const content = activeContent;
     const issues = [];
     
     // Count color declarations
