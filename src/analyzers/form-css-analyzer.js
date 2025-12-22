@@ -139,13 +139,15 @@ export class FormCSSAnalyzer {
     // Extract the selector (text between previous } and current {)
     const selectorText = content.substring(startPos, bracePos).trim();
     
-    // Clean up: remove comments, newlines, etc.
+    // Clean up: remove comments, @import statements, newlines, etc.
     const cleanSelector = selectorText
       .replace(/\/\*[\s\S]*?\*\//g, '') // Remove comments
+      .replace(/@import\s+url\([^)]+\);?/g, '') // Remove @import statements
+      .replace(/@import\s+['"][^'"]+['"];?/g, '') // Remove @import with quotes
       .replace(/\s+/g, ' ')              // Normalize whitespace
       .trim();
     
-    return cleanSelector || null;
+    return cleanSelector || 'this CSS rule';
   }
 
   /**
@@ -161,23 +163,22 @@ export class FormCSSAnalyzer {
       const dataUri = match[1];
       const size = dataUri.length;
       
-      // Only flag large data URIs (>5KB)
-      if (size > 5000) {
-      const lineNumber = this.getLineNumber(content, match.index);
-      
-      // Large data URIs (>10KB) are critical - they block rendering
-      const dataSize = match[0].length;
-      const isCritical = dataSize > 10240; // 10KB threshold
-
-      issues.push({
-        severity: isCritical ? 'error' : 'warning',
-        type: 'inline-data-uri',
-        file: filename,
-        line: lineNumber,
-        dataSize,
-          message: `Large inline data URI (${(size / 1024).toFixed(2)} KB) bloats CSS file.`,
+      // Flag data URIs larger than 5KB (they bloat CSS and block rendering)
+      if (size > 5120) { // 5KB threshold
+        const lineNumber = this.getLineNumber(content, match.index);
+        
+        // All large data URIs are critical (>5KB) - they block rendering
+        const dataSize = size; // Use actual data URI size, not match[0]
+        
+        issues.push({
+          severity: 'error', // Always critical if >5KB
+          type: 'inline-data-uri',
+          file: filename,
+          line: lineNumber,
+          dataSize,
+          message: `Large inline data URI (${(size / 1024).toFixed(2)} KB) bloats CSS file and blocks rendering.`,
           size,
-          recommendation: 'Extract to separate image file for better caching and lazy loading. Inline data URIs block CSS parsing and form rendering.',
+          recommendation: 'Extract to separate image file for better caching and lazy loading. Inline data URIs >5KB significantly impact performance.',
         });
       }
     }
