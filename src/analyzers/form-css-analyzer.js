@@ -163,13 +163,18 @@ export class FormCSSAnalyzer {
       
       // Only flag large data URIs (>5KB)
       if (size > 5000) {
-        const lineNumber = this.getLineNumber(content, match.index);
+      const lineNumber = this.getLineNumber(content, match.index);
+      
+      // Large data URIs (>10KB) are critical - they block rendering
+      const dataSize = match[0].length;
+      const isCritical = dataSize > 10240; // 10KB threshold
 
-        issues.push({
-          severity: 'warning',
-          type: 'inline-data-uri',
-          file: filename,
-          line: lineNumber,
+      issues.push({
+        severity: isCritical ? 'error' : 'warning',
+        type: 'inline-data-uri',
+        file: filename,
+        line: lineNumber,
+        dataSize,
           message: `Large inline data URI (${(size / 1024).toFixed(2)} KB) bloats CSS file.`,
           size,
           recommendation: 'Extract to separate image file for better caching and lazy loading. Inline data URIs block CSS parsing and form rendering.',
