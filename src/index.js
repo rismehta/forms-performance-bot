@@ -88,167 +88,234 @@ async function runPRMode(context, octokit, patOctokit, config) {
 
   core.info(`Analyzing PR #${prNumber} in ${owner}/${repo}`);
 
-  // Extract before/after URLs from PR description
+  // Extract before/after URLs from PR description (optional)
   const prBody = context.payload.pull_request.body || '';
   core.info(`PR Body length: ${prBody.length} characters`);
   core.info(`PR Body preview (first 500 chars):\n${prBody.substring(0, 500)}`);
   
   const urls = extractURLsFromPR(prBody);
 
-  if (!urls.before || !urls.after) {
-    core.error('Could not find Before/After URLs in PR description.');
-    core.error(`Found Before URL: ${urls.before || 'null'}`);
-    core.error(`Found After URL: ${urls.after || 'null'}`);
-    core.error('Expected format:');
-    core.error('  Test URLs:');
-    core.error('  Before: https://example.com/before');
-    core.error('  After: https://example.com/after');
-    core.setFailed('Missing Before/After URLs in PR description');
-    return;
+  const hasUrls = !!(urls.before && urls.after);
+  
+  if (!hasUrls) {
+    core.warning('⚠️  No Before/After URLs found in PR description.');
+    core.warning('URL-based analysis (form JSON, HTML, rules) will be skipped.');
+    core.warning('Only JS/CSS code analysis will be performed.');
+    core.warning('');
+    core.warning('To enable full form analysis, add URLs to PR description:');
+    core.warning('  Test URLs:');
+    core.warning('  Before: https://example.com/before');
+    core.warning('  After: https://example.com/after');
+    core.warning('');
+  } else {
+    core.info(`✓ Before URL: ${urls.before}`);
+    core.info(`✓ After URL: ${urls.after}`);
   }
 
-  core.info(`Before URL: ${urls.before}`);
-  core.info(`After URL: ${urls.after}`);
-
   // Initialize analyzers with config
-  const urlAnalyzer = new URLAnalyzer();
-  const formAnalyzer = new FormAnalyzer(config);
-  const formEventsAnalyzer = new FormEventsAnalyzer(config);
-  const hiddenFieldsAnalyzer = new HiddenFieldsAnalyzer(config);
-  const rulePerformanceAnalyzer = new RulePerformanceAnalyzer(config);
-  const formHTMLAnalyzer = new FormHTMLAnalyzer(config);
   const formCSSAnalyzer = new FormCSSAnalyzer(config);
   const customFunctionAnalyzer = new CustomFunctionAnalyzer(config);
   const aiAutoFixAnalyzer = new AIAutoFixAnalyzer(config);
 
-  // Analyze both URLs
-  core.info('Fetching and analyzing before URL...');
-  const beforeData = await urlAnalyzer.analyze(urls.before);
-  core.info(`✓ Fetched before URL: ${beforeData.rawSize} bytes HTML`);
+  // URL-based analysis (only if URLs provided)
+  let beforeData = null;
+  let afterData = null;
   
-  // Validate that form JSON was extracted from before URL
-  if (!beforeData.formJson) {
-    const errorMsg = beforeData.jsonErrors && beforeData.jsonErrors.length > 0
-      ? `Failed to extract form JSON from before URL: ${beforeData.jsonErrors[0].message}`
-      : 'Failed to extract form JSON from before URL. No form JSON found in the page.';
-    core.error(errorMsg);
-    core.setFailed(errorMsg);
-    return;
-  }
-  const beforeJsonStr = JSON.stringify(beforeData.formJson);
-  const beforeFormId = beforeData.formJson.id || 'unknown';
-  const beforeFormTitle = beforeData.formJson.title || 'unknown';
-  core.info(`Form JSON extracted from before URL (${beforeJsonStr.length} bytes)`);
-  core.info(`Before form: id="${beforeFormId}", title="${beforeFormTitle}"`);
+  if (hasUrls) {
+    const urlAnalyzer = new URLAnalyzer();
+    
+    // Analyze both URLs
+    core.info('Fetching and analyzing before URL...');
+    beforeData = await urlAnalyzer.analyze(urls.before);
+    core.info(`✓ Fetched before URL: ${beforeData.rawSize} bytes HTML`);
+    
+    // Validate that form JSON was extracted from before URL
+    if (!beforeData.formJson) {
+      const errorMsg = beforeData.jsonErrors && beforeData.jsonErrors.length > 0
+        ? `Failed to extract form JSON from before URL: ${beforeData.jsonErrors[0].message}`
+        : 'Failed to extract form JSON from before URL. No form JSON found in the page.';
+      core.error(errorMsg);
+      core.setFailed(errorMsg);
+      return;
+    }
+    const beforeJsonStr = JSON.stringify(beforeData.formJson);
+    const beforeFormId = beforeData.formJson.id || 'unknown';
+    const beforeFormTitle = beforeData.formJson.title || 'unknown';
+    core.info(`Form JSON extracted from before URL (${beforeJsonStr.length} bytes)`);
+    core.info(`Before form: id="${beforeFormId}", title="${beforeFormTitle}"`);
 
-  core.info('Fetching and analyzing after URL...');
-  const afterData = await urlAnalyzer.analyze(urls.after);
-  core.info(`✓ Fetched after URL: ${afterData.rawSize} bytes HTML`);
-  
-  // Validate that form JSON was extracted from after URL
-  if (!afterData.formJson) {
-    const errorMsg = afterData.jsonErrors && afterData.jsonErrors.length > 0
-      ? `Failed to extract form JSON from after URL: ${afterData.jsonErrors[0].message}`
-      : 'Failed to extract form JSON from after URL. No form JSON found in the page.';
-    core.error(errorMsg);
-    core.setFailed(errorMsg);
-    return;
-  }
-  const afterJsonStr = JSON.stringify(afterData.formJson);
-  const afterFormId = afterData.formJson.id || 'unknown';
-  const afterFormTitle = afterData.formJson.title || 'unknown';
-  core.info(`Form JSON extracted from after URL (${afterJsonStr.length} bytes)`);
-  core.info(`After form: id="${afterFormId}", title="${afterFormTitle}"`);
-  
-  // Warn if both JSONs appear identical
-  if (beforeJsonStr === afterJsonStr) {
-    core.warning('WARNING: Before and After form JSONs are identical! This may indicate:');
-    core.warning('  1. The URLs are pointing to the same content (caching issue?)');
-    core.warning('  2. The PR branch has not been deployed yet');
-    core.warning('  3. The form has not changed between branches');
-    core.warning('Analysis will continue but results may not show differences.');
+    core.info('Fetching and analyzing after URL...');
+    afterData = await urlAnalyzer.analyze(urls.after);
+    core.info(`✓ Fetched after URL: ${afterData.rawSize} bytes HTML`);
+    
+    // Validate that form JSON was extracted from after URL
+    if (!afterData.formJson) {
+      const errorMsg = afterData.jsonErrors && afterData.jsonErrors.length > 0
+        ? `Failed to extract form JSON from after URL: ${afterData.jsonErrors[0].message}`
+        : 'Failed to extract form JSON from after URL. No form JSON found in the page.';
+      core.error(errorMsg);
+      core.setFailed(errorMsg);
+      return;
+    }
+    const afterJsonStr = JSON.stringify(afterData.formJson);
+    const afterFormId = afterData.formJson.id || 'unknown';
+    const afterFormTitle = afterData.formJson.title || 'unknown';
+    core.info(`Form JSON extracted from after URL (${afterJsonStr.length} bytes)`);
+    core.info(`After form: id="${afterFormId}", title="${afterFormTitle}"`);
+    
+    // Warn if both JSONs appear identical
+    if (beforeJsonStr === afterJsonStr) {
+      core.warning('WARNING: Before and After form JSONs are identical! This may indicate:');
+      core.warning('  1. The URLs are pointing to the same content (caching issue?)');
+      core.warning('  2. The PR branch has not been deployed yet');
+      core.warning('  3. The form has not changed between branches');
+      core.warning('Analysis will continue but results may not show differences.');
+    }
+  } else {
+    // No URLs provided - create empty data objects
+    core.info('Skipping URL-based analysis (no URLs provided)');
+    beforeData = { formJson: null, html: null };
+    afterData = { formJson: null, html: null };
   }
 
   // Load JavaScript and CSS files from checked-out repository (faster than API)
   core.info('Loading JavaScript and CSS files from checked-out repository...');
   const { jsFiles, cssFiles } = await loadFilesFromWorkspace();
 
-  // Perform form-specific analyses IN PARALLEL for speed
-  core.info('Running all analyses in parallel...');
+  // Perform analyses based on available data
+  let formStructureAnalysis, formEventsAnalysis, beforeHiddenFields, afterHiddenFields;
+  let beforeRuleCycles, afterRuleCycles, formHTMLAnalysis, cssAnalysis;
+  let beforeCustomFunctions, afterCustomFunctions;
   
-  const [
-    formStructureAnalysis,
-    formEventsAnalysis,
-    { beforeHiddenFields, afterHiddenFields },
-    { beforeRuleCycles, afterRuleCycles },
-    formHTMLAnalysis,
-    cssAnalysis,
-    { beforeCustomFunctions, afterCustomFunctions }
-  ] = await Promise.all([
-    // 1. Form Structure (synchronous)
-    Promise.resolve(formAnalyzer.compare(beforeData.formJson, afterData.formJson)),
+  if (hasUrls) {
+    // Full analysis with form JSON
+    core.info('Running all analyses in parallel (form JSON available)...');
     
-    // 2. Form Events (synchronous)
-    Promise.resolve(formEventsAnalyzer.compare(beforeData.formJson, afterData.formJson)),
+    // Initialize form-specific analyzers
+    const formAnalyzer = new FormAnalyzer(config);
+    const formEventsAnalyzer = new FormEventsAnalyzer(config);
+    const hiddenFieldsAnalyzer = new HiddenFieldsAnalyzer(config);
+    const rulePerformanceAnalyzer = new RulePerformanceAnalyzer(config);
+    const formHTMLAnalyzer = new FormHTMLAnalyzer(config);
     
-    // 3. Hidden Fields (synchronous)
-    Promise.resolve({
-      beforeHiddenFields: hiddenFieldsAnalyzer.analyze(beforeData.formJson, jsFiles),
-      afterHiddenFields: hiddenFieldsAnalyzer.analyze(afterData.formJson, jsFiles)
-    }),
-    
-    // 4. Rule Cycles (async - uses real function implementations from checked-out repo)
-    (async () => {
-      try {
-        core.info('Starting rule cycle analysis...');
-        const beforeRuleCycles = await rulePerformanceAnalyzer.analyze(beforeData.formJson);
-        core.info(`Before rules: ${beforeRuleCycles.totalRules || 0} rules, ${beforeRuleCycles.cycles || 0} cycles, ${beforeRuleCycles.slowRuleCount || 0} slow`);
-        if (beforeRuleCycles.cycles > 0) {
-          core.warning(`  Found ${beforeRuleCycles.cycles} cycle(s) in BEFORE state`);
-        }
-        
-        const afterRuleCycles = await rulePerformanceAnalyzer.analyze(afterData.formJson);
-        core.info(`After rules: ${afterRuleCycles.totalRules || 0} rules, ${afterRuleCycles.cycles || 0} cycles, ${afterRuleCycles.slowRuleCount || 0} slow`);
-        if (afterRuleCycles.cycles > 0) {
-          core.warning(`  Found ${afterRuleCycles.cycles} cycle(s) in AFTER state`);
-          if (afterRuleCycles.cycleDetails) {
-            afterRuleCycles.cycleDetails.forEach((cycle, i) => {
-              core.warning(`    Cycle ${i + 1}: ${(cycle.fields || []).join(' → ')}`);
-            });
+    const [
+      fsa,
+      fea,
+      { beforeHiddenFields: bhf, afterHiddenFields: ahf },
+      { beforeRuleCycles: brc, afterRuleCycles: arc },
+      fha,
+      css,
+      { beforeCustomFunctions: bcf, afterCustomFunctions: acf }
+    ] = await Promise.all([
+      // 1. Form Structure (synchronous)
+      Promise.resolve(formAnalyzer.compare(beforeData.formJson, afterData.formJson)),
+      
+      // 2. Form Events (synchronous)
+      Promise.resolve(formEventsAnalyzer.compare(beforeData.formJson, afterData.formJson)),
+      
+      // 3. Hidden Fields (synchronous)
+      Promise.resolve({
+        beforeHiddenFields: hiddenFieldsAnalyzer.analyze(beforeData.formJson, jsFiles),
+        afterHiddenFields: hiddenFieldsAnalyzer.analyze(afterData.formJson, jsFiles)
+      }),
+      
+      // 4. Rule Cycles (async - uses real function implementations from checked-out repo)
+      (async () => {
+        try {
+          core.info('Starting rule cycle analysis...');
+          const beforeRuleCycles = await rulePerformanceAnalyzer.analyze(beforeData.formJson);
+          core.info(`Before rules: ${beforeRuleCycles.totalRules || 0} rules, ${beforeRuleCycles.cycles || 0} cycles, ${beforeRuleCycles.slowRuleCount || 0} slow`);
+          if (beforeRuleCycles.cycles > 0) {
+            core.warning(`  Found ${beforeRuleCycles.cycles} cycle(s) in BEFORE state`);
           }
+          
+          const afterRuleCycles = await rulePerformanceAnalyzer.analyze(afterData.formJson);
+          core.info(`After rules: ${afterRuleCycles.totalRules || 0} rules, ${afterRuleCycles.cycles || 0} cycles, ${afterRuleCycles.slowRuleCount || 0} slow`);
+          if (afterRuleCycles.cycles > 0) {
+            core.warning(`  Found ${afterRuleCycles.cycles} cycle(s) in AFTER state`);
+            if (afterRuleCycles.cycleDetails) {
+              afterRuleCycles.cycleDetails.forEach((cycle, i) => {
+                core.warning(`    Cycle ${i + 1}: ${(cycle.fields || []).join(' → ')}`);
+              });
+            }
+          }
+          
+          return { beforeRuleCycles, afterRuleCycles };
+        } catch (error) {
+          core.error(`Rule cycle analysis failed: ${error.message}`);
+          core.error(error.stack);
+          return {
+            beforeRuleCycles: { totalRules: 0, cycles: 0, error: error.message },
+            afterRuleCycles: { totalRules: 0, cycles: 0, error: error.message }
+          };
         }
-        
-        return { beforeRuleCycles, afterRuleCycles };
-      } catch (error) {
-        core.error(`Rule cycle analysis failed: ${error.message}`);
-        core.error(error.stack);
-        return {
-          beforeRuleCycles: { totalRules: 0, cycles: 0, error: error.message },
-          afterRuleCycles: { totalRules: 0, cycles: 0, error: error.message }
-        };
-      }
-    })(),
+      })(),
+      
+      // 5. Form HTML (synchronous)
+      Promise.resolve(formHTMLAnalyzer.compare(beforeData.html, afterData.html)),
+      
+      // 6. CSS (synchronous)
+      Promise.resolve(formCSSAnalyzer.analyze(cssFiles)),
+      
+      // 7. Custom Functions (synchronous)
+      Promise.resolve({
+        beforeCustomFunctions: customFunctionAnalyzer.analyze(beforeData.formJson, jsFiles),
+        afterCustomFunctions: customFunctionAnalyzer.analyze(afterData.formJson, jsFiles)
+      })
+    ]);
     
-    // 5. Form HTML (synchronous)
-    Promise.resolve(formHTMLAnalyzer.compare(beforeData.html, afterData.html)),
+    formStructureAnalysis = fsa;
+    formEventsAnalysis = fea;
+    beforeHiddenFields = bhf;
+    afterHiddenFields = ahf;
+    beforeRuleCycles = brc;
+    afterRuleCycles = arc;
+    formHTMLAnalysis = fha;
+    cssAnalysis = css;
+    beforeCustomFunctions = bcf;
+    afterCustomFunctions = acf;
     
-    // 6. CSS (synchronous)
-    Promise.resolve(formCSSAnalyzer.analyze(cssFiles)),
+  } else {
+    // Limited analysis without URLs - only CSS and JS files
+    core.info('Running limited analysis (CSS/JS only, no form JSON)...');
     
-    // 7. Custom Functions (synchronous)
-    Promise.resolve({
-      beforeCustomFunctions: customFunctionAnalyzer.analyze(beforeData.formJson, jsFiles),
-      afterCustomFunctions: customFunctionAnalyzer.analyze(afterData.formJson, jsFiles)
-    })
-  ]);
+    const [css, { beforeCustomFunctions: bcf, afterCustomFunctions: acf }] = await Promise.all([
+      // CSS analysis
+      Promise.resolve(formCSSAnalyzer.analyze(cssFiles)),
+      
+      // Custom Functions (without form JSON context)
+      Promise.resolve({
+        beforeCustomFunctions: customFunctionAnalyzer.analyze(null, jsFiles),
+        afterCustomFunctions: customFunctionAnalyzer.analyze(null, jsFiles)
+      })
+    ]);
+    
+    // Set empty results for form-specific analyzers
+    formStructureAnalysis = { after: { components: { total: 0 } }, before: { components: { total: 0 } } };
+    formEventsAnalysis = { after: { apiCallsInInitialize: [] }, newIssues: [], resolvedIssues: [] };
+    beforeHiddenFields = { unnecessaryHiddenFields: 0, fields: [] };
+    afterHiddenFields = { unnecessaryHiddenFields: 0, fields: [] };
+    beforeRuleCycles = { totalRules: 0, cycles: 0, slowRuleCount: 0, runtimeErrors: [] };
+    afterRuleCycles = { totalRules: 0, cycles: 0, slowRuleCount: 0, runtimeErrors: [] };
+    formHTMLAnalysis = { after: { issues: [] }, newIssues: [], resolvedIssues: [] };
+    cssAnalysis = css;
+    beforeCustomFunctions = bcf;
+    afterCustomFunctions = acf;
+  }
 
   // Compile comparison results
-  const hiddenFieldsAnalysis = hiddenFieldsAnalyzer.compare(beforeHiddenFields, afterHiddenFields);
-  const ruleCycleAnalysis = rulePerformanceAnalyzer.compare(beforeRuleCycles, afterRuleCycles);
+  const hiddenFieldsAnalysis = hasUrls 
+    ? (new (require('./analyzers/hidden-fields-analyzer.js').HiddenFieldsAnalyzer)(config)).compare(beforeHiddenFields, afterHiddenFields)
+    : { after: afterHiddenFields, before: beforeHiddenFields, newIssues: [], resolvedIssues: [] };
+    
+  const ruleCycleAnalysis = hasUrls
+    ? (new (require('./analyzers/rule-performance-analyzer.js').RulePerformanceAnalyzer)(config)).compare(beforeRuleCycles, afterRuleCycles)
+    : { after: afterRuleCycles, before: beforeRuleCycles, newCycles: [], resolvedCycles: [], slowRuleCount: 0 };
+    
   const formCSSAnalysis = { after: cssAnalysis, newIssues: cssAnalysis.issues, resolvedIssues: [] };
   const customFunctionAnalysis = customFunctionAnalyzer.compare(beforeCustomFunctions, afterCustomFunctions);
   
-  core.info(' All analyses completed');
+  core.info(hasUrls ? ' All analyses completed' : ' Limited analysis completed (CSS/JS only)');
 
   // Merge runtime errors from rule cycle analysis into custom functions
   if (ruleCycleAnalysis?.after?.runtimeErrors && ruleCycleAnalysis.after.runtimeErrors.length > 0) {
