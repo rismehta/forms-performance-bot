@@ -137,7 +137,7 @@ async function runTests() {
     if (hiddenFields.issues.length > 0) {
       console.log('Issues:');
       hiddenFields.issues.forEach(issue => {
-        console.log(`  - ${issue.field}: ${issue.message}`);
+        console.log(`  - ${issue.field}: ${issue.path} - ${issue.message}`);
       });
     }
 

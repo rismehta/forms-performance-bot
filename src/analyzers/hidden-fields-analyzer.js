@@ -25,20 +25,28 @@ export class HiddenFieldsAnalyzer {
     const hiddenFields = this.findHiddenFields(formJson);
     core.info(`[HiddenFields] Found ${hiddenFields.length} hidden field(s) in form JSON`);
     
-    const fieldVisibilityChanges = this.analyzeJSForVisibilityChanges(jsFiles);
-    const visibilityChangeCount = Object.keys(fieldVisibilityChanges).length;
-    core.info(`[HiddenFields] Found visibility changes for ${visibilityChangeCount} field identifier(s) in JS`);
+    const fieldVisibilityChangesInJS = this.analyzeJSForVisibilityChanges(jsFiles);
+    const visibilityChangeCountInJS = Object.keys(fieldVisibilityChangesInJS).length;
+    core.info(`[HiddenFields] Found visibility changes for ${visibilityChangeCountInJS} field identifier(s) in JS`);
     
-    if (visibilityChangeCount > 0) {
-      core.info(`[HiddenFields] Visibility changes detected for: ${Object.keys(fieldVisibilityChanges).slice(0, 5).join(', ')}${visibilityChangeCount > 5 ? '...' : ''}`);
+    if (visibilityChangeCountInJS > 0) {
+      core.info(`[HiddenFields] Visibility changes detected for: ${Object.keys(fieldVisibilityChangesInJS).slice(0, 5).join(', ')}${visibilityChangeCountInJS > 5 ? '...' : ''}`);
     }
     
-    const issues = this.detectUnnecessaryHiddenFields(hiddenFields, fieldVisibilityChanges);
-
+    const visibilityChangesInEvents = this.analyzeEventsForVisibilityChanges(formJson);
+    const visibilityChangeCountInEvents = Object.keys(visibilityChangesInEvents).length;
+    core.info(`[HiddenFields] Found visibility changes for ${visibilityChangeCountInEvents} field identifier(s) in events`);
+    
+    if (visibilityChangeCountInEvents > 0) {
+      core.info(`[HiddenFields] Visibility changes detected for: ${Object.keys(visibilityChangesInEvents).slice(0, 5).join(', ')}${visibilityChangeCountInEvents > 5 ? '...' : ''}`);
+    }
+    
+    const issues = this.detectUnnecessaryHiddenFields(hiddenFields, fieldVisibilityChangesInJS, visibilityChangesInEvents);
+    
     return {
       totalHiddenFields: hiddenFields.length,
       hiddenFields,
-      fieldVisibilityChanges,
+      fieldVisibilityChanges: fieldVisibilityChangesInJS,
       unnecessaryHiddenFields: issues.length,
       issues,
     };
@@ -100,6 +108,73 @@ export class HiddenFieldsAnalyzer {
     }
 
     return fields;
+  }
+
+  /**
+   * Analyze events for visibility changes
+   * @param {object} formJson 
+   * @returns {object} Visibility changes found in events
+   * {
+   *   "node1": {
+   *     "madeVisible": true,
+   *     "files": [
+   *       {
+   *         "rules": ["rule1", "rule2"],
+   *       }
+   *     ]
+   *   }
+   * }
+   */
+  analyzeEventsForVisibilityChanges(formJson) {
+    const visibilityChanges = {};
+
+    // Pattern to check: does this handler set visibility?
+    const hasVisibilityChange = /visible\s*:\s*(true)\s*\(\)/;
+  
+    // Pattern to extract target path from dispatchEvent
+    // Handles: dispatchEvent(path, ...) or dispatchEvent('path', ...) or dispatchEvent("path", ...)
+    const targetPathPattern = /dispatchEvent\s*\(\s*['"]?([^'",\s][^'",]*?)['"]?\s*,/;
+
+
+    const traverse = (node) => {
+      if (!node) return;
+
+      if (node.events && typeof node.events === 'object' && Object.keys(node.events).length > 0) {
+        Object.entries(node.events).forEach(([eventType, handlers]) => {
+          if (Array.isArray(handlers)) {
+            handlers.forEach(handler => {
+              if (typeof handler !== 'string') return;
+
+              if (handler.includes('dispatchEvent') && hasVisibilityChange.test(handler)) {
+                const targetMatch = handler.match(targetPathPattern);
+                const visibleMatch = handler.match(hasVisibilityChange);
+                
+                if (targetMatch && visibleMatch) {
+                  // Normalize the path to remove $form. prefix for consistent matching
+                  const targetPath = this.normalizeEventPath(targetMatch[1].trim());
+                
+                  visibilityChanges[targetPath] = {
+                    madeVisible: true,
+                    rules: [handler],
+                  };
+                }
+              }
+            });
+          }
+        });
+      }
+
+      if (node[':items']) {
+        Object.values(node[':items']).forEach(traverse);
+      }
+
+      if (node.items && Array.isArray(node.items)) {
+        node.items.forEach(traverse);
+      }
+    };
+
+    traverse(formJson);
+    return visibilityChanges;
   }
 
   /**
@@ -206,43 +281,70 @@ export class HiddenFieldsAnalyzer {
   }
 
   /**
+   * Normalize event target path for matching
+   * Removes $form. prefix and optional chaining syntax
+   * @param {string} path - The path to normalize
+   * @returns {string} Normalized path
+   */
+  normalizeEventPath(path) {
+    return path
+      .replace(/^\$form\.?/, '')  // Remove $form. or $form prefix
+      .replace(/\?\./g, '.');      // Remove optional chaining
+  }
+
+  /**
    * Detect unnecessary hidden fields
    */
-  detectUnnecessaryHiddenFields(hiddenFields, visibilityChanges) {
+  detectUnnecessaryHiddenFields(hiddenFields, visibilityChangesInJS, visibilityChangesInEvents) {
     const issues = [];
     let foundInJS = 0;
+    let foundInEvents = 0;
 
     core.info(`[HiddenFields] Analyzing ${hiddenFields.length} hidden field(s) for unnecessary usage...`);
 
     hiddenFields.forEach((field, index) => {
       const { name, path, hasVisibleRule, hasVisibleEvent, visibleRule } = field;
       
-      // Check if field is ever made visible in JS
+      // Check if field is ever made visible in JS or Events(Rules using dispatchEvent)
       // Try multiple matching strategies for robustness:
       // 1. Exact path match (most accurate)
       // 2. Exact name match (fallback for simple cases)
       // 3. Fuzzy match: any JS path ends with our path (handles parent path differences)
+      // 4. Fuzzy match: any Events path ends with our path (handles parent path differences)
       
-      const jsVisibilityByPath = visibilityChanges[path];
-      const jsVisibilityByName = visibilityChanges[name];
+      const jsVisibilityByPath = visibilityChangesInJS[path];
+      const jsVisibilityByName = visibilityChangesInJS[name];
+      const eventsVisibilityByPath = visibilityChangesInEvents[path];
+      const eventsVisibilityByName = visibilityChangesInEvents[name];
       
-      let fuzzyMatch = null;
-      let fuzzyMatchPath = null;
+      let fuzzyMatchJS = null;
+      let fuzzyMatchJSPath = null;
+      let fuzzyMatchEvents = null;
+      let fuzzyMatchEventsPath = null;
       if (!jsVisibilityByPath && !jsVisibilityByName) {
-        for (const [jsPath, jsVisibility] of Object.entries(visibilityChanges)) {
+        for (const [jsPath, jsVisibility] of Object.entries(visibilityChangesInJS)) {
           // Check if JS path ends with our path (e.g., "parentPanel.panel.field" matches "panel.field")
           if (jsPath.endsWith(path) || jsPath.endsWith(`.${name}`)) {
-            fuzzyMatch = jsVisibility;
-            fuzzyMatchPath = jsPath;
+            fuzzyMatchJS = jsVisibility;
+            fuzzyMatchJSPath = jsPath;
+            break;
+          }
+        }
+      }
+
+      if (!eventsVisibilityByPath && !eventsVisibilityByName) {
+        for (const [eventsPath, eventsVisibility] of Object.entries(visibilityChangesInEvents)) {
+          if (eventsPath.endsWith(path) || eventsPath.endsWith(`.${name}`)) {
+            fuzzyMatchEvents = eventsVisibility;
+            fuzzyMatchEventsPath = eventsPath;
             break;
           }
         }
       }
       
-      const madeVisibleInJS = 
-        jsVisibilityByPath?.madeVisible === true || 
-        jsVisibilityByName?.madeVisible === true ||
-        fuzzyMatch?.madeVisible === true;
+      const madeVisibleInJSOrEvents = 
+        (jsVisibilityByName?.madeVisible === true || jsVisibilityByPath?.madeVisible === true || fuzzyMatchJS?.madeVisible === true) || 
+        (eventsVisibilityByName?.madeVisible === true || eventsVisibilityByPath?.madeVisible === true || fuzzyMatchEvents?.madeVisible === true);
 
       // Only log when we find a visibility change in JS (reduces noise)
       if (jsVisibilityByPath) {
@@ -253,17 +355,31 @@ export class HiddenFieldsAnalyzer {
         foundInJS++;
         core.info(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by name match`);
         core.info(`[HiddenFields]   → Made visible: ${jsVisibilityByName.madeVisible}, Files: ${jsVisibilityByName.files.map(f => f.filename).join(', ')}`);
-      } else if (fuzzyMatch) {
+      } else if (fuzzyMatchJS) {
         foundInJS++;
-        core.info(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by fuzzy match (JS path: "${fuzzyMatchPath}")`);
-        core.info(`[HiddenFields]   → Made visible: ${fuzzyMatch.madeVisible}, Files: ${fuzzyMatch.files.map(f => f.filename).join(', ')}`);
+        core.info(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by fuzzy match (JS path: "${fuzzyMatchJSPath}")`);
+        core.info(`[HiddenFields]   → Made visible: ${fuzzyMatchJS.madeVisible}, Files: ${fuzzyMatchJS.files.map(f => f.filename).join(', ')}`);
+      } else if (fuzzyMatchEvents) {
+        foundInEvents++;
+        core.info(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by fuzzy match")`);
+        core.info(`[HiddenFields]   → Made visible: ${fuzzyMatchEvents.madeVisible}, Rules: ${fuzzyMatchEvents.rules.join(', ')}`);
+      } else if(eventsVisibilityByPath) {
+        foundInEvents++;
+        core.info(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by exact path match`);
+        core.info(`[HiddenFields]   → Made visible: ${eventsVisibilityByPath.madeVisible}, Rules: ${eventsVisibilityByPath.rules.join(', ')}`);
+      } else if(eventsVisibilityByName) {
+        foundInEvents++;
+        core.info(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by name match`);
+        core.info(`[HiddenFields]   → Made visible: ${eventsVisibilityByName.madeVisible}, Rules: ${eventsVisibilityByName.rules.join(', ')}`);
+      } else {
+        core.info(`[HiddenFields] ✗ Field "${name}" (path: "${path}") - NOT FOUND`);
       }
 
       // Field is potentially unnecessary if:
       // 1. It has no visible rule in JSON
       // 2. It has no event that sets visibility
       // 3. It's never made visible in JavaScript
-      const isUnnecessary = !hasVisibleRule && !hasVisibleEvent && !madeVisibleInJS;
+      const isUnnecessary = !hasVisibleRule && !hasVisibleEvent && !madeVisibleInJSOrEvents;
 
       if (isUnnecessary) {
         issues.push({
@@ -290,7 +406,7 @@ export class HiddenFieldsAnalyzer {
       }
     });
 
-    core.info(`[HiddenFields] Summary: ${foundInJS}/${hiddenFields.length} hidden fields have visibility controls in JS`);
+    core.info(`[HiddenFields] Summary: ${foundInJS}/${hiddenFields.length} hidden fields have visibility controls in JS, ${foundInEvents}/${hiddenFields.length} hidden fields have visibility controls in events`);
     core.info(`[HiddenFields] Found ${issues.length} unnecessary hidden field(s)`);
 
     return issues;
@@ -319,7 +435,7 @@ export class HiddenFieldsAnalyzer {
   compare(beforeData, afterData) {
     const resolvedIssues = beforeData.issues.filter(beforeIssue =>
       !afterData.issues.some(afterIssue =>
-        afterIssue.field === beforeIssue.field && afterIssue.type === afterIssue.type
+        afterIssue.field === beforeIssue.field && afterIssue.type === beforeIssue.type
       )
     );
 
