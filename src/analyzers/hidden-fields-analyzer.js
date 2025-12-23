@@ -47,6 +47,7 @@ export class HiddenFieldsAnalyzer {
       totalHiddenFields: hiddenFields.length,
       hiddenFields,
       fieldVisibilityChanges: fieldVisibilityChangesInJS,
+      fieldVisibilityChangesInEvents: visibilityChangesInEvents,
       unnecessaryHiddenFields: issues.length,
       issues,
     };
