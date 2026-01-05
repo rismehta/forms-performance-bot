@@ -133,11 +133,15 @@ async function runTests() {
     Object.entries(hiddenFields.fieldVisibilityChanges).forEach(([key, change]) => {
       console.log(`  - ${key}: ${change.madeVisible ? ' Made visible' : ' Never shown'}`);
     });
+    console.log('\nVisibility Changes in Events:');
+    Object.entries(hiddenFields.fieldVisibilityChangesInEvents).forEach(([key, change]) => {
+      console.log(`  - ${key}: ${change.madeVisible ? ' Made visible' : ' Never shown'}`);
+    });
     console.log('\nUnnecessary Hidden Fields:', hiddenFields.unnecessaryHiddenFields);
     if (hiddenFields.issues.length > 0) {
       console.log('Issues:');
       hiddenFields.issues.forEach(issue => {
-        console.log(`  - ${issue.field}: ${issue.message}`);
+        console.log(`  - ${issue.field}: ${issue.path} - ${issue.message}`);
       });
     }
 
