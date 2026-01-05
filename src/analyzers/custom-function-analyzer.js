@@ -29,7 +29,7 @@ export class CustomFunctionAnalyzer {
         try {
           // Parse with locations enabled to get line numbers
           const ast = acorn.parse(jsFile.content, { 
-            ecmaVersion: 2020, 
+            ecmaVersion: 'latest',  // Support all modern JavaScript including class fields
             sourceType: 'module',
             locations: true  // ← CRITICAL: Required for line numbers!
           });
@@ -265,7 +265,7 @@ export class CustomFunctionAnalyzer {
       try {
         // Parse JavaScript file
         const ast = acorn.parse(file.content, {
-          ecmaVersion: 2022,
+          ecmaVersion: 'latest',  // Support all modern JavaScript including class fields
           sourceType: 'module',
           locations: true,
         });
