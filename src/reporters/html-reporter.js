@@ -1113,7 +1113,7 @@ export class HTMLReporter {
    * Generate summary HTML report for scheduled scans with multiple forms
    */
   generateScheduledSummaryReport(formResults, options = {}) {
-    const { repository, timestamp, formGistLinks = [] } = options;
+    const { repository, timestamp, formGistLinks = [], exceptionPRs = [] } = options;
     
     // Count total issues across all forms
     let totalCritical = 0;
@@ -1292,7 +1292,66 @@ export class HTMLReporter {
       <div class="stat-label">Forms with Errors</div>
       <div class="stat-number ${formsWithErrors > 0 ? 'critical' : 'success'}">${formsWithErrors}</div>
     </div>
+    <div class="stat-card" style="${exceptionPRs.length > 0 ? 'border: 2px solid #f85149;' : ''}">
+      <div class="stat-label">PRs with Exceptions ⚠️</div>
+      <div class="stat-number ${exceptionPRs.length > 0 ? 'warning' : 'success'}">${exceptionPRs.length}</div>
+      ${exceptionPRs.length > 0 ? `<div style="font-size: 11px; color: #57606a; margin-top: 8px;">Merged bypassing checks</div>` : ''}
+    </div>
   </div>
+  
+  ${exceptionPRs.length > 0 ? `
+  <div style="background: #fff8c5; border: 1px solid #d4a72c; border-radius: 8px; padding: 16px; margin-bottom: 30px;">
+    <h3 style="color: #24292e !important; margin: 0 0 8px 0; font-size: 16px; font-weight: 600;">
+      ⚠️ ${exceptionPRs.length} PR${exceptionPRs.length > 1 ? 's' : ''} Merged with Performance Exceptions This Week
+    </h3>
+    <p style="color: #24292e !important; margin: 0; font-size: 14px;">
+      ${exceptionPRs.slice(0, 5).map(pr => `<a href="${pr.url}" style="color: #0969da;">#${pr.number}</a>`).join(', ')}${exceptionPRs.length > 5 ? ` and ${exceptionPRs.length - 5} more` : ''} merged bypassing performance checks.
+    </p>
+  </div>
+  ` : ''}
+  
+  ${exceptionPRs.length > 0 ? `
+  <h2 style="color: #24292e !important; margin-top: 30px; margin-bottom: 20px; font-size: 24px; font-weight: 600;">⚠️ PRs Merged with Performance Exceptions</h2>
+  <div style="background: white; border-radius: 8px; padding: 20px; margin-bottom: 30px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
+    <table style="width: 100%; border-collapse: collapse;">
+      <thead>
+        <tr style="background: #f6f8fa; border-bottom: 2px solid #d0d7de;">
+          <th style="padding: 12px; text-align: left; font-weight: 600; color: #24292e;">PR</th>
+          <th style="padding: 12px; text-align: left; font-weight: 600; color: #24292e;">Title</th>
+          <th style="padding: 12px; text-align: left; font-weight: 600; color: #24292e;">Author</th>
+          <th style="padding: 12px; text-align: left; font-weight: 600; color: #24292e;">Merged</th>
+          <th style="padding: 12px; text-align: left; font-weight: 600; color: #24292e;">Labels</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${exceptionPRs.map((pr, index) => `
+          <tr style="border-bottom: 1px solid #d0d7de; ${index % 2 === 0 ? 'background: #f6f8fa;' : ''}">
+            <td style="padding: 12px;">
+              <a href="${pr.url}" style="color: #0969da; font-weight: 600; text-decoration: none;">#${pr.number}</a>
+            </td>
+            <td style="padding: 12px; color: #24292e;">
+              ${pr.title.length > 80 ? pr.title.substring(0, 80) + '...' : pr.title}
+            </td>
+            <td style="padding: 12px; color: #24292e;">
+              ${pr.author}
+            </td>
+            <td style="padding: 12px; color: #57606a; font-size: 13px;">
+              ${new Date(pr.mergedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+            </td>
+            <td style="padding: 12px;">
+              ${pr.labels.map(label => 
+                `<span style="display: inline-block; background: #fff8c5; padding: 3px 8px; border-radius: 12px; font-size: 11px; font-weight: 500; margin-right: 4px; color: #24292e;">${label}</span>`
+              ).join('')}
+            </td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+    <p style="color: #57606a; font-size: 13px; margin-top: 16px; margin-bottom: 0;">
+      <strong>Note:</strong> These PRs were merged despite failing performance checks. Review exception justifications in PR descriptions.
+    </p>
+  </div>
+  ` : ''}
   
   <h2 style="color: #24292e !important; margin-top: 30px; margin-bottom: 20px; font-size: 24px; font-weight: 600;">Individual Form Reports</h2>
   <div class="form-grid">

@@ -717,13 +717,18 @@ async function runScheduledMode(context, octokit, patOctokit, config) {
     }
   }
   
+  // Check for PRs merged with performance exceptions in the last week
+  core.info('\n📋 Checking for PRs merged with performance exceptions...');
+  const exceptionPRs = await getPRsWithExceptions(octokit, owner, repo, 7);
+  
   // Generate summary HTML report
   core.info('\n📊 Generating summary report...');
   const htmlReporter = new HTMLReporter();
   const summaryHtmlReport = htmlReporter.generateScheduledSummaryReport(formResults, {
     repository: `${owner}/${repo}`,
     timestamp: new Date().toISOString(),
-    formGistLinks
+    formGistLinks,
+    exceptionPRs
   });
   
   // Save summary report
@@ -742,7 +747,8 @@ async function runScheduledMode(context, octokit, patOctokit, config) {
   const emailSent = await sendEmailReport(formResults, emailSafeHtml, {
     repository: `${owner}/${repo}`,
     from: 'aemforms-performance-bot@adobe.com',
-    formGistLinks
+    formGistLinks,
+    exceptionPRs
   });
   
   if (emailSent) {
@@ -752,6 +758,53 @@ async function runScheduledMode(context, octokit, patOctokit, config) {
   }
   
   core.info(`\n✓ Scheduled scan completed - analyzed ${formResults.length} form(s)`);
+}
+
+/**
+ * Get PRs merged with performance exceptions in the last N days
+ * @param {Object} octokit - GitHub API client
+ * @param {string} owner - Repository owner
+ * @param {string} repo - Repository name
+ * @param {number} daysBack - Number of days to look back (default: 7)
+ * @returns {Promise<Array>} Array of PR info with exception labels
+ */
+async function getPRsWithExceptions(octokit, owner, repo, daysBack = 7) {
+  const since = new Date();
+  since.setDate(since.getDate() - daysBack);
+  const sinceISO = since.toISOString().split('T')[0]; // YYYY-MM-DD
+  
+  try {
+    // Search for merged PRs with exception/skip labels
+    const { data } = await octokit.rest.search.issuesAndPullRequests({
+      q: `repo:${owner}/${repo} is:pr is:merged label:"performance-exception","skip-performance","perf-override" merged:>=${sinceISO}`,
+      sort: 'updated',
+      order: 'desc',
+      per_page: 100
+    });
+    
+    core.info(`  Found ${data.total_count} PR(s) with performance exceptions in last ${daysBack} days`);
+    
+    if (data.total_count === 0) {
+      return [];
+    }
+    
+    // Extract relevant info
+    const exceptions = data.items.map(pr => ({
+      number: pr.number,
+      title: pr.title,
+      author: pr.user.login,
+      mergedAt: pr.pull_request?.merged_at || pr.closed_at,
+      url: pr.html_url,
+      labels: pr.labels.map(l => l.name).filter(l => 
+        l.includes('performance') || l.includes('perf') || l.includes('skip')
+      )
+    }));
+    
+    return exceptions;
+  } catch (error) {
+    core.warning(`  Failed to fetch exception PRs: ${error.message}`);
+    return [];
+  }
 }
 
 /**

@@ -61,8 +61,9 @@ async function sendViaSendGrid(results, htmlReport, options, apiKey, toEmail) {
   const criticalCount = summary.criticalIssues;
   const repository = options.repository || 'Unknown Repository';
   const formCount = isMultipleForms ? results.length : 1;
+  const exceptionCount = options.exceptionPRs?.length || 0;
   
-  const subject = `📊 Daily Performance Report - ${repository} - ${date} (${formCount} form${formCount > 1 ? 's' : ''}, ${issueCount} issues${criticalCount > 0 ? `, ${criticalCount} critical` : ''})`;
+  const subject = `Performance Report - ${repository} - ${date} (${formCount} form${formCount > 1 ? 's' : ''}, ${issueCount} issues${criticalCount > 0 ? `, ${criticalCount} critical` : ''}${exceptionCount > 0 ? `, ${exceptionCount} PR${exceptionCount > 1 ? 's' : ''} with exceptions ⚠️` : ''})`;
   
   const emailData = {
     personalizations: [{
@@ -120,8 +121,9 @@ async function sendViaGmail(results, htmlReport, options, gmailUser, gmailPasswo
   const criticalCount = summary.criticalIssues;
   const repository = options.repository || 'Unknown Repository';
   const formCount = isMultipleForms ? results.length : 1;
+  const exceptionCount = options.exceptionPRs?.length || 0;
   
-  const subject = `📊 Daily Performance Report - ${repository} - ${date} (${formCount} form${formCount > 1 ? 's' : ''}, ${issueCount} issues${criticalCount > 0 ? `, ${criticalCount} critical` : ''})`;
+  const subject = `Performance Report - ${repository} - ${date} (${formCount} form${formCount > 1 ? 's' : ''}, ${issueCount} issues${criticalCount > 0 ? `, ${criticalCount} critical` : ''}${exceptionCount > 0 ? `, ${exceptionCount} PR${exceptionCount > 1 ? 's' : ''} with exceptions ⚠️` : ''})`;
   
   try {
     core.info(`📧 Sending email via Gmail SMTP to ${toEmail}...`);
@@ -197,8 +199,9 @@ async function sendViaSMTP(results, htmlReport, options, toEmail) {
   const criticalCount = summary.criticalIssues;
   const repository = options.repository || 'Unknown Repository';
   const formCount = isMultipleForms ? results.length : 1;
+  const exceptionCount = options.exceptionPRs?.length || 0;
   
-  const subject = `📊 Daily Performance Report - ${repository} - ${date} (${formCount} form${formCount > 1 ? 's' : ''}, ${issueCount} issues${criticalCount > 0 ? `, ${criticalCount} critical` : ''})`;
+  const subject = `Performance Report - ${repository} - ${date} (${formCount} form${formCount > 1 ? 's' : ''}, ${issueCount} issues${criticalCount > 0 ? `, ${criticalCount} critical` : ''}${exceptionCount > 0 ? `, ${exceptionCount} PR${exceptionCount > 1 ? 's' : ''} with exceptions ⚠️` : ''})`;
   
   try {
     core.info(`📧 Sending email via SMTP (${host}:${port}) to ${toEmail}...`);
