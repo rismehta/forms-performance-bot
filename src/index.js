@@ -305,11 +305,11 @@ async function runPRMode(context, octokit, patOctokit, config) {
 
   // Compile comparison results
   const hiddenFieldsAnalysis = hasUrls 
-    ? (new (require('./analyzers/hidden-fields-analyzer.js').HiddenFieldsAnalyzer)(config)).compare(beforeHiddenFields, afterHiddenFields)
+    ? (new HiddenFieldsAnalyzer(config)).compare(beforeHiddenFields, afterHiddenFields)
     : { after: afterHiddenFields, before: beforeHiddenFields, newIssues: [], resolvedIssues: [] };
     
   const ruleCycleAnalysis = hasUrls
-    ? (new (require('./analyzers/rule-performance-analyzer.js').RulePerformanceAnalyzer)(config)).compare(beforeRuleCycles, afterRuleCycles)
+    ? (new RulePerformanceAnalyzer(config)).compare(beforeRuleCycles, afterRuleCycles)
     : { after: afterRuleCycles, before: beforeRuleCycles, newCycles: [], resolvedCycles: [], slowRuleCount: 0 };
     
   const formCSSAnalysis = { after: cssAnalysis, newIssues: cssAnalysis.issues, resolvedIssues: [] };
