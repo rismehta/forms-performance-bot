@@ -8,7 +8,8 @@
     "start": "node src/index.js",
     "build": "ncc build src/index.js -o dist --license licenses.txt",
     "test": "node test/run-test.js --sample",
-    "test:live": "node test/run-test.js"
+    "test:live": "node test/run-test.js",
+    "analyze-events": "node src/cli/event-impact-cli.js"
   },
   "keywords": [
     "github-action",
