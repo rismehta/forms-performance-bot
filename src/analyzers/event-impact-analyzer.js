@@ -83,11 +83,16 @@ export class EventImpactAnalyzer {
       event.customFunctions = Array.from(event.customFunctions).sort();
     });
     
+    // Detect duplicates and similar events (PRIMARY USE CASE)
+    const duplicateAnalysis = this.detectDuplicateEvents(eventImpactMap);
+    
     return {
       totalEvents: Object.keys(eventImpactMap).length,
       events: eventImpactMap,
       fieldEventMap, // field → list of events targeting it
       summary: this.generateSummary(eventImpactMap, fieldEventMap),
+      duplicates: duplicateAnalysis.duplicates,
+      similarEvents: duplicateAnalysis.similar,
       performanceIssues: this.identifyPerformanceIssues(eventImpactMap),
     };
   }
@@ -195,6 +200,76 @@ export class EventImpactAnalyzer {
     };
   }
   
+  /**
+   * Detect duplicate and similar events
+   * PRIMARY USE CASE: Prevent new developers from creating duplicate logic
+   */
+  detectDuplicateEvents(eventImpactMap) {
+    const duplicates = [];
+    const similar = [];
+    const eventsByField = {};
+    
+    // Group events by source field and event type
+    Object.entries(eventImpactMap).forEach(([eventKey, event]) => {
+      const key = `${event.sourceField}::${event.eventType}`;
+      if (!eventsByField[key]) {
+        eventsByField[key] = [];
+      }
+      eventsByField[key].push({ eventKey, event });
+    });
+    
+    // Check for exact duplicates (same field, same event type, multiple handlers)
+    Object.entries(eventsByField).forEach(([key, events]) => {
+      if (events.length > 1) {
+        duplicates.push({
+          field: events[0].event.sourceField,
+          eventType: events[0].event.eventType,
+          count: events.length,
+          handlers: events.map(e => e.event.handlers).flat(),
+          message: `${events.length} handlers defined for same event - may cause unexpected behavior`,
+        });
+      }
+    });
+    
+    // Check for similar events (different events doing similar things)
+    const allEvents = Object.entries(eventImpactMap);
+    for (let i = 0; i < allEvents.length; i++) {
+      for (let j = i + 1; j < allEvents.length; j++) {
+        const [key1, event1] = allEvents[i];
+        const [key2, event2] = allEvents[j];
+        
+        // Skip if same source field (handled by duplicates)
+        if (event1.sourceField === event2.sourceField) continue;
+        
+        // Check if they impact the same fields
+        const commonImpacts = event1.impactedFields.filter(f => 
+          event2.impactedFields.includes(f)
+        );
+        
+        // Check if they use same custom functions
+        const commonFunctions = event1.customFunctions.filter(f =>
+          event2.customFunctions.includes(f)
+        );
+        
+        // If they have significant overlap, they might be doing similar things
+        if (commonImpacts.length >= 3 || commonFunctions.length >= 2) {
+          similar.push({
+            event1: key1,
+            event2: key2,
+            commonImpacts,
+            commonFunctions,
+            message: `These events may have overlapping logic`,
+          });
+        }
+      }
+    }
+    
+    return { duplicates, similar };
+  }
+  
+  /**
+   * Detect performance issues (SECONDARY - not the main goal)
+   */
   identifyPerformanceIssues(eventImpactMap) {
     const issues = [];
     
@@ -236,6 +311,7 @@ export class EventImpactAnalyzer {
   generateMarkdownReport(analysis) {
     let markdown = `# 📊 Event Impact Analysis Report\n\n`;
     markdown += `**Generated:** ${new Date().toISOString()}\n\n`;
+    markdown += `> **Purpose:** Prevent duplicate events, track impact of changes, document current setup\n\n`;
     
     markdown += `## 📈 Summary\n\n`;
     markdown += `| Metric | Value |\n`;
@@ -243,9 +319,58 @@ export class EventImpactAnalyzer {
     markdown += `| Total Events | ${analysis.totalEvents} |\n`;
     markdown += `| Event Types | ${analysis.summary.totalEventTypes} |\n`;
     markdown += `| Unique Fields Impacted | ${analysis.summary.totalUniqueFieldsImpacted} |\n`;
+    markdown += `| **Duplicate Events** | **${analysis.duplicates?.length || 0}** |\n`;
+    markdown += `| **Similar Events** | **${analysis.similarEvents?.length || 0}** |\n`;
     markdown += `| Performance Issues | ${analysis.performanceIssues.length} |\n\n`;
     
-    // Performance Issues
+    // PRIORITY 1: Duplicate Events (Main use case!)
+    if (analysis.duplicates && analysis.duplicates.length > 0) {
+      markdown += `## 🚨 Duplicate Events Found\n\n`;
+      markdown += `**⚠️ IMPORTANT:** Multiple handlers defined for the same event. This may cause:\n`;
+      markdown += `- Unexpected behavior (which handler runs first?)\n`;
+      markdown += `- Maintenance nightmares (developers don't know about duplicate logic)\n`;
+      markdown += `- Regression bugs (modifying one handler, forgetting the other)\n\n`;
+      
+      analysis.duplicates.forEach((dup, idx) => {
+        markdown += `### ${idx + 1}. \`${dup.field}\` → **${dup.eventType}**\n\n`;
+        markdown += `- **${dup.count} handlers** defined for this event\n`;
+        markdown += `- **Action Required:** Consolidate into single handler or verify this is intentional\n\n`;
+        markdown += `<details>\n<summary>Show All ${dup.count} Handlers</summary>\n\n`;
+        dup.handlers.forEach((handler, i) => {
+          markdown += `**Handler ${i + 1}:**\n\`\`\`javascript\n${handler}\n\`\`\`\n\n`;
+        });
+        markdown += `</details>\n\n`;
+      });
+    }
+    
+    // PRIORITY 2: Similar Events (Potential duplicates)
+    if (analysis.similarEvents && analysis.similarEvents.length > 0) {
+      markdown += `## 🔍 Similar Events Detected\n\n`;
+      markdown += `**Note:** These events are on different fields but do similar things. Consider:\n`;
+      markdown += `- Are they intentionally similar?\n`;
+      markdown += `- Could they share common logic via a custom function?\n`;
+      markdown += `- Is one a copy-paste of the other?\n\n`;
+      
+      analysis.similarEvents.slice(0, 10).forEach((sim, idx) => {
+        markdown += `### ${idx + 1}. Similarity Between:\n`;
+        markdown += `- **Event 1:** \`${sim.event1}\`\n`;
+        markdown += `- **Event 2:** \`${sim.event2}\`\n\n`;
+        
+        if (sim.commonImpacts.length > 0) {
+          markdown += `**Common Fields Modified:** ${sim.commonImpacts.map(f => `\`${f}\``).join(', ')}\n\n`;
+        }
+        if (sim.commonFunctions.length > 0) {
+          markdown += `**Common Functions Used:** ${sim.commonFunctions.map(f => `\`${f}()\``).join(', ')}\n\n`;
+        }
+        markdown += `---\n\n`;
+      });
+      
+      if (analysis.similarEvents.length > 10) {
+        markdown += `*... and ${analysis.similarEvents.length - 10} more similar event pairs*\n\n`;
+      }
+    }
+    
+    // Performance Issues (Secondary - still useful but not main goal)
     if (analysis.performanceIssues.length > 0) {
       markdown += `## ⚠️ Performance Issues\n\n`;
       const critical = analysis.performanceIssues.filter(i => i.severity === 'critical');

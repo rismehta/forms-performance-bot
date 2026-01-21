@@ -146,13 +146,28 @@ async function main() {
     console.log(`   Total Events: ${analysis.totalEvents}`);
     console.log(`   Event Types: ${analysis.summary.totalEventTypes}`);
     console.log(`   Unique Fields Impacted: ${analysis.summary.totalUniqueFieldsImpacted}`);
-    console.log(`   Performance Issues: ${analysis.performanceIssues.length}`);
     
+    // Highlight duplicates (PRIMARY USE CASE)
+    if (analysis.duplicates && analysis.duplicates.length > 0) {
+      console.log(`\n🚨 DUPLICATES FOUND:`);
+      console.log(`   ${analysis.duplicates.length} event(s) have multiple handlers`);
+      analysis.duplicates.forEach(dup => {
+        console.log(`     - ${dup.field} → ${dup.eventType} (${dup.count} handlers)`);
+      });
+    }
+    
+    // Show similar events
+    if (analysis.similarEvents && analysis.similarEvents.length > 0) {
+      console.log(`\n🔍 Similar Events: ${analysis.similarEvents.length} pair(s) detected`);
+    }
+    
+    // Performance issues (secondary)
     if (analysis.performanceIssues.length > 0) {
+      console.log(`\n⚠️  Performance Issues: ${analysis.performanceIssues.length}`);
       const critical = analysis.performanceIssues.filter(i => i.severity === 'critical').length;
       const warnings = analysis.performanceIssues.filter(i => i.severity === 'warning').length;
-      console.log(`     - Critical: ${critical}`);
-      console.log(`     - Warnings: ${warnings}`);
+      if (critical > 0) console.log(`     - Critical: ${critical}`);
+      if (warnings > 0) console.log(`     - Warnings: ${warnings}`);
     }
     
     console.log(`\n📊 Top Impacted Fields:`);
@@ -198,8 +213,16 @@ async function main() {
       console.log(`   ${savedFiles.find(f => f.endsWith('.md'))}`);
     }
     
-    // Exit with error code if critical issues found
+    // Exit with error code if duplicates or critical issues found
+    const hasDuplicates = analysis.duplicates && analysis.duplicates.length > 0;
     const criticalCount = analysis.performanceIssues.filter(i => i.severity === 'critical').length;
+    
+    if (hasDuplicates) {
+      console.log(`\n🚨 WARNING: ${analysis.duplicates.length} duplicate event(s) detected`);
+      console.log(`   Review and consolidate duplicate handlers before deploying`);
+      process.exit(1);
+    }
+    
     if (criticalCount > 0) {
       console.log(`\n⚠️  Warning: ${criticalCount} critical performance issue(s) detected`);
       console.log(`   Review the report before deploying to production`);
