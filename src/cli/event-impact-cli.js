@@ -137,9 +137,19 @@ async function main() {
     // Step 2: Analyze event impacts
     console.log('⏳ Analyzing event dependencies...');
     const eventAnalyzer = new EventImpactAnalyzer();
-    const analysis = eventAnalyzer.analyze(urlAnalysis.formJson);
     
-    console.log(`✅ Analysis complete!\n`);
+    let analysis;
+    try {
+      analysis = eventAnalyzer.analyze(urlAnalysis.formJson);
+      console.log(`✅ Analysis complete!\n`);
+    } catch (error) {
+      console.error(`\n❌ Error during analysis: ${error.message}`);
+      if (options.verbose) {
+        console.error('\nFull stack trace:');
+        console.error(error.stack);
+      }
+      throw error;
+    }
     
     // Print summary to console
     console.log('📈 Summary:');

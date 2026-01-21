@@ -28,11 +28,13 @@ export class EventImpactAnalyzer {
       // Process events on this field
       if (node.events && typeof node.events === 'object') {
         Object.entries(node.events).forEach(([eventType, handlers]) => {
-          const eventKey = `${fieldPath} → ${eventType}`;
+          // Skip if no valid field path
+          const sourceField = fieldPath || '(root)';
+          const eventKey = `${sourceField} → ${eventType}`;
           
           if (!eventImpactMap[eventKey]) {
             eventImpactMap[eventKey] = {
-              sourceField: fieldPath,
+              sourceField,
               eventType,
               handlers: [],
               impactedFields: new Set(),
@@ -104,6 +106,11 @@ export class EventImpactAnalyzer {
     // - field.$value = ...
     // - globals.functions.setProperty(field, ...)
     
+    // Safety check
+    if (!event || !event.sourceField || !event.eventType) {
+      return;
+    }
+    
     const patterns = [
       /\$form\.([a-zA-Z0-9_.]+)/g,
       /setProperty\s*\(\s*\$?form\.([a-zA-Z0-9_.]+)/g,
@@ -126,11 +133,13 @@ export class EventImpactAnalyzer {
             !fieldPath.startsWith('functions.')) {
           event.impactedFields.add(fieldPath);
           
-          // Add to reverse map
-          if (!fieldEventMap[fieldPath]) {
-            fieldEventMap[fieldPath] = [];
+          // Add to reverse map (with safety check)
+          if (fieldEventMap) {
+            if (!fieldEventMap[fieldPath]) {
+              fieldEventMap[fieldPath] = [];
+            }
+            fieldEventMap[fieldPath].push(`${event.sourceField} → ${event.eventType}`);
           }
-          fieldEventMap[fieldPath].push(`${event.sourceField} → ${event.eventType}`);
         }
       }
     });
@@ -160,22 +169,39 @@ export class EventImpactAnalyzer {
     const customFunctionUsage = {};
     
     Object.values(eventImpactMap).forEach(event => {
+      // Safety checks
+      if (!event || !event.sourceField || !event.eventType) {
+        return;
+      }
+      
       // Count by event type
       eventTypeCount[event.eventType] = (eventTypeCount[event.eventType] || 0) + 1;
       
       // Count fields impacted
-      event.impactedFields.forEach(field => {
-        fieldImpactCount[field] = (fieldImpactCount[field] || 0) + 1;
-      });
+      if (event.impactedFields && typeof event.impactedFields.forEach === 'function') {
+        event.impactedFields.forEach(field => {
+          fieldImpactCount[field] = (fieldImpactCount[field] || 0) + 1;
+        });
+      }
       
       // Count custom function usage
-      event.customFunctions.forEach(fn => {
-        if (!customFunctionUsage[fn]) {
-          customFunctionUsage[fn] = { count: 0, events: [] };
-        }
-        customFunctionUsage[fn].count++;
-        customFunctionUsage[fn].events.push(`${event.sourceField} → ${event.eventType}`);
-      });
+      if (event.customFunctions && typeof event.customFunctions.forEach === 'function') {
+        event.customFunctions.forEach(fn => {
+          if (fn && typeof fn === 'string' && fn.length > 0) {
+            // Get or create the usage object
+            let usage = customFunctionUsage[fn];
+            if (!usage) {
+              usage = { count: 0, events: [] };
+              customFunctionUsage[fn] = usage;
+            }
+            // Update the usage
+            usage.count++;
+            if (usage.events && Array.isArray(usage.events)) {
+              usage.events.push(`${event.sourceField} → ${event.eventType}`);
+            }
+          }
+        });
+      }
     });
     
     // Find top impacted fields
