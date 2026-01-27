@@ -372,9 +372,8 @@ export class HiddenFieldsAnalyzer {
         foundInEvents++;
         core.info(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by name match`);
         core.info(`[HiddenFields]   → Made visible: ${eventsVisibilityByName.madeVisible}, Rules: ${eventsVisibilityByName.rules.join(', ')}`);
-      } else {
-        core.info(`[HiddenFields] ✗ Field "${name}" (path: "${path}") - NOT FOUND`);
       }
+      // Note: Fields not found in visibility rules will be flagged as unnecessary below if truly unused
 
       // Field is potentially unnecessary if:
       // 1. It has no visible rule in JSON
