@@ -173682,31 +173682,31 @@ class HiddenFieldsAnalyzer {
         (jsVisibilityByName?.madeVisible === true || jsVisibilityByPath?.madeVisible === true || fuzzyMatchJS?.madeVisible === true) || 
         (eventsVisibilityByName?.madeVisible === true || eventsVisibilityByPath?.madeVisible === true || fuzzyMatchEvents?.madeVisible === true);
 
-      // Only log when we find a visibility change in JS (reduces noise)
+      // Only log when we find a visibility change in JS (use debug mode to reduce noise)
       if (jsVisibilityByPath) {
         foundInJS++;
-        lib_core.info(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by exact path match`);
-        lib_core.info(`[HiddenFields]   → Made visible: ${jsVisibilityByPath.madeVisible}, Files: ${jsVisibilityByPath.files.map(f => f.filename).join(', ')}`);
+        lib_core.debug(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by exact path match`);
+        lib_core.debug(`[HiddenFields]   → Made visible: ${jsVisibilityByPath.madeVisible}, Files: ${jsVisibilityByPath.files.map(f => f.filename).join(', ')}`);
       } else if (jsVisibilityByName) {
         foundInJS++;
-        lib_core.info(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by name match`);
-        lib_core.info(`[HiddenFields]   → Made visible: ${jsVisibilityByName.madeVisible}, Files: ${jsVisibilityByName.files.map(f => f.filename).join(', ')}`);
+        lib_core.debug(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by name match`);
+        lib_core.debug(`[HiddenFields]   → Made visible: ${jsVisibilityByName.madeVisible}, Files: ${jsVisibilityByName.files.map(f => f.filename).join(', ')}`);
       } else if (fuzzyMatchJS) {
         foundInJS++;
-        lib_core.info(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by fuzzy match (JS path: "${fuzzyMatchJSPath}")`);
-        lib_core.info(`[HiddenFields]   → Made visible: ${fuzzyMatchJS.madeVisible}, Files: ${fuzzyMatchJS.files.map(f => f.filename).join(', ')}`);
+        lib_core.debug(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by fuzzy match (JS path: "${fuzzyMatchJSPath}")`);
+        lib_core.debug(`[HiddenFields]   → Made visible: ${fuzzyMatchJS.madeVisible}, Files: ${fuzzyMatchJS.files.map(f => f.filename).join(', ')}`);
       } else if (fuzzyMatchEvents) {
         foundInEvents++;
-        lib_core.info(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by fuzzy match")`);
-        lib_core.info(`[HiddenFields]   → Made visible: ${fuzzyMatchEvents.madeVisible}, Rules: ${fuzzyMatchEvents.rules.join(', ')}`);
+        lib_core.debug(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by fuzzy match")`);
+        lib_core.debug(`[HiddenFields]   → Made visible: ${fuzzyMatchEvents.madeVisible}, Rules: ${fuzzyMatchEvents.rules.join(', ')}`);
       } else if(eventsVisibilityByPath) {
         foundInEvents++;
-        lib_core.info(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by exact path match`);
-        lib_core.info(`[HiddenFields]   → Made visible: ${eventsVisibilityByPath.madeVisible}, Rules: ${eventsVisibilityByPath.rules.join(', ')}`);
+        lib_core.debug(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by exact path match`);
+        lib_core.debug(`[HiddenFields]   → Made visible: ${eventsVisibilityByPath.madeVisible}, Rules: ${eventsVisibilityByPath.rules.join(', ')}`);
       } else if(eventsVisibilityByName) {
         foundInEvents++;
-        lib_core.info(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by name match`);
-        lib_core.info(`[HiddenFields]   → Made visible: ${eventsVisibilityByName.madeVisible}, Rules: ${eventsVisibilityByName.rules.join(', ')}`);
+        lib_core.debug(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by name match`);
+        lib_core.debug(`[HiddenFields]   → Made visible: ${eventsVisibilityByName.madeVisible}, Rules: ${eventsVisibilityByName.rules.join(', ')}`);
       }
       // Note: Fields not found in visibility rules will be flagged as unnecessary below if truly unused
 
@@ -182808,7 +182808,7 @@ class CustomFunctionAnalyzer {
           line: analysis.windowAccesses[0]?.line || analysis.line, // Use specific line where window is accessed
           message: `Custom function "${analysis.functionName}" accesses the window object. Custom functions should not access global window object directly.`,
           details: analysis.windowAccesses,
-          recommendation: 'Remove window object access from custom functions. Use form data model and rules engine instead. Window manipulations should be handled in custom component, not custom functions.',
+          recommendation: 'Remove window object access from custom functions. Window manipulations should be handled in custom component, not custom functions. This is to ensure headless version of the form works correctly.',
           cwvImpact: 'INP, CLS',
         });
       }

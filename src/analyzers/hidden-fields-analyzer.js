@@ -347,31 +347,31 @@ export class HiddenFieldsAnalyzer {
         (jsVisibilityByName?.madeVisible === true || jsVisibilityByPath?.madeVisible === true || fuzzyMatchJS?.madeVisible === true) || 
         (eventsVisibilityByName?.madeVisible === true || eventsVisibilityByPath?.madeVisible === true || fuzzyMatchEvents?.madeVisible === true);
 
-      // Only log when we find a visibility change in JS (reduces noise)
+      // Only log when we find a visibility change in JS (use debug mode to reduce noise)
       if (jsVisibilityByPath) {
         foundInJS++;
-        core.info(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by exact path match`);
-        core.info(`[HiddenFields]   → Made visible: ${jsVisibilityByPath.madeVisible}, Files: ${jsVisibilityByPath.files.map(f => f.filename).join(', ')}`);
+        core.debug(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by exact path match`);
+        core.debug(`[HiddenFields]   → Made visible: ${jsVisibilityByPath.madeVisible}, Files: ${jsVisibilityByPath.files.map(f => f.filename).join(', ')}`);
       } else if (jsVisibilityByName) {
         foundInJS++;
-        core.info(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by name match`);
-        core.info(`[HiddenFields]   → Made visible: ${jsVisibilityByName.madeVisible}, Files: ${jsVisibilityByName.files.map(f => f.filename).join(', ')}`);
+        core.debug(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by name match`);
+        core.debug(`[HiddenFields]   → Made visible: ${jsVisibilityByName.madeVisible}, Files: ${jsVisibilityByName.files.map(f => f.filename).join(', ')}`);
       } else if (fuzzyMatchJS) {
         foundInJS++;
-        core.info(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by fuzzy match (JS path: "${fuzzyMatchJSPath}")`);
-        core.info(`[HiddenFields]   → Made visible: ${fuzzyMatchJS.madeVisible}, Files: ${fuzzyMatchJS.files.map(f => f.filename).join(', ')}`);
+        core.debug(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by fuzzy match (JS path: "${fuzzyMatchJSPath}")`);
+        core.debug(`[HiddenFields]   → Made visible: ${fuzzyMatchJS.madeVisible}, Files: ${fuzzyMatchJS.files.map(f => f.filename).join(', ')}`);
       } else if (fuzzyMatchEvents) {
         foundInEvents++;
-        core.info(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by fuzzy match")`);
-        core.info(`[HiddenFields]   → Made visible: ${fuzzyMatchEvents.madeVisible}, Rules: ${fuzzyMatchEvents.rules.join(', ')}`);
+        core.debug(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by fuzzy match")`);
+        core.debug(`[HiddenFields]   → Made visible: ${fuzzyMatchEvents.madeVisible}, Rules: ${fuzzyMatchEvents.rules.join(', ')}`);
       } else if(eventsVisibilityByPath) {
         foundInEvents++;
-        core.info(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by exact path match`);
-        core.info(`[HiddenFields]   → Made visible: ${eventsVisibilityByPath.madeVisible}, Rules: ${eventsVisibilityByPath.rules.join(', ')}`);
+        core.debug(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by exact path match`);
+        core.debug(`[HiddenFields]   → Made visible: ${eventsVisibilityByPath.madeVisible}, Rules: ${eventsVisibilityByPath.rules.join(', ')}`);
       } else if(eventsVisibilityByName) {
         foundInEvents++;
-        core.info(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by name match`);
-        core.info(`[HiddenFields]   → Made visible: ${eventsVisibilityByName.madeVisible}, Rules: ${eventsVisibilityByName.rules.join(', ')}`);
+        core.debug(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by name match`);
+        core.debug(`[HiddenFields]   → Made visible: ${eventsVisibilityByName.madeVisible}, Rules: ${eventsVisibilityByName.rules.join(', ')}`);
       }
       // Note: Fields not found in visibility rules will be flagged as unnecessary below if truly unused
 

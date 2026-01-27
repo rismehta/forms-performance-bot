@@ -424,7 +424,7 @@ export class CustomFunctionAnalyzer {
           line: analysis.windowAccesses[0]?.line || analysis.line, // Use specific line where window is accessed
           message: `Custom function "${analysis.functionName}" accesses the window object. Custom functions should not access global window object directly.`,
           details: analysis.windowAccesses,
-          recommendation: 'Remove window object access from custom functions. Use form data model and rules engine instead. Window manipulations should be handled in custom component, not custom functions.',
+          recommendation: 'Remove window object access from custom functions. Window manipulations should be handled in custom component, not custom functions. This is to ensure headless version of the form works correctly.',
           cwvImpact: 'INP, CLS',
         });
       }
