@@ -184705,6 +184705,30 @@ ${fieldNames.length > 5 ? `\n...and ${fieldNames.length - 5} more` : ''}
     
     lib_core.info(`  DOM fixes: ${suggestions.length - httpIssues.length} generated (static guidance, no AI)`);
     
+    // Window access in custom functions
+    const windowIssues = customFunctionsResults.newIssues.filter(
+      issue => issue.type === 'window-access-in-custom-function'
+    );
+    
+    // Window fixes: Static guidance only (NO AI calls)
+    for (const issue of windowIssues.slice(0, 5)) {
+      suggestions.push({
+        type: 'custom-function-window-fix',
+        severity: 'critical',
+        function: issue.functionName,
+        functionName: issue.functionName,
+        file: issue.file,
+        line: issue.line || 1,
+        details: issue.details || [],
+        title: `Remove window access from ${issue.functionName}()`,
+        description: `Function "${issue.functionName}()" accesses window object. Direct window access can break headless forms.`,
+        guidance: issue.recommendation || 'Remove window object access from custom functions',
+        estimatedImpact: 'Improves reliability, enables headless forms'
+      });
+    }
+    
+    lib_core.info(`  Window fixes: ${suggestions.length - httpIssues.length - domIssues.length} generated (static guidance, no AI)`);
+    
     return suggestions;
   }
 
