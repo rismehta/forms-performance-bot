@@ -185963,9 +185963,62 @@ Respond with ONLY the JSON object containing the COMPLETE function code, no mark
         // GitHub returns 422 for various reasons (file/line not in diff, invalid SHA, etc.)
         if (error.status === 422) {
           const errorDetails = error.response?.data?.message || error.message;
+          const fullErrorData = JSON.stringify(error.response?.data || {}, null, 2);
           lib_core.info(`  ✗ GitHub rejected comment on ${fix.file}:${fix.line} - ${fix.type} for ${fix.functionName || 'N/A'}`);
           lib_core.info(`     Reason: ${errorDetails}`);
-          lib_core.info(`     This usually means the line is not in the PR diff (only changed lines can have comments)`);
+          lib_core.info(`     Full error data: ${fullErrorData}`);
+          
+          // Try fallback: post on adjacent lines (GitHub sometimes only accepts certain "anchor" lines in a diff hunk)
+          const fallbackLines = [fix.line + 1, fix.line + 2, fix.line - 1];
+          let fallbackSuccess = false;
+          
+          for (const fallbackLine of fallbackLines) {
+            if (fallbackLine < 1) continue;
+            
+            try {
+              lib_core.info(`     Trying fallback: posting at line ${fallbackLine} instead...`);
+              
+              // Check if fallback line already has a comment
+              const existingAtFallback = existingComments.find(comment => 
+                comment.path === fix.file && 
+                comment.line === fallbackLine &&
+                (comment.user.login === 'github-actions[bot]' || 
+                 comment.body.includes('AEM Forms Performance'))
+              );
+              
+              if (existingAtFallback) {
+                lib_core.info(`     Fallback line ${fallbackLine} already has a comment, skipping...`);
+                continue;
+              }
+              
+              // Update comment body to indicate actual violation line
+              const fallbackCommentBody = `**⚠️ Issue detected at line ${fix.line}** (commenting here as line ${fix.line} is not commentable)\n\n${this.buildPRLineCommentBody(fix)}`;
+              
+              await octokit.rest.pulls.createReviewComment({
+                owner,
+                repo,
+                pull_number: prNumber,
+                body: fallbackCommentBody,
+                commit_id: commitSha,
+                path: fix.file,
+                line: fallbackLine,
+                side: 'RIGHT'
+              });
+              
+              lib_core.info(`     ✓ Posted at fallback line ${fallbackLine} instead of ${fix.line}`);
+              reviewComments.push({...fix, line: fallbackLine});
+              fallbackSuccess = true;
+              break;
+              
+            } catch (fallbackError) {
+              lib_core.info(`     Fallback line ${fallbackLine} also failed: ${fallbackError.message}`);
+            }
+          }
+          
+          if (!fallbackSuccess) {
+            lib_core.info(`     All fallback attempts failed. Line ${fix.line} not in a commentable diff position.`);
+          }
+          
         } else {
           lib_core.warning(`  ✗ Failed to post comment on ${fix.file}: ${error.message}`);
         }
