@@ -182806,7 +182806,7 @@ class CustomFunctionAnalyzer {
           type: 'window-access-in-custom-function',
           functionName: analysis.functionName,
           file: analysis.file,
-          line: analysis.line,
+          line: analysis.windowAccesses[0]?.line || analysis.line, // Use specific line where window is accessed
           message: `Custom function "${analysis.functionName}" accesses the window object. Custom functions should not access global window object directly.`,
           details: analysis.windowAccesses,
           recommendation: 'Remove window object access from custom functions. Use form data model and rules engine instead. Window manipulations should be handled in custom component, not custom functions.',
@@ -182821,7 +182821,7 @@ class CustomFunctionAnalyzer {
           type: 'dom-access-in-custom-function',
           functionName: analysis.functionName,
           file: analysis.file,
-          line: analysis.line,
+          line: analysis.domAccesses[0]?.line || analysis.line, // Use specific line where DOM is accessed
           message: `Custom function "${analysis.functionName}" accesses the DOM. Custom functions should not manipulate the DOM directly.`,
           details: analysis.domAccesses,
           recommendation: 'Remove DOM access from custom functions. Use form data model and rules engine for UI updates. DOM manipulations should be handled in custom component, not custom functions.',
@@ -182836,7 +182836,7 @@ class CustomFunctionAnalyzer {
           type: 'http-request-in-custom-function',
           functionName: analysis.functionName,
           file: analysis.file,
-          line: analysis.line,
+          line: analysis.httpRequests[0]?.line || analysis.line, // Use specific line where HTTP request is made
           message: `Custom function "${analysis.functionName}" makes HTTP requests. Use the API tool (request()) instead.`,
           details: analysis.httpRequests,
           recommendation: 'Replace direct HTTP calls with the form\'s API tool (request() function). This ensures proper error handling, loading states, and integration with the forms runtime.',
