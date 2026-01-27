@@ -696,6 +696,7 @@ export class FormPRReporter {
       lines.push('#### Violations Detected\n');
       
       const domAccessIssues = newIssues.filter(i => i.type === 'dom-access-in-custom-function');
+      const windowAccessIssues = newIssues.filter(i => i.type === 'window-access-in-custom-function');
       const httpRequestIssues = newIssues.filter(i => i.type === 'http-request-in-custom-function');
       const runtimeErrorIssues = newIssues.filter(i => i.type === 'runtime-error-in-custom-function');
 
@@ -711,6 +712,15 @@ export class FormPRReporter {
       if (domAccessIssues.length > 0) {
         lines.push(`** ${domAccessIssues.length} DOM Access(es) in Custom Functions:**\n`);
         domAccessIssues.forEach(issue => {
+          lines.push(`- \`${issue.functionName}\` in \`${issue.file}\``);
+          lines.push(`  - ${issue.recommendation}`);
+        });
+        lines.push('');
+      }
+
+      if (windowAccessIssues.length > 0) {
+        lines.push(`** ${windowAccessIssues.length} Window Access(es) in Custom Functions:**\n`);
+        windowAccessIssues.forEach(issue => {
           lines.push(`- \`${issue.functionName}\` in \`${issue.file}\``);
           lines.push(`  - ${issue.recommendation}`);
         });
@@ -954,12 +964,19 @@ export class FormPRReporter {
       
       if (newIssues && newIssues.length > 0) {
         const domAccessIssues = newIssues.filter(i => i.type === 'dom-access-in-custom-function');
+        const windowAccessIssues = newIssues.filter(i => i.type === 'window-access-in-custom-function');
         const httpRequestIssues = newIssues.filter(i => i.type === 'http-request-in-custom-function');
         
         if (domAccessIssues.length > 0) {
           impact.critical.push(`${domAccessIssues.length} custom function(s) accessing DOM directly`);
-          impact.recommendations.push('Remove DOM access from custom functions - use form data model instead');
+          impact.recommendations.push('Remove DOM access from custom functions');
           score -= domAccessIssues.length * 40;
+        }
+        
+        if (windowAccessIssues.length > 0) {
+          impact.critical.push(`${windowAccessIssues.length} custom function(s) accessing window object directly`);
+          impact.recommendations.push('Remove window access from custom functions');
+          score -= windowAccessIssues.length * 40;
         }
         
         if (httpRequestIssues.length > 0) {

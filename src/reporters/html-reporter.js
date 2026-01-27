@@ -677,9 +677,10 @@ export class HTMLReporter {
 
     const httpIssues = data.issues?.filter(i => i.type === 'http-request-in-custom-function') || [];
     const domIssues = data.issues?.filter(i => i.type === 'dom-access-in-custom-function') || [];
+    const windowIssues = data.issues?.filter(i => i.type === 'window-access-in-custom-function') || [];
     const runtimeErrors = data.issues?.filter(i => i.type === 'runtime-error-in-custom-function') || [];
 
-    if (httpIssues.length === 0 && domIssues.length === 0 && runtimeErrors.length === 0) {
+    if (httpIssues.length === 0 && domIssues.length === 0 && windowIssues.length === 0 && runtimeErrors.length === 0) {
       return `<div class="section"><h2> Custom Functions</h2><p>${data.functionsAnalyzed || 0} functions analyzed, no violations</p></div>`;
     }
 
@@ -704,6 +705,16 @@ export class HTMLReporter {
           <div class="issue-item">
             <h4>${issue.functionName}() in <code>${issue.file}</code></h4>
             <p>Direct DOM manipulation bypasses form state</p>
+          </div>
+        `).join('')}
+      ` : ''}
+      
+      ${windowIssues.length > 0 ? `
+        <h3>Window Access (${windowIssues.length})</h3>
+        ${windowIssues.map(issue => `
+          <div class="issue-item">
+            <h4>${issue.functionName}() in <code>${issue.file}</code></h4>
+            <p>Direct window object access can break headless forms</p>
           </div>
         `).join('')}
       ` : ''}

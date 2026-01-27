@@ -22,7 +22,9 @@ export class EventImpactAnalyzer {
       if (!node) return;
       
       const fieldName = node.name || node.id;
-      const currentPath = fieldName ? [...path, fieldName] : path;
+      // Use "$form" for root-level form node instead of UUID/form name
+      const pathSegment = (path.length === 0 && fieldName) ? '$form' : fieldName;
+      const currentPath = pathSegment ? [...path, pathSegment] : path;
       const fieldPath = currentPath.join('.');
       
       // Process events on this field
@@ -36,11 +38,13 @@ export class EventImpactAnalyzer {
             eventImpactMap[eventKey] = {
               sourceField,
               eventType,
+              
               handlers: [],
               impactedFields: new Set(),
               customFunctions: new Set(),
               hasHTTPCalls: false,
               hasDOMAccess: false,
+              hasWindowAccess: false,
             };
           }
           
@@ -64,6 +68,9 @@ export class EventImpactAnalyzer {
             if (handler.includes('document.') || handler.includes('querySelector')) {
               eventImpactMap[eventKey].hasDOMAccess = true;
             }
+            if (handler.includes('window.')) {
+              eventImpactMap[eventKey].hasWindowAccess = true;
+            }
           });
         });
       }
@@ -85,6 +92,13 @@ export class EventImpactAnalyzer {
       event.customFunctions = Array.from(event.customFunctions).sort();
     });
     
+    // Create simple JSON mapping: event/rule → impacted fields
+    // This extracts the key data from eventImpactMap for easier consumption
+    const eventOrRuleToImpactedNodes = {};
+    Object.entries(eventImpactMap).forEach(([eventKey, eventData]) => {
+      eventOrRuleToImpactedNodes[eventKey] = eventData.impactedFields;
+    });
+    
     // Detect duplicates and similar events (PRIMARY USE CASE)
     const duplicateAnalysis = this.detectDuplicateEvents(eventImpactMap);
     
@@ -92,6 +106,7 @@ export class EventImpactAnalyzer {
       totalEvents: Object.keys(eventImpactMap).length,
       events: eventImpactMap,
       fieldEventMap, // field → list of events targeting it
+      eventOrRuleToImpactedNodes, // event/rule → fields impacted by that event/rule
       summary: this.generateSummary(eventImpactMap, fieldEventMap),
       duplicates: duplicateAnalysis.duplicates,
       similarEvents: duplicateAnalysis.similar,
@@ -318,6 +333,15 @@ export class EventImpactAnalyzer {
         });
       }
       
+      if (event.hasWindowAccess) {
+        issues.push({
+          severity: 'warning',
+          type: 'window-in-event',
+          event: eventKey,
+          message: `Event accesses window object directly - may cause unpredictable behavior`,
+        });
+      }
+      
       if (event.impactedFields.length > 10) {
         issues.push({
           severity: 'warning',
@@ -492,6 +516,9 @@ export class EventImpactAnalyzer {
         if (event.hasDOMAccess) {
           markdown += `⚠️ **Accesses DOM**\n\n`;
         }
+        if (event.hasWindowAccess) {
+          markdown += `⚠️ **Accesses window object**\n\n`;
+        }
         
         markdown += `<details>\n<summary>Event Handlers (${event.handlers.length})</summary>\n\n`;
         event.handlers.forEach((handler, i) => {
@@ -511,7 +538,7 @@ export class EventImpactAnalyzer {
     markdown += `3. **Review custom functions** to understand what code will execute\n\n`;
     
     markdown += `### Pre-Deployment Validation:\n`;
-    markdown += `1. **Check for performance issues** (HTTP calls, DOM access)\n`;
+    markdown += `1. **Check for performance issues** (HTTP calls, DOM access, window access)\n`;
     markdown += `2. **Review high-impact events** (>10 fields)\n`;
     markdown += `3. **Verify custom functions** are still used correctly\n\n`;
     

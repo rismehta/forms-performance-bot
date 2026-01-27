@@ -317,11 +317,21 @@ export class CustomFunctionAnalyzer {
   analyzeFunctionNode(node, file, name = null) {
     const functionName = name || node.id?.name || 'anonymous';
     const domAccesses = [];
+    const windowAccesses = [];
     const httpRequests = [];
 
     // Walk through function body to detect violations
     walk.simple(node, {
       MemberExpression: (memberNode) => {
+        // Check for window access
+        if (memberNode.object?.name === 'window') {
+          windowAccesses.push({
+            type: 'window',
+            property: memberNode.property?.name || 'unknown',
+            line: memberNode.loc?.start.line,
+          });
+        }
+        
         // Check for DOM access
         if (memberNode.object?.name === 'document' ||
             memberNode.property?.name === 'querySelector' ||
@@ -374,8 +384,10 @@ export class CustomFunctionAnalyzer {
       file: file.filename,
       line: node.loc?.start.line,
       hasDOMAccess: domAccesses.length > 0,
+      hasWindowAccess: windowAccesses.length > 0,
       hasHTTPRequests: httpRequests.length > 0,
       domAccesses,
+      windowAccesses,
       httpRequests,
     };
   }
@@ -402,6 +414,21 @@ export class CustomFunctionAnalyzer {
     const violations = [];
 
     for (const analysis of functionAnalyses) {
+      // Window access violation
+      if (analysis.hasWindowAccess) {
+        violations.push({
+          severity: 'error',
+          type: 'window-access-in-custom-function',
+          functionName: analysis.functionName,
+          file: analysis.file,
+          line: analysis.line,
+          message: `Custom function "${analysis.functionName}" accesses the window object. Custom functions should not access global window object directly.`,
+          details: analysis.windowAccesses,
+          recommendation: 'Remove window object access from custom functions. Use form data model and rules engine instead. Window manipulations should be handled in custom component, not custom functions.',
+          cwvImpact: 'INP, CLS',
+        });
+      }
+      
       // DOM access violation
       if (analysis.hasDOMAccess) {
         violations.push({

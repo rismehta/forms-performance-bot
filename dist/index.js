@@ -182702,11 +182702,21 @@ class CustomFunctionAnalyzer {
   analyzeFunctionNode(node, file, name = null) {
     const functionName = name || node.id?.name || 'anonymous';
     const domAccesses = [];
+    const windowAccesses = [];
     const httpRequests = [];
 
     // Walk through function body to detect violations
     simple(node, {
       MemberExpression: (memberNode) => {
+        // Check for window access
+        if (memberNode.object?.name === 'window') {
+          windowAccesses.push({
+            type: 'window',
+            property: memberNode.property?.name || 'unknown',
+            line: memberNode.loc?.start.line,
+          });
+        }
+        
         // Check for DOM access
         if (memberNode.object?.name === 'document' ||
             memberNode.property?.name === 'querySelector' ||
@@ -182759,8 +182769,10 @@ class CustomFunctionAnalyzer {
       file: file.filename,
       line: node.loc?.start.line,
       hasDOMAccess: domAccesses.length > 0,
+      hasWindowAccess: windowAccesses.length > 0,
       hasHTTPRequests: httpRequests.length > 0,
       domAccesses,
+      windowAccesses,
       httpRequests,
     };
   }
@@ -182787,6 +182799,21 @@ class CustomFunctionAnalyzer {
     const violations = [];
 
     for (const analysis of functionAnalyses) {
+      // Window access violation
+      if (analysis.hasWindowAccess) {
+        violations.push({
+          severity: 'error',
+          type: 'window-access-in-custom-function',
+          functionName: analysis.functionName,
+          file: analysis.file,
+          line: analysis.line,
+          message: `Custom function "${analysis.functionName}" accesses the window object. Custom functions should not access global window object directly.`,
+          details: analysis.windowAccesses,
+          recommendation: 'Remove window object access from custom functions. Use form data model and rules engine instead. Window manipulations should be handled in custom component, not custom functions.',
+          cwvImpact: 'INP, CLS',
+        });
+      }
+      
       // DOM access violation
       if (analysis.hasDOMAccess) {
         violations.push({
@@ -187000,6 +187027,7 @@ class FormPRReporter {
       lines.push('#### Violations Detected\n');
       
       const domAccessIssues = newIssues.filter(i => i.type === 'dom-access-in-custom-function');
+      const windowAccessIssues = newIssues.filter(i => i.type === 'window-access-in-custom-function');
       const httpRequestIssues = newIssues.filter(i => i.type === 'http-request-in-custom-function');
       const runtimeErrorIssues = newIssues.filter(i => i.type === 'runtime-error-in-custom-function');
 
@@ -187015,6 +187043,15 @@ class FormPRReporter {
       if (domAccessIssues.length > 0) {
         lines.push(`** ${domAccessIssues.length} DOM Access(es) in Custom Functions:**\n`);
         domAccessIssues.forEach(issue => {
+          lines.push(`- \`${issue.functionName}\` in \`${issue.file}\``);
+          lines.push(`  - ${issue.recommendation}`);
+        });
+        lines.push('');
+      }
+
+      if (windowAccessIssues.length > 0) {
+        lines.push(`** ${windowAccessIssues.length} Window Access(es) in Custom Functions:**\n`);
+        windowAccessIssues.forEach(issue => {
           lines.push(`- \`${issue.functionName}\` in \`${issue.file}\``);
           lines.push(`  - ${issue.recommendation}`);
         });
@@ -187258,12 +187295,19 @@ class FormPRReporter {
       
       if (newIssues && newIssues.length > 0) {
         const domAccessIssues = newIssues.filter(i => i.type === 'dom-access-in-custom-function');
+        const windowAccessIssues = newIssues.filter(i => i.type === 'window-access-in-custom-function');
         const httpRequestIssues = newIssues.filter(i => i.type === 'http-request-in-custom-function');
         
         if (domAccessIssues.length > 0) {
           impact.critical.push(`${domAccessIssues.length} custom function(s) accessing DOM directly`);
-          impact.recommendations.push('Remove DOM access from custom functions - use form data model instead');
+          impact.recommendations.push('Remove DOM access from custom functions');
           score -= domAccessIssues.length * 40;
+        }
+        
+        if (windowAccessIssues.length > 0) {
+          impact.critical.push(`${windowAccessIssues.length} custom function(s) accessing window object directly`);
+          impact.recommendations.push('Remove window access from custom functions');
+          score -= windowAccessIssues.length * 40;
         }
         
         if (httpRequestIssues.length > 0) {
@@ -188254,9 +188298,10 @@ class HTMLReporter {
 
     const httpIssues = data.issues?.filter(i => i.type === 'http-request-in-custom-function') || [];
     const domIssues = data.issues?.filter(i => i.type === 'dom-access-in-custom-function') || [];
+    const windowIssues = data.issues?.filter(i => i.type === 'window-access-in-custom-function') || [];
     const runtimeErrors = data.issues?.filter(i => i.type === 'runtime-error-in-custom-function') || [];
 
-    if (httpIssues.length === 0 && domIssues.length === 0 && runtimeErrors.length === 0) {
+    if (httpIssues.length === 0 && domIssues.length === 0 && windowIssues.length === 0 && runtimeErrors.length === 0) {
       return `<div class="section"><h2> Custom Functions</h2><p>${data.functionsAnalyzed || 0} functions analyzed, no violations</p></div>`;
     }
 
@@ -188281,6 +188326,16 @@ class HTMLReporter {
           <div class="issue-item">
             <h4>${issue.functionName}() in <code>${issue.file}</code></h4>
             <p>Direct DOM manipulation bypasses form state</p>
+          </div>
+        `).join('')}
+      ` : ''}
+      
+      ${windowIssues.length > 0 ? `
+        <h3>Window Access (${windowIssues.length})</h3>
+        ${windowIssues.map(issue => `
+          <div class="issue-item">
+            <h4>${issue.functionName}() in <code>${issue.file}</code></h4>
+            <p>Direct window object access can break headless forms</p>
           </div>
         `).join('')}
       ` : ''}
