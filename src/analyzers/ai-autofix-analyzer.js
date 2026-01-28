@@ -3391,6 +3391,38 @@ Respond with ONLY the JSON object containing the COMPLETE function code, no mark
       if (fix.guidance) {
         lines.push(fix.guidance);
       }
+    } else if (fix.type === 'runtime-cls-dynamic-css') {
+      lines.push(`## ⚠️ Dynamic CSS Loading Causes CLS`);
+      lines.push('');
+      lines.push(fix.description);
+      lines.push('');
+      if (fix.guidance) {
+        lines.push(`**Fix:** ${fix.guidance}`);
+      }
+    } else if (fix.type === 'runtime-cls-style-injection') {
+      lines.push(`## ⚠️ Dynamic Style Injection Causes CLS`);
+      lines.push('');
+      lines.push(fix.description);
+      lines.push('');
+      if (fix.guidance) {
+        lines.push(`**Fix:** ${fix.guidance}`);
+      }
+    } else if (fix.type === 'runtime-cls-class-manipulation') {
+      lines.push(`## ⚠️ Dynamic Class Manipulation May Cause CLS`);
+      lines.push('');
+      lines.push(fix.description);
+      lines.push('');
+      if (fix.guidance) {
+        lines.push(`**Fix:** ${fix.guidance}`);
+      }
+    } else if (fix.type === 'runtime-cls-style-manipulation') {
+      lines.push(`## ⚠️ Direct Style Manipulation May Cause CLS`);
+      lines.push('');
+      lines.push(fix.description);
+      lines.push('');
+      if (fix.guidance) {
+        lines.push(`**Fix:** ${fix.guidance}`);
+      }
     }
     
     return lines.join('\n');
