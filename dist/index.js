@@ -182896,6 +182896,872 @@ class CustomFunctionAnalyzer {
 }
 
 
+;// CONCATENATED MODULE: ./src/analyzers/runtime-cls-analyzer.js
+
+
+
+
+/**
+ * Analyzes JavaScript files for runtime CSS/style/class manipulations
+ * that can cause CLS (Cumulative Layout Shift) during form load.
+ * 
+ * IMPORTANT: Only flags patterns that run during form initialization,
+ * NOT patterns in event handlers or user-triggered callbacks.
+ * 
+ * Detects:
+ * 1. Dynamic CSS loading (loadCSS, dynamic imports)
+ * 2. Dynamic style injection (createElement('style'), createElement('link'))
+ * 3. Dynamic class manipulation (classList.add/remove/toggle)
+ * 4. Direct style manipulation (element.style.xxx)
+ */
+class RuntimeCLSAnalyzer {
+  constructor(config = null) {
+    this.config = config;
+    
+    // Function names that indicate initialization context (FLAG these)
+    this.initializationFunctions = new Set([
+      'decorateForm',
+      'decorate',
+      'init',
+      'initialize',
+      'setup',
+      'loadBlock',
+      'loadEager',
+      'loadLazy',
+      'loadDelayed',
+    ]);
+    
+    // Event types that indicate user-triggered context (DON'T flag inside these)
+    this.userEventTypes = new Set([
+      'click',
+      'dblclick',
+      'mousedown',
+      'mouseup',
+      'mouseover',
+      'mouseout',
+      'mousemove',
+      'keydown',
+      'keyup',
+      'keypress',
+      'change',
+      'input',
+      'blur',
+      'focus',
+      'focusin',
+      'focusout',
+      'submit',
+      'reset',
+      'scroll',
+      'resize',
+      'touchstart',
+      'touchend',
+      'touchmove',
+      'drag',
+      'drop',
+      'dragstart',
+      'dragend',
+    ]);
+    
+    // Class names that are acceptable for state management (allowlist)
+    this.allowedStateClasses = new Set([
+      'valid',
+      'invalid',
+      'error',
+      'success',
+      'warning',
+      'focused',
+      'touched',
+      'dirty',
+      'pristine',
+      'disabled',
+      'readonly',
+      'loading',
+      'loaded',
+      'active',
+      'selected',
+      'checked',
+      'visible',
+      'hidden', // Note: hidden is ok as state class
+      'expanded',
+      'collapsed',
+      'open',
+      'closed',
+    ]);
+  }
+
+  /**
+   * Analyze JavaScript files for runtime CLS patterns
+   * @param {Array} jsFiles - Array of {filename, content} objects
+   * @returns {Object} Analysis results
+   */
+  analyze(jsFiles = []) {
+    if (!jsFiles || jsFiles.length === 0) {
+      return {
+        filesAnalyzed: 0,
+        issues: [],
+        summary: {
+          dynamicCSSLoading: 0,
+          dynamicStyleInjection: 0,
+          dynamicClassManipulation: 0,
+          directStyleManipulation: 0,
+        },
+      };
+    }
+
+    const allIssues = [];
+    const summary = {
+      dynamicCSSLoading: 0,
+      dynamicStyleInjection: 0,
+      dynamicClassManipulation: 0,
+      directStyleManipulation: 0,
+    };
+
+    // Prioritize decorateForm.js files
+    const sortedFiles = [...jsFiles].sort((a, b) => {
+      const aIsDecorate = a.filename.includes('decorateForm');
+      const bIsDecorate = b.filename.includes('decorateForm');
+      if (aIsDecorate && !bIsDecorate) return -1;
+      if (!aIsDecorate && bIsDecorate) return 1;
+      return 0;
+    });
+
+    for (const file of sortedFiles) {
+      try {
+        const fileIssues = this.analyzeFile(file);
+        allIssues.push(...fileIssues);
+
+        // Update summary
+        fileIssues.forEach(issue => {
+          if (issue.type === 'dynamic-css-loading') summary.dynamicCSSLoading++;
+          if (issue.type === 'dynamic-style-injection') summary.dynamicStyleInjection++;
+          if (issue.type === 'dynamic-class-manipulation') summary.dynamicClassManipulation++;
+          if (issue.type === 'direct-style-manipulation') summary.directStyleManipulation++;
+        });
+      } catch (error) {
+        lib_core.warning(`[RuntimeCLS] Failed to parse ${file.filename}: ${error.message}`);
+      }
+    }
+
+    lib_core.info(`[RuntimeCLS] Analyzed ${jsFiles.length} file(s), found ${allIssues.length} issue(s)`);
+    
+    return {
+      filesAnalyzed: jsFiles.length,
+      issues: allIssues,
+      summary,
+    };
+  }
+
+  /**
+   * Analyze a single JavaScript file
+   * @param {Object} file - {filename, content}
+   * @returns {Array} Issues found
+   */
+  analyzeFile(file) {
+    const issues = [];
+    const { filename, content } = file;
+
+    // Skip test files
+    if (filename.includes('test') || filename.includes('spec')) {
+      return issues;
+    }
+
+    // Parse JavaScript
+    let ast;
+    try {
+      ast = acorn_parse(content, {
+        ecmaVersion: 'latest',
+        sourceType: 'module',
+        locations: true,
+      });
+    } catch (error) {
+      // Skip files that can't be parsed
+      return issues;
+    }
+
+    // Track context: are we inside an initialization function or event handler?
+    const context = {
+      currentFunction: null,
+      isInsideEventHandler: false,
+      isInsideInitialization: false,
+      filename,
+      // decorateForm.js is ALWAYS initialization context
+      isDecorateFormFile: filename.includes('decorateForm'),
+    };
+
+    // Walk the AST
+    this.walkAST(ast, content, context, issues);
+
+    return issues;
+  }
+
+  /**
+   * Walk AST and detect CLS-causing patterns
+   */
+  walkAST(ast, content, context, issues) {
+    const self = this;
+
+    // Custom walker to track function context
+    ancestor(ast, {
+      // Track function declarations
+      FunctionDeclaration(node, ancestors) {
+        const funcName = node.id?.name;
+        const prevFunction = context.currentFunction;
+        const prevIsInit = context.isInsideInitialization;
+        
+        context.currentFunction = funcName;
+        context.isInsideInitialization = self.isInitializationFunction(funcName) || context.isDecorateFormFile;
+        
+        // Walk function body
+        self.analyzeNode(node.body, content, context, issues, ancestors);
+        
+        // Restore context
+        context.currentFunction = prevFunction;
+        context.isInsideInitialization = prevIsInit;
+      },
+
+      // Track arrow functions and function expressions
+      ArrowFunctionExpression(node, ancestors) {
+        self.handleFunctionExpression(node, ancestors, content, context, issues);
+      },
+
+      FunctionExpression(node, ancestors) {
+        self.handleFunctionExpression(node, ancestors, content, context, issues);
+      },
+
+      // Detect patterns at call expression level
+      CallExpression(node, ancestors) {
+        self.detectCallExpression(node, ancestors, content, context, issues);
+      },
+
+      // Detect dynamic import() expressions (for CSS imports)
+      ImportExpression(node, ancestors) {
+        self.detectImportExpression(node, ancestors, content, context, issues);
+      },
+
+      // Detect class manipulation and style access
+      MemberExpression(node, ancestors) {
+        self.detectMemberExpression(node, ancestors, content, context, issues);
+      },
+
+      // Detect assignments (for className, style.cssText, etc.)
+      AssignmentExpression(node, ancestors) {
+        self.detectAssignment(node, ancestors, content, context, issues);
+      },
+    });
+  }
+
+  /**
+   * Handle function expressions (arrow functions, anonymous functions)
+   */
+  handleFunctionExpression(node, ancestors, content, context, issues) {
+    // Check if this function is an event handler callback
+    const parent = ancestors[ancestors.length - 2];
+    
+    if (this.isEventHandlerCallback(parent, node)) {
+      // This is an event handler - don't flag patterns inside
+      const prevEventHandler = context.isInsideEventHandler;
+      context.isInsideEventHandler = true;
+      
+      this.analyzeNode(node.body, content, context, issues, ancestors);
+      
+      context.isInsideEventHandler = prevEventHandler;
+    } else {
+      // Check if assigned to an initialization function
+      const funcName = this.getFunctionName(parent, node);
+      const prevFunction = context.currentFunction;
+      const prevIsInit = context.isInsideInitialization;
+      
+      if (funcName) {
+        context.currentFunction = funcName;
+        context.isInsideInitialization = this.isInitializationFunction(funcName) || context.isDecorateFormFile;
+      }
+      
+      this.analyzeNode(node.body, content, context, issues, ancestors);
+      
+      context.currentFunction = prevFunction;
+      context.isInsideInitialization = prevIsInit;
+    }
+  }
+
+  /**
+   * Analyze a node for patterns
+   */
+  analyzeNode(node, content, context, issues, ancestors) {
+    // This is called by the walker, patterns are detected in specific handlers
+  }
+
+  /**
+   * Check if we're inside an event handler callback by examining ancestors
+   */
+  isInsideEventHandlerCallback(ancestors) {
+    // Walk up the ancestors to find if we're inside an event handler callback
+    for (let i = ancestors.length - 1; i >= 0; i--) {
+      const ancestor = ancestors[i];
+      
+      // Check for addEventListener call with our function as callback
+      if (ancestor.type === 'CallExpression') {
+        const calleeName = this.getCalleeName(ancestor.callee);
+        if (calleeName === 'addEventListener' || calleeName.endsWith('.addEventListener')) {
+          const eventType = ancestor.arguments[0];
+          if (eventType && this.userEventTypes.has(this.getStringValue(eventType))) {
+            return true;
+          }
+        }
+      }
+      
+      // Check for onXxx property assignment
+      if (ancestor.type === 'AssignmentExpression') {
+        const left = ancestor.left;
+        if (left && left.type === 'MemberExpression') {
+          const propName = left.property?.name;
+          if (propName && propName.startsWith('on')) {
+            const eventType = propName.slice(2).toLowerCase();
+            if (this.userEventTypes.has(eventType)) {
+              return true;
+            }
+          }
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Get the containing initialization function from ancestors
+   */
+  getInitializationContext(ancestors) {
+    for (let i = ancestors.length - 1; i >= 0; i--) {
+      const ancestor = ancestors[i];
+      
+      if (ancestor.type === 'FunctionDeclaration' && ancestor.id?.name) {
+        if (this.isInitializationFunction(ancestor.id.name)) {
+          return ancestor.id.name;
+        }
+      }
+      
+      if (ancestor.type === 'VariableDeclarator' && ancestor.id?.name) {
+        if (this.isInitializationFunction(ancestor.id.name)) {
+          return ancestor.id.name;
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Detect problematic call expressions
+   */
+  detectCallExpression(node, ancestors, content, context, issues) {
+    // Check if we're inside an event handler callback by examining ancestors
+    if (this.isInsideEventHandlerCallback(ancestors)) {
+      return; // Skip - this code runs after form load
+    }
+
+    const calleeName = this.getCalleeName(node.callee);
+    
+    // Determine if we should flag this call
+    // Only flag if:
+    // 1. In decorateForm file (always initialization context), OR
+    // 2. Inside an initialization function, OR
+    // 3. At top-level of module (no containing function)
+    const initContext = this.getInitializationContext(ancestors);
+    const hasContainingFunction = ancestors.some(a => 
+      a.type === 'FunctionDeclaration' || 
+      a.type === 'FunctionExpression' || 
+      a.type === 'ArrowFunctionExpression'
+    );
+    
+    const shouldFlag = context.isDecorateFormFile || initContext || !hasContainingFunction;
+    
+    if (!shouldFlag) {
+      return; // Not in initialization context
+    }
+
+    // 1. Detect loadCSS() calls
+    if (calleeName === 'loadCSS') {
+      issues.push({
+        severity: 'error',
+        type: 'dynamic-css-loading',
+        file: context.filename,
+        line: node.loc?.start.line,
+        functionContext: initContext || 'top-level',
+        message: `Dynamic CSS loading with loadCSS() during form initialization causes CLS.`,
+        pattern: this.extractCodeSnippet(content, node),
+        recommendation: 'Load CSS in <head> via head.html, or use @import in your main CSS file. Dynamic CSS loading at runtime causes layout shifts.',
+        cwvImpact: 'CLS, LCP',
+      });
+    }
+
+    // 2. Detect dynamic import() for CSS - handle ImportExpression type
+    if (node.type === 'ImportExpression' || node.callee?.type === 'Import') {
+      const arg = node.source || node.arguments?.[0];
+      if (arg && this.isCSSimport(arg, content)) {
+        issues.push({
+          severity: 'error',
+          type: 'dynamic-css-loading',
+          file: context.filename,
+          line: node.loc?.start.line,
+          functionContext: initContext || 'top-level',
+          message: `Dynamic CSS import during form initialization causes CLS.`,
+          pattern: this.extractCodeSnippet(content, node),
+          recommendation: 'Use static imports or load CSS in <head>. Dynamic imports of CSS cause layout shifts.',
+          cwvImpact: 'CLS, LCP',
+        });
+      }
+    }
+
+    // 3. Detect document.createElement('style') or createElement('link')
+    if (calleeName === 'createElement' || calleeName === 'document.createElement') {
+      const arg = node.arguments[0];
+      if (arg && (this.isStringValue(arg, 'style') || this.isStringValue(arg, 'link'))) {
+        const elementType = this.getStringValue(arg);
+        issues.push({
+          severity: 'error',
+          type: 'dynamic-style-injection',
+          file: context.filename,
+          line: node.loc?.start.line,
+          functionContext: initContext || 'top-level',
+          message: `Dynamic <${elementType}> element creation during form initialization causes CLS.`,
+          pattern: this.extractCodeSnippet(content, node),
+          recommendation: elementType === 'link' 
+            ? 'Add stylesheet links in head.html instead of creating them dynamically.'
+            : 'Define styles in CSS files instead of injecting <style> elements at runtime.',
+          cwvImpact: 'CLS, LCP',
+        });
+      }
+    }
+
+    // 4. Detect classList.add/remove/toggle calls
+    if (node.callee.type === 'MemberExpression') {
+      const method = node.callee.property?.name;
+      if (['add', 'remove', 'toggle'].includes(method)) {
+        // Check if it's classList
+        if (this.isClassListMethod(node.callee)) {
+          // Check if the class name is in the allowlist
+          const className = this.getClassNameArgument(node);
+          if (className && !this.isAllowedStateClass(className)) {
+            issues.push({
+              severity: 'warning',
+              type: 'dynamic-class-manipulation',
+              file: context.filename,
+              line: node.loc?.start.line,
+              functionContext: initContext || 'top-level',
+              message: `classList.${method}('${className}') during form initialization may cause CLS if the class affects layout.`,
+              pattern: this.extractCodeSnippet(content, node),
+              className,
+              recommendation: 'Pre-render classes in HTML or apply them server-side. Dynamic class changes during load cause layout shifts. If this is for state management, consider adding the class name to the allowlist.',
+              cwvImpact: 'CLS',
+            });
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Detect dynamic import() expressions for CSS
+   */
+  detectImportExpression(node, ancestors, content, context, issues) {
+    // Check if we're inside an event handler callback
+    if (this.isInsideEventHandlerCallback(ancestors)) {
+      return; // Skip - this code runs after form load
+    }
+
+    // Determine if we should flag this import
+    const initContext = this.getInitializationContext(ancestors);
+    const hasContainingFunction = ancestors.some(a => 
+      a.type === 'FunctionDeclaration' || 
+      a.type === 'FunctionExpression' || 
+      a.type === 'ArrowFunctionExpression'
+    );
+    
+    const shouldFlag = context.isDecorateFormFile || initContext || !hasContainingFunction;
+    
+    if (!shouldFlag) {
+      return; // Not in initialization context
+    }
+
+    // Check if it's a CSS import
+    const source = node.source;
+    if (source && this.isCSSimport(source, content)) {
+      issues.push({
+        severity: 'error',
+        type: 'dynamic-css-loading',
+        file: context.filename,
+        line: node.loc?.start.line,
+        functionContext: initContext || 'top-level',
+        message: `Dynamic CSS import during form initialization causes CLS.`,
+        pattern: this.extractCodeSnippet(content, node),
+        recommendation: 'Use static imports or load CSS in <head>. Dynamic imports of CSS cause layout shifts.',
+        cwvImpact: 'CLS, LCP',
+      });
+    }
+  }
+
+  /**
+   * Detect problematic member expressions (style access)
+   */
+  detectMemberExpression(node, ancestors, content, context, issues) {
+    // Skip if inside event handler
+    if (context.isInsideEventHandler) {
+      return;
+    }
+
+    // Check for element.style.xxx access in assignment context
+    // This is handled in detectAssignment
+  }
+
+  /**
+   * Detect problematic assignments
+   */
+  detectAssignment(node, ancestors, content, context, issues) {
+    // Check if we're inside an event handler callback by examining ancestors
+    if (this.isInsideEventHandlerCallback(ancestors)) {
+      return; // Skip - this code runs after form load
+    }
+
+    // Determine if we should flag this assignment
+    const initContext = this.getInitializationContext(ancestors);
+    const hasContainingFunction = ancestors.some(a => 
+      a.type === 'FunctionDeclaration' || 
+      a.type === 'FunctionExpression' || 
+      a.type === 'ArrowFunctionExpression'
+    );
+    
+    const shouldFlag = context.isDecorateFormFile || initContext || !hasContainingFunction;
+    
+    if (!shouldFlag) {
+      return; // Not in initialization context
+    }
+
+    const left = node.left;
+
+    // 1. Detect element.style.xxx = value
+    if (left.type === 'MemberExpression' && left.object?.type === 'MemberExpression') {
+      if (left.object.property?.name === 'style') {
+        const styleProperty = left.property?.name;
+        if (styleProperty && this.isLayoutAffectingStyle(styleProperty)) {
+          issues.push({
+            severity: 'warning',
+            type: 'direct-style-manipulation',
+            file: context.filename,
+            line: node.loc?.start.line,
+            functionContext: initContext || 'top-level',
+            message: `Direct style manipulation (style.${styleProperty}) during form initialization may cause CLS.`,
+            pattern: this.extractCodeSnippet(content, node),
+            styleProperty,
+            recommendation: 'Use CSS classes instead of direct style manipulation. Define styles in CSS files and toggle classes for state changes.',
+            cwvImpact: 'CLS',
+          });
+        }
+      }
+    }
+
+    // 2. Detect element.style.cssText = '...'
+    if (left.type === 'MemberExpression') {
+      if (left.property?.name === 'cssText' && left.object?.property?.name === 'style') {
+        issues.push({
+          severity: 'warning',
+          type: 'direct-style-manipulation',
+          file: context.filename,
+          line: node.loc?.start.line,
+          functionContext: initContext || 'top-level',
+          message: `style.cssText assignment during form initialization causes CLS.`,
+          pattern: this.extractCodeSnippet(content, node),
+          recommendation: 'Use CSS classes instead of inline styles. Define styles in CSS files.',
+          cwvImpact: 'CLS',
+        });
+      }
+    }
+
+    // 3. Detect element.className = '...'
+    if (left.type === 'MemberExpression' && left.property?.name === 'className') {
+      issues.push({
+        severity: 'warning',
+        type: 'dynamic-class-manipulation',
+        file: context.filename,
+        line: node.loc?.start.line,
+        functionContext: initContext || 'top-level',
+        message: `className assignment during form initialization may cause CLS.`,
+        pattern: this.extractCodeSnippet(content, node),
+        recommendation: 'Pre-render classes in HTML. Dynamic className changes during load cause layout shifts.',
+        cwvImpact: 'CLS',
+      });
+    }
+  }
+
+  /**
+   * Check if a function name indicates initialization
+   */
+  isInitializationFunction(funcName) {
+    if (!funcName) return false;
+    return this.initializationFunctions.has(funcName) ||
+           funcName.toLowerCase().includes('init') ||
+           funcName.toLowerCase().includes('setup') ||
+           funcName.toLowerCase().includes('decorate');
+  }
+
+  /**
+   * Check if a node is an event handler callback
+   */
+  isEventHandlerCallback(parent, node) {
+    if (!parent) return false;
+
+    // Check for addEventListener('click', callback)
+    if (parent.type === 'CallExpression') {
+      const calleeName = this.getCalleeName(parent.callee);
+      if (calleeName === 'addEventListener' || calleeName.endsWith('.addEventListener')) {
+        const eventType = parent.arguments[0];
+        if (eventType && this.userEventTypes.has(this.getStringValue(eventType))) {
+          return true;
+        }
+      }
+    }
+
+    // Check for element.onclick = function() {}
+    if (parent.type === 'AssignmentExpression') {
+      const left = parent.left;
+      if (left.type === 'MemberExpression') {
+        const propName = left.property?.name;
+        if (propName && propName.startsWith('on')) {
+          const eventType = propName.slice(2).toLowerCase();
+          if (this.userEventTypes.has(eventType)) {
+            return true;
+          }
+        }
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * Get function name from parent context
+   */
+  getFunctionName(parent, node) {
+    if (!parent) return null;
+
+    // const funcName = () => {}
+    if (parent.type === 'VariableDeclarator' && parent.id?.name) {
+      return parent.id.name;
+    }
+
+    // obj.funcName = () => {}
+    if (parent.type === 'AssignmentExpression' && parent.left?.property?.name) {
+      return parent.left.property.name;
+    }
+
+    // { funcName: () => {} }
+    if (parent.type === 'Property' && parent.key?.name) {
+      return parent.key.name;
+    }
+
+    return null;
+  }
+
+  /**
+   * Get callee name from various node types
+   */
+  getCalleeName(callee) {
+    if (!callee) return '';
+    
+    if (callee.type === 'Identifier') {
+      return callee.name;
+    }
+    
+    if (callee.type === 'MemberExpression') {
+      const obj = callee.object?.name || '';
+      const prop = callee.property?.name || '';
+      return obj ? `${obj}.${prop}` : prop;
+    }
+    
+    return '';
+  }
+
+  /**
+   * Check if an argument is a CSS import
+   */
+  isCSSimport(arg, content) {
+    if (arg.type === 'Literal' && typeof arg.value === 'string') {
+      return arg.value.endsWith('.css');
+    }
+    if (arg.type === 'TemplateLiteral') {
+      // Extract template literal content
+      const snippet = content.substring(arg.start, arg.end);
+      return snippet.includes('.css');
+    }
+    return false;
+  }
+
+  /**
+   * Check if a node is classList method
+   */
+  isClassListMethod(callee) {
+    if (callee.object?.type === 'MemberExpression') {
+      return callee.object.property?.name === 'classList';
+    }
+    if (callee.object?.type === 'Identifier' && callee.object.name === 'classList') {
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Get class name from classList.add/remove/toggle call
+   */
+  getClassNameArgument(node) {
+    const arg = node.arguments[0];
+    if (!arg) return null;
+    return this.getStringValue(arg);
+  }
+
+  /**
+   * Check if a class name is in the allowed state classes
+   */
+  isAllowedStateClass(className) {
+    if (!className) return false;
+    
+    // Check exact match
+    if (this.allowedStateClasses.has(className)) {
+      return true;
+    }
+    
+    // Check if contains allowed patterns (e.g., 'field-valid', 'input-error')
+    for (const allowed of this.allowedStateClasses) {
+      if (className.includes(allowed)) {
+        return true;
+      }
+    }
+    
+    return false;
+  }
+
+  /**
+   * Check if a style property affects layout
+   */
+  isLayoutAffectingStyle(property) {
+    const layoutProperties = new Set([
+      'display',
+      'visibility',
+      'width',
+      'height',
+      'minWidth',
+      'minHeight',
+      'maxWidth',
+      'maxHeight',
+      'padding',
+      'paddingTop',
+      'paddingBottom',
+      'paddingLeft',
+      'paddingRight',
+      'margin',
+      'marginTop',
+      'marginBottom',
+      'marginLeft',
+      'marginRight',
+      'position',
+      'top',
+      'bottom',
+      'left',
+      'right',
+      'flex',
+      'flexDirection',
+      'flexWrap',
+      'flexGrow',
+      'flexShrink',
+      'flexBasis',
+      'grid',
+      'gridTemplate',
+      'gridTemplateColumns',
+      'gridTemplateRows',
+      'gap',
+      'fontSize',
+      'lineHeight',
+      'transform',
+      'float',
+      'clear',
+      'overflow',
+      'overflowX',
+      'overflowY',
+    ]);
+    
+    return layoutProperties.has(property);
+  }
+
+  /**
+   * Check if argument is a specific string value
+   */
+  isStringValue(arg, value) {
+    if (arg.type === 'Literal' && arg.value === value) {
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Get string value from a node
+   */
+  getStringValue(node) {
+    if (!node) return null;
+    if (node.type === 'Literal' && typeof node.value === 'string') {
+      return node.value;
+    }
+    return null;
+  }
+
+  /**
+   * Extract code snippet from content
+   */
+  extractCodeSnippet(content, node) {
+    try {
+      const lines = content.split('\n');
+      const line = lines[node.loc.start.line - 1];
+      return line?.trim().substring(0, 100) || '';
+    } catch (e) {
+      return '';
+    }
+  }
+
+  /**
+   * Compare before and after analyses
+   */
+  compare(beforeAnalysis, afterAnalysis) {
+    const before = beforeAnalysis || { issues: [], summary: {} };
+    const after = afterAnalysis || { issues: [], summary: {} };
+
+    // Find new issues (in after but not in before)
+    const newIssues = (after.issues || []).filter(afterIssue =>
+      !(before.issues || []).some(beforeIssue =>
+        beforeIssue.file === afterIssue.file &&
+        beforeIssue.type === afterIssue.type &&
+        beforeIssue.line === afterIssue.line
+      )
+    );
+
+    // Find resolved issues (in before but not in after)
+    const resolvedIssues = (before.issues || []).filter(beforeIssue =>
+      !(after.issues || []).some(afterIssue =>
+        afterIssue.file === beforeIssue.file &&
+        afterIssue.type === beforeIssue.type &&
+        afterIssue.line === beforeIssue.line
+      )
+    );
+
+    return {
+      before,
+      after,
+      newIssues,
+      resolvedIssues,
+      delta: {
+        dynamicCSSLoading: (after.summary?.dynamicCSSLoading || 0) - (before.summary?.dynamicCSSLoading || 0),
+        dynamicStyleInjection: (after.summary?.dynamicStyleInjection || 0) - (before.summary?.dynamicStyleInjection || 0),
+        dynamicClassManipulation: (after.summary?.dynamicClassManipulation || 0) - (before.summary?.dynamicClassManipulation || 0),
+        directStyleManipulation: (after.summary?.directStyleManipulation || 0) - (before.summary?.directStyleManipulation || 0),
+      },
+    };
+  }
+}
+
 ;// CONCATENATED MODULE: ./src/analyzers/ai-autofix-analyzer.js
 
 
@@ -184141,7 +185007,10 @@ export default function decorate(block) {
       { name: 'CSS import fixes', fn: () => this.fixCSSImportSuggestions(results.formCSS) },
       
       // 5. Inline data URIs (suggestions only)
-      { name: 'Inline data URI fixes', fn: () => this.fixInlineDataURIs(results.formCSS) }
+      { name: 'Inline data URI fixes', fn: () => this.fixInlineDataURIs(results.formCSS) },
+      
+      // 6. Runtime CLS issues (dynamic CSS/style/class during form load)
+      { name: 'Runtime CLS fixes', fn: () => this.fixRuntimeCLS(results.runtimeCLS) }
     ];
     
     // Execute all generators in parallel using Promise.allSettled
@@ -184727,6 +185596,104 @@ ${fieldNames.length > 5 ? `\n...and ${fieldNames.length - 5} more` : ''}
     }
     
     lib_core.info(`  Window fixes: ${suggestions.length - httpIssues.length - domIssues.length} generated (static guidance, no AI)`);
+    
+    return suggestions;
+  }
+
+  /**
+   * Fix Runtime CLS issues (dynamic CSS/style/class manipulation during form load)
+   * Provides static guidance for each issue type
+   */
+  fixRuntimeCLS = async (runtimeCLSResults) => {
+    if (!runtimeCLSResults || !runtimeCLSResults.newIssues) return [];
+    
+    const suggestions = [];
+    
+    // 1. Dynamic CSS loading (loadCSS, dynamic imports)
+    const dynamicCSSIssues = runtimeCLSResults.newIssues.filter(
+      issue => issue.type === 'dynamic-css-loading'
+    );
+    
+    for (const issue of dynamicCSSIssues.slice(0, 5)) {
+      suggestions.push({
+        type: 'runtime-cls-dynamic-css',
+        severity: 'critical',
+        file: issue.file,
+        line: issue.line || 1,
+        functionContext: issue.functionContext,
+        title: `Dynamic CSS loading causes CLS`,
+        description: `Loading CSS at runtime causes layout shifts. Move to head.html or use @import in form.css.`,
+        guidance: 'Move CSS to head.html or use @import in form.css. Remove loadCSS() from initialization code.',
+        estimatedImpact: 'CLS, LCP'
+      });
+    }
+    
+    lib_core.info(`  Dynamic CSS loading fixes: ${dynamicCSSIssues.length} generated (static guidance)`);
+    
+    // 2. Dynamic style injection (createElement style/link)
+    const styleInjectionIssues = runtimeCLSResults.newIssues.filter(
+      issue => issue.type === 'dynamic-style-injection'
+    );
+    
+    for (const issue of styleInjectionIssues.slice(0, 5)) {
+      suggestions.push({
+        type: 'runtime-cls-style-injection',
+        severity: 'critical',
+        file: issue.file,
+        line: issue.line || 1,
+        functionContext: issue.functionContext,
+        title: `Dynamic style injection causes CLS`,
+        description: `Creating style/link elements at runtime causes layout shifts. Define styles in CSS files instead.`,
+        guidance: 'Move styles to a CSS file and load statically. Remove createElement("style") from initialization.',
+        estimatedImpact: 'CLS, LCP'
+      });
+    }
+    
+    lib_core.info(`  Style injection fixes: ${styleInjectionIssues.length} generated (static guidance)`);
+    
+    // 3. Dynamic class manipulation (classList.add/remove/toggle)
+    const classManipulationIssues = runtimeCLSResults.newIssues.filter(
+      issue => issue.type === 'dynamic-class-manipulation'
+    );
+    
+    for (const issue of classManipulationIssues.slice(0, 5)) {
+      suggestions.push({
+        type: 'runtime-cls-class-manipulation',
+        severity: 'warning',
+        file: issue.file,
+        line: issue.line || 1,
+        functionContext: issue.functionContext,
+        className: issue.className,
+        title: `Class "${issue.className}" may cause CLS`,
+        description: `Adding classes during form load may cause layout shifts. Pre-render in HTML or move to event handler.`,
+        guidance: 'Pre-render class in HTML or apply only after user interaction.',
+        estimatedImpact: 'CLS'
+      });
+    }
+    
+    lib_core.info(`  Class manipulation fixes: ${classManipulationIssues.length} generated (static guidance)`);
+    
+    // 4. Direct style manipulation (element.style.xxx)
+    const styleManipulationIssues = runtimeCLSResults.newIssues.filter(
+      issue => issue.type === 'direct-style-manipulation'
+    );
+    
+    for (const issue of styleManipulationIssues.slice(0, 5)) {
+      suggestions.push({
+        type: 'runtime-cls-style-manipulation',
+        severity: 'warning',
+        file: issue.file,
+        line: issue.line || 1,
+        functionContext: issue.functionContext,
+        styleProperty: issue.styleProperty,
+        title: `style.${issue.styleProperty} may cause CLS`,
+        description: `Direct style manipulation during form load may cause layout shifts. Use CSS classes instead.`,
+        guidance: 'Use CSS classes instead of direct style manipulation.',
+        estimatedImpact: 'CLS'
+      });
+    }
+    
+    lib_core.info(`  Style manipulation fixes: ${styleManipulationIssues.length} generated (static guidance)`);
     
     return suggestions;
   }
@@ -187133,6 +188100,77 @@ class FormPRReporter {
   }
 
   /**
+   * Build Runtime CLS Analysis section
+   */
+  buildRuntimeCLSSection(runtimeCLS) {
+    if (!runtimeCLS || !runtimeCLS.newIssues || runtimeCLS.newIssues.length === 0) {
+      return '';
+    }
+
+    const lines = ['### Runtime CLS Analysis\n'];
+    const { after, newIssues } = runtimeCLS;
+
+    if (after) {
+      lines.push(`**Files Analyzed:** ${after.filesAnalyzed}\n`);
+    }
+
+    // Group issues by type
+    const dynamicCSSIssues = newIssues.filter(i => i.type === 'dynamic-css-loading');
+    const styleInjectionIssues = newIssues.filter(i => i.type === 'dynamic-style-injection');
+    const classManipulationIssues = newIssues.filter(i => i.type === 'dynamic-class-manipulation');
+    const styleManipulationIssues = newIssues.filter(i => i.type === 'direct-style-manipulation');
+
+    // Critical issues (errors)
+    if (dynamicCSSIssues.length > 0) {
+      lines.push(`** ${dynamicCSSIssues.length} Dynamic CSS Loading (Critical):**\n`);
+      lines.push('Dynamic CSS loading during form initialization causes CLS and delays rendering.\n');
+      dynamicCSSIssues.forEach(issue => {
+        lines.push(`- \`${issue.file}:${issue.line}\` in \`${issue.functionContext}()\``);
+        lines.push(`  - Pattern: \`${issue.pattern}\``);
+        lines.push(`  - ${issue.recommendation}`);
+      });
+      lines.push('');
+    }
+
+    if (styleInjectionIssues.length > 0) {
+      lines.push(`** ${styleInjectionIssues.length} Dynamic Style Injection (Critical):**\n`);
+      lines.push('Creating style/link elements at runtime causes CLS.\n');
+      styleInjectionIssues.forEach(issue => {
+        lines.push(`- \`${issue.file}:${issue.line}\` in \`${issue.functionContext}()\``);
+        lines.push(`  - Pattern: \`${issue.pattern}\``);
+        lines.push(`  - ${issue.recommendation}`);
+      });
+      lines.push('');
+    }
+
+    // Warnings
+    if (classManipulationIssues.length > 0) {
+      lines.push(`** ${classManipulationIssues.length} Dynamic Class Manipulation (Warning):**\n`);
+      lines.push('Class changes during form load may cause CLS if they affect layout.\n');
+      classManipulationIssues.forEach(issue => {
+        lines.push(`- \`${issue.file}:${issue.line}\` - \`classList.${issue.pattern}\``);
+        lines.push(`  - Class: \`${issue.className}\``);
+      });
+      lines.push('');
+    }
+
+    if (styleManipulationIssues.length > 0) {
+      lines.push(`** ${styleManipulationIssues.length} Direct Style Manipulation (Warning):**\n`);
+      lines.push('Direct style changes during form load may cause CLS.\n');
+      styleManipulationIssues.forEach(issue => {
+        lines.push(`- \`${issue.file}:${issue.line}\` - \`style.${issue.styleProperty}\``);
+      });
+      lines.push('');
+    }
+
+    if (newIssues.length === 0) {
+      lines.push(' No runtime CLS issues detected during form initialization.\n');
+    }
+
+    return lines.join('\n');
+  }
+
+  /**
    * Build summary section
    */
   buildFormSummarySection(results) {
@@ -187373,6 +188411,43 @@ class FormPRReporter {
       }
     }
 
+    // Runtime CLS issues
+    if (results.runtimeCLS && results.runtimeCLS.newIssues && results.runtimeCLS.newIssues.length > 0) {
+      const { newIssues, resolvedIssues } = results.runtimeCLS;
+      
+      const dynamicCSSIssues = newIssues.filter(i => i.type === 'dynamic-css-loading');
+      const styleInjectionIssues = newIssues.filter(i => i.type === 'dynamic-style-injection');
+      const classManipulationIssues = newIssues.filter(i => i.type === 'dynamic-class-manipulation');
+      const styleManipulationIssues = newIssues.filter(i => i.type === 'direct-style-manipulation');
+      
+      if (dynamicCSSIssues.length > 0) {
+        impact.critical.push(`${dynamicCSSIssues.length} dynamic CSS loading during form initialization (causes CLS)`);
+        impact.recommendations.push('Load CSS in <head> or bundle it, not at runtime');
+        score -= dynamicCSSIssues.length * 50;
+      }
+      
+      if (styleInjectionIssues.length > 0) {
+        impact.critical.push(`${styleInjectionIssues.length} dynamic style injection during form initialization (causes CLS)`);
+        impact.recommendations.push('Define styles in CSS files, not dynamically at runtime');
+        score -= styleInjectionIssues.length * 50;
+      }
+      
+      if (classManipulationIssues.length > 0) {
+        impact.warnings.push(`${classManipulationIssues.length} dynamic class manipulation during form load`);
+        score -= classManipulationIssues.length * 10;
+      }
+      
+      if (styleManipulationIssues.length > 0) {
+        impact.warnings.push(`${styleManipulationIssues.length} direct style manipulation during form load`);
+        score -= styleManipulationIssues.length * 10;
+      }
+      
+      if (resolvedIssues && resolvedIssues.length > 0) {
+        impact.positives.push(`Fixed ${resolvedIssues.length} runtime CLS issue(s)`);
+        score += resolvedIssues.length * 40;
+      }
+    }
+
     // Determine overall rating
     if (score > 20) {
       impact.rating = 'Positive';
@@ -187505,6 +188580,11 @@ class FormPRReporter {
       count += results.formCSS.newIssues.length;
     }
     
+    // Runtime CLS (only PR diff files - only count errors, not warnings)
+    if (results.runtimeCLS?.newIssues?.length) {
+      count += results.runtimeCLS.newIssues.filter(i => i.severity === 'error').length;
+    }
+    
     // HTML (only PR diff - URL-based, always shown)
     if (results.formHTML?.newIssues?.length) {
       count += results.formHTML.newIssues.length;
@@ -187540,6 +188620,10 @@ class FormPRReporter {
     // Form validation errors (dataRef + type conflicts)
     if (results.ruleCycles?.after?.validationErrorCount) {
       count += results.ruleCycles.after.validationErrorCount;
+    }
+    // Runtime CLS warnings (class/style manipulation)
+    if (results.runtimeCLS?.newIssues?.length) {
+      count += results.runtimeCLS.newIssues.filter(i => i.severity === 'warning').length;
     }
     return count;
   }
@@ -188017,6 +189101,7 @@ class HTMLReporter {
     ${this.buildFormHTMLSection(results)}
     ${this.buildFormCSSSection(results)}
     ${this.buildCustomFunctionsSection(results)}
+    ${this.buildRuntimeCLSSection(results)}
     ${this.buildFormValidationSection(results)}
 
     <footer>
@@ -188427,6 +189512,71 @@ class HTMLReporter {
     </div>`;
   }
 
+  buildRuntimeCLSSection(results) {
+    const data = results.runtimeCLS;
+    if (!data) return '';
+
+    const issues = data.newIssues || data.after?.issues || [];
+    if (issues.length === 0) {
+      return `<div class="section"><h2>Runtime CLS Analysis</h2><p>No CLS-causing patterns detected during form initialization.</p></div>`;
+    }
+
+    const cssLoading = issues.filter(i => i.type === 'dynamic-css-loading');
+    const styleInjection = issues.filter(i => i.type === 'dynamic-style-injection');
+    const classManipulation = issues.filter(i => i.type === 'dynamic-class-manipulation');
+    const styleManipulation = issues.filter(i => i.type === 'direct-style-manipulation');
+
+    return `
+    <div class="section">
+      <h2>Runtime CLS Analysis (${issues.length} issues)</h2>
+      <p>Issues that may cause Cumulative Layout Shift during form load.</p>
+      
+      ${cssLoading.length > 0 ? `
+        <h3>Dynamic CSS Loading (${cssLoading.length})</h3>
+        ${cssLoading.map(issue => `
+          <div class="issue-item">
+            <h4><code>${issue.file}</code> line ${issue.line}</h4>
+            <p><strong>Pattern:</strong> ${issue.pattern}</p>
+            <p>Move CSS to head.html or use @import in form.css.</p>
+          </div>
+        `).join('')}
+      ` : ''}
+      
+      ${styleInjection.length > 0 ? `
+        <h3>Dynamic Style Injection (${styleInjection.length})</h3>
+        ${styleInjection.map(issue => `
+          <div class="issue-item">
+            <h4><code>${issue.file}</code> line ${issue.line}</h4>
+            <p><strong>Pattern:</strong> ${issue.pattern}</p>
+            <p>Move styles to a CSS file and load statically.</p>
+          </div>
+        `).join('')}
+      ` : ''}
+      
+      ${classManipulation.length > 0 ? `
+        <h3>Dynamic Class Manipulation (${classManipulation.length})</h3>
+        ${classManipulation.map(issue => `
+          <div class="issue-item">
+            <h4><code>${issue.file}</code> line ${issue.line}</h4>
+            <p><strong>Pattern:</strong> ${issue.pattern}</p>
+            <p>Pre-render class in HTML or apply only after user interaction.</p>
+          </div>
+        `).join('')}
+      ` : ''}
+      
+      ${styleManipulation.length > 0 ? `
+        <h3>Direct Style Manipulation (${styleManipulation.length})</h3>
+        ${styleManipulation.map(issue => `
+          <div class="issue-item">
+            <h4><code>${issue.file}</code> line ${issue.line}</h4>
+            <p><strong>Pattern:</strong> ${issue.pattern}</p>
+            <p>Use CSS classes instead of direct style manipulation.</p>
+          </div>
+        `).join('')}
+      ` : ''}
+    </div>`;
+  }
+
   buildFormValidationSection(results) {
     const validationErrors = results.ruleCycles?.after?.validationErrors;
     if (!validationErrors || !validationErrors.dataRefErrors && !validationErrors.typeConflicts) return '';
@@ -188607,6 +189757,79 @@ class HTMLReporter {
   }
 
   /**
+   * Build custom functions section for scheduled reports with issue breakdown
+   */
+  buildScheduledCustomFunctionsSection(issues) {
+    if (!issues || issues.length === 0) return '';
+    
+    const httpIssues = issues.filter(i => i.type === 'http-request-in-custom-function');
+    const domIssues = issues.filter(i => i.type === 'dom-access-in-custom-function');
+    const windowIssues = issues.filter(i => i.type === 'window-access-in-custom-function');
+    const runtimeErrors = issues.filter(i => i.type === 'runtime-error-in-custom-function');
+    const otherIssues = issues.filter(i => !['http-request-in-custom-function', 'dom-access-in-custom-function', 'window-access-in-custom-function', 'runtime-error-in-custom-function'].includes(i.type));
+    
+    let html = `<h2>Custom Function Issues (${issues.length})</h2>
+    <div class="issue-list" style="max-height: 500px; overflow-y: auto;">`;
+    
+    if (windowIssues.length > 0) {
+      html += `<h3>Window Access (${windowIssues.length})</h3>`;
+      html += windowIssues.map(issue => `
+        <div class="issue-item error">
+          <strong>Window Access</strong> in <code>${issue.functionName || 'unknown'}</code><br>
+          File: <code>${issue.file || 'unknown'}</code><br>
+          Direct window object access can break headless forms.
+        </div>
+      `).join('');
+    }
+    
+    if (httpIssues.length > 0) {
+      html += `<h3>HTTP Requests (${httpIssues.length})</h3>`;
+      html += httpIssues.map(issue => `
+        <div class="issue-item error">
+          <strong>HTTP Request</strong> in <code>${issue.functionName || 'unknown'}</code><br>
+          File: <code>${issue.file || 'unknown'}</code><br>
+          Direct HTTP calls bypass form's request() API.
+        </div>
+      `).join('');
+    }
+    
+    if (domIssues.length > 0) {
+      html += `<h3>DOM Access (${domIssues.length})</h3>`;
+      html += domIssues.map(issue => `
+        <div class="issue-item warning">
+          <strong>DOM Access</strong> in <code>${issue.functionName || 'unknown'}</code><br>
+          File: <code>${issue.file || 'unknown'}</code><br>
+          Direct DOM manipulation bypasses form state.
+        </div>
+      `).join('');
+    }
+    
+    if (runtimeErrors.length > 0) {
+      html += `<h3>Runtime Errors (${runtimeErrors.length})</h3>`;
+      html += runtimeErrors.map(issue => `
+        <div class="issue-item error">
+          <strong>Runtime Error</strong> in <code>${issue.functionName || 'unknown'}</code><br>
+          File: <code>${issue.file || 'unknown'}</code><br>
+          ${issue.recommendation || 'Function encountered errors during execution.'}
+        </div>
+      `).join('');
+    }
+    
+    if (otherIssues.length > 0) {
+      html += `<h3>Other Issues (${otherIssues.length})</h3>`;
+      html += otherIssues.map(issue => `
+        <div class="issue-item ${issue.severity || 'warning'}">
+          <strong>${issue.type || 'Issue'}</strong> in <code>${issue.functionName || 'unknown'}</code><br>
+          ${issue.message || 'No description'}
+        </div>
+      `).join('');
+    }
+    
+    html += '</div>';
+    return html;
+  }
+
+  /**
    * Generate scheduled scan HTML report
    */
   generateScheduledReport(results, options = {}) {
@@ -188618,14 +189841,16 @@ class HTMLReporter {
     const totalFormIssues = results.forms?.issues?.length || 0;
     const totalRuleIssues = results.rules?.issues?.length || 0;
     const totalHTMLIssues = results.html?.issues?.length || 0;
-    const totalIssues = totalCSSIssues + totalFunctionIssues + totalFormIssues + totalRuleIssues + totalHTMLIssues;
+    const totalRuntimeCLSIssues = results.runtimeCLS?.newIssues?.length || 0;
+    const totalIssues = totalCSSIssues + totalFunctionIssues + totalFormIssues + totalRuleIssues + totalHTMLIssues + totalRuntimeCLSIssues;
     
     const criticalCSS = results.css?.issues?.filter(i => i.severity === 'error').length || 0;
     const criticalFunctions = results.customFunctions?.issues?.filter(i => i.severity === 'error').length || 0;
     const criticalForms = results.forms?.issues?.filter(i => i.severity === 'error').length || 0;
     const criticalRules = totalRuleIssues; // All rule cycles are critical
     const criticalHTML = results.html?.issues?.filter(i => i.severity === 'error').length || 0;
-    const totalCritical = criticalCSS + criticalFunctions + criticalForms + criticalRules + criticalHTML;
+    const criticalRuntimeCLS = results.runtimeCLS?.newIssues?.filter(i => i.type === 'dynamic-css-loading' || i.type === 'dynamic-style-injection').length || 0;
+    const totalCritical = criticalCSS + criticalFunctions + criticalForms + criticalRules + criticalHTML + criticalRuntimeCLS;
     
     const hasFormAnalysis = !!results.formJson;
     
@@ -188712,17 +189937,7 @@ class HTMLReporter {
     </div>
     ` : ''}
     
-    ${totalFunctionIssues > 0 ? `
-    <h2>Custom Function Issues (${totalFunctionIssues})</h2>
-    <div class="issue-list" style="max-height: 500px; overflow-y: auto;">
-      ${results.customFunctions.issues.map(issue => `
-        <div class="issue-item ${issue.severity || 'warning'}">
-          <strong>${issue.type || 'Function Issue'}</strong> - <code>${issue.functionName || 'unknown'}</code><br>
-          ${issue.message || 'No description'}
-        </div>
-      `).join('')}
-    </div>
-    ` : ''}
+    ${totalFunctionIssues > 0 ? this.buildScheduledCustomFunctionsSection(results.customFunctions.issues) : ''}
     
     ${totalRuleIssues > 0 ? `
     <h2>Rule Cycle Issues (${totalRuleIssues})</h2>
@@ -188757,6 +189972,18 @@ class HTMLReporter {
           <strong>${issue.type || 'HTML Issue'}</strong><br>
           ${issue.message || 'No description'}
           ${issue.count ? `<br><em>Count: ${issue.count}</em>` : ''}
+        </div>
+      `).join('')}
+    </div>
+    ` : ''}
+    
+    ${(results.runtimeCLS?.newIssues?.length || 0) > 0 ? `
+    <h2>Runtime CLS Issues (${results.runtimeCLS.newIssues.length})</h2>
+    <div class="issue-list" style="max-height: 500px; overflow-y: auto;">
+      ${results.runtimeCLS.newIssues.map(issue => `
+        <div class="issue-item ${issue.type?.includes('css') || issue.type?.includes('style-injection') ? 'error' : 'warning'}">
+          <strong>${issue.type || 'CLS Issue'}</strong> in <code>${issue.file || 'unknown'}</code> line ${issue.line || '?'}<br>
+          ${issue.pattern || 'No pattern'}
         </div>
       `).join('')}
     </div>
@@ -189423,6 +190650,29 @@ function filterResultsToPRFiles(results, prFiles) {
     }
   }
   
+  // Filter Runtime CLS issues to only files in PR diff
+  if (filtered.runtimeCLS?.newIssues) {
+    const beforeCount = filtered.runtimeCLS.newIssues.length;
+    filtered.runtimeCLS.newIssues = filtered.runtimeCLS.newIssues.filter(issue =>
+      prFiles.includes(issue.file)
+    );
+    const afterCount = filtered.runtimeCLS.newIssues.length;
+    if (beforeCount > afterCount) {
+      lib_core.info(`  Filtered runtime CLS newIssues: ${beforeCount} → ${afterCount} (removed ${beforeCount - afterCount})`);
+    }
+  }
+  
+  if (filtered.runtimeCLS?.after?.issues) {
+    const beforeCount = filtered.runtimeCLS.after.issues.length;
+    filtered.runtimeCLS.after.issues = filtered.runtimeCLS.after.issues.filter(issue =>
+      prFiles.includes(issue.file)
+    );
+    const afterCount = filtered.runtimeCLS.after.issues.length;
+    if (beforeCount > afterCount) {
+      lib_core.info(`  Filtered runtime CLS after.issues: ${beforeCount} → ${afterCount} (removed ${beforeCount - afterCount})`);
+    }
+  }
+  
   // NOTE: HTML issues are URL-based (not file-based), always shown in PR mode
   // All HTML issues (error + warning) must be fixed in PR mode
   
@@ -189720,6 +190970,7 @@ async function loadConfig(configPath = null) {
 
 
 
+
 /**
  * Get tokens for different operations
  * - GITHUB_TOKEN (default): For Checks API, PR comments, and reading files
@@ -189819,6 +191070,7 @@ async function runPRMode(context, octokit, patOctokit, config) {
   // Initialize analyzers with config
   const formCSSAnalyzer = new FormCSSAnalyzer(config);
   const customFunctionAnalyzer = new CustomFunctionAnalyzer(config);
+  const runtimeCLSAnalyzer = new RuntimeCLSAnalyzer(config);
   const aiAutoFixAnalyzer = new AIAutoFixAnalyzer(config);
 
   // URL-based analysis (only if URLs provided)
@@ -189890,6 +191142,7 @@ async function runPRMode(context, octokit, patOctokit, config) {
   let formStructureAnalysis, formEventsAnalysis, beforeHiddenFields, afterHiddenFields;
   let beforeRuleCycles, afterRuleCycles, formHTMLAnalysis, cssAnalysis;
   let beforeCustomFunctions, afterCustomFunctions;
+  let runtimeCLSAnalysis;
   
   if (hasUrls) {
     // Full analysis with form JSON
@@ -189909,7 +191162,8 @@ async function runPRMode(context, octokit, patOctokit, config) {
       { beforeRuleCycles: brc, afterRuleCycles: arc },
       fha,
       css,
-      { beforeCustomFunctions: bcf, afterCustomFunctions: acf }
+      { beforeCustomFunctions: bcf, afterCustomFunctions: acf },
+      runtimeCLSResult
     ] = await Promise.all([
       // 1. Form Structure (synchronous)
       Promise.resolve(formAnalyzer.compare(beforeData.formJson, afterData.formJson)),
@@ -189965,7 +191219,10 @@ async function runPRMode(context, octokit, patOctokit, config) {
       Promise.resolve({
         beforeCustomFunctions: customFunctionAnalyzer.analyze(beforeData.formJson, jsFiles),
         afterCustomFunctions: customFunctionAnalyzer.analyze(afterData.formJson, jsFiles)
-      })
+      }),
+      
+      // 8. Runtime CLS (synchronous) - detects dynamic CSS/class manipulation during form load
+      Promise.resolve(runtimeCLSAnalyzer.analyze(jsFiles))
     ]);
     
     formStructureAnalysis = fsa;
@@ -189978,12 +191235,13 @@ async function runPRMode(context, octokit, patOctokit, config) {
     cssAnalysis = css;
     beforeCustomFunctions = bcf;
     afterCustomFunctions = acf;
+    runtimeCLSAnalysis = { after: runtimeCLSResult, newIssues: runtimeCLSResult.issues, resolvedIssues: [] };
     
   } else {
     // Limited analysis without URLs - only CSS and JS files
     lib_core.info('Running limited analysis (CSS/JS only, no form JSON)...');
     
-    const [css, { beforeCustomFunctions: bcf, afterCustomFunctions: acf }] = await Promise.all([
+    const [css, { beforeCustomFunctions: bcf, afterCustomFunctions: acf }, runtimeCLSResult] = await Promise.all([
       // CSS analysis
       Promise.resolve(formCSSAnalyzer.analyze(cssFiles)),
       
@@ -189991,7 +191249,10 @@ async function runPRMode(context, octokit, patOctokit, config) {
       Promise.resolve({
         beforeCustomFunctions: customFunctionAnalyzer.analyze(null, jsFiles),
         afterCustomFunctions: customFunctionAnalyzer.analyze(null, jsFiles)
-      })
+      }),
+      
+      // Runtime CLS (detects dynamic CSS/class manipulation during form load)
+      Promise.resolve(runtimeCLSAnalyzer.analyze(jsFiles))
     ]);
     
     // Set empty results for form-specific analyzers
@@ -190005,6 +191266,7 @@ async function runPRMode(context, octokit, patOctokit, config) {
     cssAnalysis = css;
     beforeCustomFunctions = bcf;
     afterCustomFunctions = acf;
+    runtimeCLSAnalysis = { after: runtimeCLSResult, newIssues: runtimeCLSResult.issues, resolvedIssues: [] };
   }
 
   // Compile comparison results
@@ -190130,6 +191392,7 @@ async function runPRMode(context, octokit, patOctokit, config) {
     formHTML: formHTMLAnalysis,
     formCSS: formCSSAnalysis,
     customFunctions: customFunctionAnalysis,
+    runtimeCLS: runtimeCLSAnalysis,
   };
 
   // FILTER results to PR diff files only
@@ -190276,6 +191539,7 @@ async function runScheduledMode(context, octokit, patOctokit, config) {
   // Initialize analyzers
   const formCSSAnalyzer = new FormCSSAnalyzer(config);
   const customFunctionAnalyzer = new CustomFunctionAnalyzer(config);
+  const runtimeCLSAnalyzer = new RuntimeCLSAnalyzer(config);
   const rulePerformanceAnalyzer = new RulePerformanceAnalyzer(config);
   const formAnalyzer = new FormAnalyzer(config);
   const formEventsAnalyzer = new FormEventsAnalyzer(config);
@@ -190294,6 +191558,12 @@ async function runScheduledMode(context, octokit, patOctokit, config) {
   const globalCSSIssues = cssAnalysis.issues || [];
   lib_core.info(`  Found ${globalCSSIssues.length} CSS issues (codebase-wide)`);
   
+  // 1b. RUNTIME CLS ANALYSIS (all JS files - done once for entire codebase)
+  lib_core.info(' Analyzing JS files for Runtime CLS issues...');
+  const runtimeCLSAnalysis = runtimeCLSAnalyzer.analyze(jsFiles);
+  const globalRuntimeCLSIssues = runtimeCLSAnalysis.issues || [];
+  lib_core.info(`  Found ${globalRuntimeCLSIssues.length} Runtime CLS issues (codebase-wide)`);
+  
   // 2. FORM-SPECIFIC ANALYSIS (loop through each URL)
   const formResults = [];
   const formGistLinks = [];
@@ -190307,6 +191577,7 @@ async function runScheduledMode(context, octokit, patOctokit, config) {
         url: formUrl,
         formName: extractFormNameFromUrl(formUrl),
         css: { issues: globalCSSIssues }, // Same CSS issues for all forms
+        runtimeCLS: { newIssues: globalRuntimeCLSIssues, after: { issues: globalRuntimeCLSIssues } }, // Same Runtime CLS issues for all forms
         customFunctions: { issues: [] },
         rules: { issues: [] },
         forms: { issues: [] },
@@ -190686,6 +191957,34 @@ function detectCriticalIssues(results, totalVisibleComments = null) {
     }
     if (otherIssues > 0) {
       critical.issues.push(`${otherIssues} other custom function issue(s)`);
+    }
+  }
+
+  // 8. Runtime CLS issues (dynamic CSS/style/class manipulation during form load)
+  if (results.runtimeCLS?.newIssues && results.runtimeCLS.newIssues.length > 0) {
+    // Filter to only ERROR severity issues (critical)
+    const criticalCLSIssues = results.runtimeCLS.newIssues.filter(i => i.severity === 'error');
+    const warningCLSIssues = results.runtimeCLS.newIssues.filter(i => i.severity === 'warning');
+    
+    if (criticalCLSIssues.length > 0) {
+      critical.hasCritical = true;
+      critical.count += criticalCLSIssues.length;
+      
+      // Break down by type
+      const dynamicCSS = criticalCLSIssues.filter(i => i.type === 'dynamic-css-loading');
+      const styleInjection = criticalCLSIssues.filter(i => i.type === 'dynamic-style-injection');
+      
+      if (dynamicCSS.length > 0) {
+        critical.issues.push(`${dynamicCSS.length} dynamic CSS loading during form initialization (causes CLS)`);
+      }
+      if (styleInjection.length > 0) {
+        critical.issues.push(`${styleInjection.length} dynamic style injection during form initialization (causes CLS)`);
+      }
+    }
+    
+    // Log warnings but don't fail build for them
+    if (warningCLSIssues.length > 0) {
+      lib_core.warning(`[RuntimeCLS] ${warningCLSIssues.length} warning(s) for dynamic class/style manipulation during form load`);
     }
   }
 

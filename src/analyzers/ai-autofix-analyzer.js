@@ -1242,7 +1242,10 @@ export default function decorate(block) {
       { name: 'CSS import fixes', fn: () => this.fixCSSImportSuggestions(results.formCSS) },
       
       // 5. Inline data URIs (suggestions only)
-      { name: 'Inline data URI fixes', fn: () => this.fixInlineDataURIs(results.formCSS) }
+      { name: 'Inline data URI fixes', fn: () => this.fixInlineDataURIs(results.formCSS) },
+      
+      // 6. Runtime CLS issues (dynamic CSS/style/class during form load)
+      { name: 'Runtime CLS fixes', fn: () => this.fixRuntimeCLS(results.runtimeCLS) }
     ];
     
     // Execute all generators in parallel using Promise.allSettled
@@ -1828,6 +1831,104 @@ ${fieldNames.length > 5 ? `\n...and ${fieldNames.length - 5} more` : ''}
     }
     
     core.info(`  Window fixes: ${suggestions.length - httpIssues.length - domIssues.length} generated (static guidance, no AI)`);
+    
+    return suggestions;
+  }
+
+  /**
+   * Fix Runtime CLS issues (dynamic CSS/style/class manipulation during form load)
+   * Provides static guidance for each issue type
+   */
+  fixRuntimeCLS = async (runtimeCLSResults) => {
+    if (!runtimeCLSResults || !runtimeCLSResults.newIssues) return [];
+    
+    const suggestions = [];
+    
+    // 1. Dynamic CSS loading (loadCSS, dynamic imports)
+    const dynamicCSSIssues = runtimeCLSResults.newIssues.filter(
+      issue => issue.type === 'dynamic-css-loading'
+    );
+    
+    for (const issue of dynamicCSSIssues.slice(0, 5)) {
+      suggestions.push({
+        type: 'runtime-cls-dynamic-css',
+        severity: 'critical',
+        file: issue.file,
+        line: issue.line || 1,
+        functionContext: issue.functionContext,
+        title: `Dynamic CSS loading causes CLS`,
+        description: `Loading CSS at runtime causes layout shifts. Move to head.html or use @import in form.css.`,
+        guidance: 'Move CSS to head.html or use @import in form.css. Remove loadCSS() from initialization code.',
+        estimatedImpact: 'CLS, LCP'
+      });
+    }
+    
+    core.info(`  Dynamic CSS loading fixes: ${dynamicCSSIssues.length} generated (static guidance)`);
+    
+    // 2. Dynamic style injection (createElement style/link)
+    const styleInjectionIssues = runtimeCLSResults.newIssues.filter(
+      issue => issue.type === 'dynamic-style-injection'
+    );
+    
+    for (const issue of styleInjectionIssues.slice(0, 5)) {
+      suggestions.push({
+        type: 'runtime-cls-style-injection',
+        severity: 'critical',
+        file: issue.file,
+        line: issue.line || 1,
+        functionContext: issue.functionContext,
+        title: `Dynamic style injection causes CLS`,
+        description: `Creating style/link elements at runtime causes layout shifts. Define styles in CSS files instead.`,
+        guidance: 'Move styles to a CSS file and load statically. Remove createElement("style") from initialization.',
+        estimatedImpact: 'CLS, LCP'
+      });
+    }
+    
+    core.info(`  Style injection fixes: ${styleInjectionIssues.length} generated (static guidance)`);
+    
+    // 3. Dynamic class manipulation (classList.add/remove/toggle)
+    const classManipulationIssues = runtimeCLSResults.newIssues.filter(
+      issue => issue.type === 'dynamic-class-manipulation'
+    );
+    
+    for (const issue of classManipulationIssues.slice(0, 5)) {
+      suggestions.push({
+        type: 'runtime-cls-class-manipulation',
+        severity: 'warning',
+        file: issue.file,
+        line: issue.line || 1,
+        functionContext: issue.functionContext,
+        className: issue.className,
+        title: `Class "${issue.className}" may cause CLS`,
+        description: `Adding classes during form load may cause layout shifts. Pre-render in HTML or move to event handler.`,
+        guidance: 'Pre-render class in HTML or apply only after user interaction.',
+        estimatedImpact: 'CLS'
+      });
+    }
+    
+    core.info(`  Class manipulation fixes: ${classManipulationIssues.length} generated (static guidance)`);
+    
+    // 4. Direct style manipulation (element.style.xxx)
+    const styleManipulationIssues = runtimeCLSResults.newIssues.filter(
+      issue => issue.type === 'direct-style-manipulation'
+    );
+    
+    for (const issue of styleManipulationIssues.slice(0, 5)) {
+      suggestions.push({
+        type: 'runtime-cls-style-manipulation',
+        severity: 'warning',
+        file: issue.file,
+        line: issue.line || 1,
+        functionContext: issue.functionContext,
+        styleProperty: issue.styleProperty,
+        title: `style.${issue.styleProperty} may cause CLS`,
+        description: `Direct style manipulation during form load may cause layout shifts. Use CSS classes instead.`,
+        guidance: 'Use CSS classes instead of direct style manipulation.',
+        estimatedImpact: 'CLS'
+      });
+    }
+    
+    core.info(`  Style manipulation fixes: ${styleManipulationIssues.length} generated (static guidance)`);
     
     return suggestions;
   }

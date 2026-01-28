@@ -752,6 +752,77 @@ export class FormPRReporter {
   }
 
   /**
+   * Build Runtime CLS Analysis section
+   */
+  buildRuntimeCLSSection(runtimeCLS) {
+    if (!runtimeCLS || !runtimeCLS.newIssues || runtimeCLS.newIssues.length === 0) {
+      return '';
+    }
+
+    const lines = ['### Runtime CLS Analysis\n'];
+    const { after, newIssues } = runtimeCLS;
+
+    if (after) {
+      lines.push(`**Files Analyzed:** ${after.filesAnalyzed}\n`);
+    }
+
+    // Group issues by type
+    const dynamicCSSIssues = newIssues.filter(i => i.type === 'dynamic-css-loading');
+    const styleInjectionIssues = newIssues.filter(i => i.type === 'dynamic-style-injection');
+    const classManipulationIssues = newIssues.filter(i => i.type === 'dynamic-class-manipulation');
+    const styleManipulationIssues = newIssues.filter(i => i.type === 'direct-style-manipulation');
+
+    // Critical issues (errors)
+    if (dynamicCSSIssues.length > 0) {
+      lines.push(`** ${dynamicCSSIssues.length} Dynamic CSS Loading (Critical):**\n`);
+      lines.push('Dynamic CSS loading during form initialization causes CLS and delays rendering.\n');
+      dynamicCSSIssues.forEach(issue => {
+        lines.push(`- \`${issue.file}:${issue.line}\` in \`${issue.functionContext}()\``);
+        lines.push(`  - Pattern: \`${issue.pattern}\``);
+        lines.push(`  - ${issue.recommendation}`);
+      });
+      lines.push('');
+    }
+
+    if (styleInjectionIssues.length > 0) {
+      lines.push(`** ${styleInjectionIssues.length} Dynamic Style Injection (Critical):**\n`);
+      lines.push('Creating style/link elements at runtime causes CLS.\n');
+      styleInjectionIssues.forEach(issue => {
+        lines.push(`- \`${issue.file}:${issue.line}\` in \`${issue.functionContext}()\``);
+        lines.push(`  - Pattern: \`${issue.pattern}\``);
+        lines.push(`  - ${issue.recommendation}`);
+      });
+      lines.push('');
+    }
+
+    // Warnings
+    if (classManipulationIssues.length > 0) {
+      lines.push(`** ${classManipulationIssues.length} Dynamic Class Manipulation (Warning):**\n`);
+      lines.push('Class changes during form load may cause CLS if they affect layout.\n');
+      classManipulationIssues.forEach(issue => {
+        lines.push(`- \`${issue.file}:${issue.line}\` - \`classList.${issue.pattern}\``);
+        lines.push(`  - Class: \`${issue.className}\``);
+      });
+      lines.push('');
+    }
+
+    if (styleManipulationIssues.length > 0) {
+      lines.push(`** ${styleManipulationIssues.length} Direct Style Manipulation (Warning):**\n`);
+      lines.push('Direct style changes during form load may cause CLS.\n');
+      styleManipulationIssues.forEach(issue => {
+        lines.push(`- \`${issue.file}:${issue.line}\` - \`style.${issue.styleProperty}\``);
+      });
+      lines.push('');
+    }
+
+    if (newIssues.length === 0) {
+      lines.push(' No runtime CLS issues detected during form initialization.\n');
+    }
+
+    return lines.join('\n');
+  }
+
+  /**
    * Build summary section
    */
   buildFormSummarySection(results) {
@@ -992,6 +1063,43 @@ export class FormPRReporter {
       }
     }
 
+    // Runtime CLS issues
+    if (results.runtimeCLS && results.runtimeCLS.newIssues && results.runtimeCLS.newIssues.length > 0) {
+      const { newIssues, resolvedIssues } = results.runtimeCLS;
+      
+      const dynamicCSSIssues = newIssues.filter(i => i.type === 'dynamic-css-loading');
+      const styleInjectionIssues = newIssues.filter(i => i.type === 'dynamic-style-injection');
+      const classManipulationIssues = newIssues.filter(i => i.type === 'dynamic-class-manipulation');
+      const styleManipulationIssues = newIssues.filter(i => i.type === 'direct-style-manipulation');
+      
+      if (dynamicCSSIssues.length > 0) {
+        impact.critical.push(`${dynamicCSSIssues.length} dynamic CSS loading during form initialization (causes CLS)`);
+        impact.recommendations.push('Load CSS in <head> or bundle it, not at runtime');
+        score -= dynamicCSSIssues.length * 50;
+      }
+      
+      if (styleInjectionIssues.length > 0) {
+        impact.critical.push(`${styleInjectionIssues.length} dynamic style injection during form initialization (causes CLS)`);
+        impact.recommendations.push('Define styles in CSS files, not dynamically at runtime');
+        score -= styleInjectionIssues.length * 50;
+      }
+      
+      if (classManipulationIssues.length > 0) {
+        impact.warnings.push(`${classManipulationIssues.length} dynamic class manipulation during form load`);
+        score -= classManipulationIssues.length * 10;
+      }
+      
+      if (styleManipulationIssues.length > 0) {
+        impact.warnings.push(`${styleManipulationIssues.length} direct style manipulation during form load`);
+        score -= styleManipulationIssues.length * 10;
+      }
+      
+      if (resolvedIssues && resolvedIssues.length > 0) {
+        impact.positives.push(`Fixed ${resolvedIssues.length} runtime CLS issue(s)`);
+        score += resolvedIssues.length * 40;
+      }
+    }
+
     // Determine overall rating
     if (score > 20) {
       impact.rating = 'Positive';
@@ -1124,6 +1232,11 @@ export class FormPRReporter {
       count += results.formCSS.newIssues.length;
     }
     
+    // Runtime CLS (only PR diff files - only count errors, not warnings)
+    if (results.runtimeCLS?.newIssues?.length) {
+      count += results.runtimeCLS.newIssues.filter(i => i.severity === 'error').length;
+    }
+    
     // HTML (only PR diff - URL-based, always shown)
     if (results.formHTML?.newIssues?.length) {
       count += results.formHTML.newIssues.length;
@@ -1159,6 +1272,10 @@ export class FormPRReporter {
     // Form validation errors (dataRef + type conflicts)
     if (results.ruleCycles?.after?.validationErrorCount) {
       count += results.ruleCycles.after.validationErrorCount;
+    }
+    // Runtime CLS warnings (class/style manipulation)
+    if (results.runtimeCLS?.newIssues?.length) {
+      count += results.runtimeCLS.newIssues.filter(i => i.severity === 'warning').length;
     }
     return count;
   }

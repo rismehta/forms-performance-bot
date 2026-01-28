@@ -10,6 +10,7 @@ import { RulePerformanceAnalyzer } from './analyzers/rule-performance-analyzer.j
 import { FormHTMLAnalyzer } from './analyzers/form-html-analyzer.js';
 import { FormCSSAnalyzer } from './analyzers/form-css-analyzer.js';
 import { CustomFunctionAnalyzer } from './analyzers/custom-function-analyzer.js';
+import { RuntimeCLSAnalyzer } from './analyzers/runtime-cls-analyzer.js';
 import { AIAutoFixAnalyzer } from './analyzers/ai-autofix-analyzer.js';
 import { FormPRReporter } from './reporters/pr-reporter-form.js';
 import { HTMLReporter } from './reporters/html-reporter.js';
@@ -115,6 +116,7 @@ async function runPRMode(context, octokit, patOctokit, config) {
   // Initialize analyzers with config
   const formCSSAnalyzer = new FormCSSAnalyzer(config);
   const customFunctionAnalyzer = new CustomFunctionAnalyzer(config);
+  const runtimeCLSAnalyzer = new RuntimeCLSAnalyzer(config);
   const aiAutoFixAnalyzer = new AIAutoFixAnalyzer(config);
 
   // URL-based analysis (only if URLs provided)
@@ -186,6 +188,7 @@ async function runPRMode(context, octokit, patOctokit, config) {
   let formStructureAnalysis, formEventsAnalysis, beforeHiddenFields, afterHiddenFields;
   let beforeRuleCycles, afterRuleCycles, formHTMLAnalysis, cssAnalysis;
   let beforeCustomFunctions, afterCustomFunctions;
+  let runtimeCLSAnalysis;
   
   if (hasUrls) {
     // Full analysis with form JSON
@@ -205,7 +208,8 @@ async function runPRMode(context, octokit, patOctokit, config) {
       { beforeRuleCycles: brc, afterRuleCycles: arc },
       fha,
       css,
-      { beforeCustomFunctions: bcf, afterCustomFunctions: acf }
+      { beforeCustomFunctions: bcf, afterCustomFunctions: acf },
+      runtimeCLSResult
     ] = await Promise.all([
       // 1. Form Structure (synchronous)
       Promise.resolve(formAnalyzer.compare(beforeData.formJson, afterData.formJson)),
@@ -261,7 +265,10 @@ async function runPRMode(context, octokit, patOctokit, config) {
       Promise.resolve({
         beforeCustomFunctions: customFunctionAnalyzer.analyze(beforeData.formJson, jsFiles),
         afterCustomFunctions: customFunctionAnalyzer.analyze(afterData.formJson, jsFiles)
-      })
+      }),
+      
+      // 8. Runtime CLS (synchronous) - detects dynamic CSS/class manipulation during form load
+      Promise.resolve(runtimeCLSAnalyzer.analyze(jsFiles))
     ]);
     
     formStructureAnalysis = fsa;
@@ -274,12 +281,13 @@ async function runPRMode(context, octokit, patOctokit, config) {
     cssAnalysis = css;
     beforeCustomFunctions = bcf;
     afterCustomFunctions = acf;
+    runtimeCLSAnalysis = { after: runtimeCLSResult, newIssues: runtimeCLSResult.issues, resolvedIssues: [] };
     
   } else {
     // Limited analysis without URLs - only CSS and JS files
     core.info('Running limited analysis (CSS/JS only, no form JSON)...');
     
-    const [css, { beforeCustomFunctions: bcf, afterCustomFunctions: acf }] = await Promise.all([
+    const [css, { beforeCustomFunctions: bcf, afterCustomFunctions: acf }, runtimeCLSResult] = await Promise.all([
       // CSS analysis
       Promise.resolve(formCSSAnalyzer.analyze(cssFiles)),
       
@@ -287,7 +295,10 @@ async function runPRMode(context, octokit, patOctokit, config) {
       Promise.resolve({
         beforeCustomFunctions: customFunctionAnalyzer.analyze(null, jsFiles),
         afterCustomFunctions: customFunctionAnalyzer.analyze(null, jsFiles)
-      })
+      }),
+      
+      // Runtime CLS (detects dynamic CSS/class manipulation during form load)
+      Promise.resolve(runtimeCLSAnalyzer.analyze(jsFiles))
     ]);
     
     // Set empty results for form-specific analyzers
@@ -301,6 +312,7 @@ async function runPRMode(context, octokit, patOctokit, config) {
     cssAnalysis = css;
     beforeCustomFunctions = bcf;
     afterCustomFunctions = acf;
+    runtimeCLSAnalysis = { after: runtimeCLSResult, newIssues: runtimeCLSResult.issues, resolvedIssues: [] };
   }
 
   // Compile comparison results
@@ -426,6 +438,7 @@ async function runPRMode(context, octokit, patOctokit, config) {
     formHTML: formHTMLAnalysis,
     formCSS: formCSSAnalysis,
     customFunctions: customFunctionAnalysis,
+    runtimeCLS: runtimeCLSAnalysis,
   };
 
   // FILTER results to PR diff files only
@@ -572,6 +585,7 @@ async function runScheduledMode(context, octokit, patOctokit, config) {
   // Initialize analyzers
   const formCSSAnalyzer = new FormCSSAnalyzer(config);
   const customFunctionAnalyzer = new CustomFunctionAnalyzer(config);
+  const runtimeCLSAnalyzer = new RuntimeCLSAnalyzer(config);
   const rulePerformanceAnalyzer = new RulePerformanceAnalyzer(config);
   const formAnalyzer = new FormAnalyzer(config);
   const formEventsAnalyzer = new FormEventsAnalyzer(config);
@@ -590,6 +604,12 @@ async function runScheduledMode(context, octokit, patOctokit, config) {
   const globalCSSIssues = cssAnalysis.issues || [];
   core.info(`  Found ${globalCSSIssues.length} CSS issues (codebase-wide)`);
   
+  // 1b. RUNTIME CLS ANALYSIS (all JS files - done once for entire codebase)
+  core.info(' Analyzing JS files for Runtime CLS issues...');
+  const runtimeCLSAnalysis = runtimeCLSAnalyzer.analyze(jsFiles);
+  const globalRuntimeCLSIssues = runtimeCLSAnalysis.issues || [];
+  core.info(`  Found ${globalRuntimeCLSIssues.length} Runtime CLS issues (codebase-wide)`);
+  
   // 2. FORM-SPECIFIC ANALYSIS (loop through each URL)
   const formResults = [];
   const formGistLinks = [];
@@ -603,6 +623,7 @@ async function runScheduledMode(context, octokit, patOctokit, config) {
         url: formUrl,
         formName: extractFormNameFromUrl(formUrl),
         css: { issues: globalCSSIssues }, // Same CSS issues for all forms
+        runtimeCLS: { newIssues: globalRuntimeCLSIssues, after: { issues: globalRuntimeCLSIssues } }, // Same Runtime CLS issues for all forms
         customFunctions: { issues: [] },
         rules: { issues: [] },
         forms: { issues: [] },
@@ -982,6 +1003,34 @@ function detectCriticalIssues(results, totalVisibleComments = null) {
     }
     if (otherIssues > 0) {
       critical.issues.push(`${otherIssues} other custom function issue(s)`);
+    }
+  }
+
+  // 8. Runtime CLS issues (dynamic CSS/style/class manipulation during form load)
+  if (results.runtimeCLS?.newIssues && results.runtimeCLS.newIssues.length > 0) {
+    // Filter to only ERROR severity issues (critical)
+    const criticalCLSIssues = results.runtimeCLS.newIssues.filter(i => i.severity === 'error');
+    const warningCLSIssues = results.runtimeCLS.newIssues.filter(i => i.severity === 'warning');
+    
+    if (criticalCLSIssues.length > 0) {
+      critical.hasCritical = true;
+      critical.count += criticalCLSIssues.length;
+      
+      // Break down by type
+      const dynamicCSS = criticalCLSIssues.filter(i => i.type === 'dynamic-css-loading');
+      const styleInjection = criticalCLSIssues.filter(i => i.type === 'dynamic-style-injection');
+      
+      if (dynamicCSS.length > 0) {
+        critical.issues.push(`${dynamicCSS.length} dynamic CSS loading during form initialization (causes CLS)`);
+      }
+      if (styleInjection.length > 0) {
+        critical.issues.push(`${styleInjection.length} dynamic style injection during form initialization (causes CLS)`);
+      }
+    }
+    
+    // Log warnings but don't fail build for them
+    if (warningCLSIssues.length > 0) {
+      core.warning(`[RuntimeCLS] ${warningCLSIssues.length} warning(s) for dynamic class/style manipulation during form load`);
     }
   }
 

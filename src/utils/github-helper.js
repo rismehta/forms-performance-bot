@@ -198,6 +198,29 @@ export function filterResultsToPRFiles(results, prFiles) {
     }
   }
   
+  // Filter Runtime CLS issues to only files in PR diff
+  if (filtered.runtimeCLS?.newIssues) {
+    const beforeCount = filtered.runtimeCLS.newIssues.length;
+    filtered.runtimeCLS.newIssues = filtered.runtimeCLS.newIssues.filter(issue =>
+      prFiles.includes(issue.file)
+    );
+    const afterCount = filtered.runtimeCLS.newIssues.length;
+    if (beforeCount > afterCount) {
+      core.info(`  Filtered runtime CLS newIssues: ${beforeCount} → ${afterCount} (removed ${beforeCount - afterCount})`);
+    }
+  }
+  
+  if (filtered.runtimeCLS?.after?.issues) {
+    const beforeCount = filtered.runtimeCLS.after.issues.length;
+    filtered.runtimeCLS.after.issues = filtered.runtimeCLS.after.issues.filter(issue =>
+      prFiles.includes(issue.file)
+    );
+    const afterCount = filtered.runtimeCLS.after.issues.length;
+    if (beforeCount > afterCount) {
+      core.info(`  Filtered runtime CLS after.issues: ${beforeCount} → ${afterCount} (removed ${beforeCount - afterCount})`);
+    }
+  }
+  
   // NOTE: HTML issues are URL-based (not file-based), always shown in PR mode
   // All HTML issues (error + warning) must be fixed in PR mode
   

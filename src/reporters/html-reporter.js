@@ -346,6 +346,7 @@ export class HTMLReporter {
     ${this.buildFormHTMLSection(results)}
     ${this.buildFormCSSSection(results)}
     ${this.buildCustomFunctionsSection(results)}
+    ${this.buildRuntimeCLSSection(results)}
     ${this.buildFormValidationSection(results)}
 
     <footer>
@@ -756,6 +757,71 @@ export class HTMLReporter {
     </div>`;
   }
 
+  buildRuntimeCLSSection(results) {
+    const data = results.runtimeCLS;
+    if (!data) return '';
+
+    const issues = data.newIssues || data.after?.issues || [];
+    if (issues.length === 0) {
+      return `<div class="section"><h2>Runtime CLS Analysis</h2><p>No CLS-causing patterns detected during form initialization.</p></div>`;
+    }
+
+    const cssLoading = issues.filter(i => i.type === 'dynamic-css-loading');
+    const styleInjection = issues.filter(i => i.type === 'dynamic-style-injection');
+    const classManipulation = issues.filter(i => i.type === 'dynamic-class-manipulation');
+    const styleManipulation = issues.filter(i => i.type === 'direct-style-manipulation');
+
+    return `
+    <div class="section">
+      <h2>Runtime CLS Analysis (${issues.length} issues)</h2>
+      <p>Issues that may cause Cumulative Layout Shift during form load.</p>
+      
+      ${cssLoading.length > 0 ? `
+        <h3>Dynamic CSS Loading (${cssLoading.length})</h3>
+        ${cssLoading.map(issue => `
+          <div class="issue-item">
+            <h4><code>${issue.file}</code> line ${issue.line}</h4>
+            <p><strong>Pattern:</strong> ${issue.pattern}</p>
+            <p>Move CSS to head.html or use @import in form.css.</p>
+          </div>
+        `).join('')}
+      ` : ''}
+      
+      ${styleInjection.length > 0 ? `
+        <h3>Dynamic Style Injection (${styleInjection.length})</h3>
+        ${styleInjection.map(issue => `
+          <div class="issue-item">
+            <h4><code>${issue.file}</code> line ${issue.line}</h4>
+            <p><strong>Pattern:</strong> ${issue.pattern}</p>
+            <p>Move styles to a CSS file and load statically.</p>
+          </div>
+        `).join('')}
+      ` : ''}
+      
+      ${classManipulation.length > 0 ? `
+        <h3>Dynamic Class Manipulation (${classManipulation.length})</h3>
+        ${classManipulation.map(issue => `
+          <div class="issue-item">
+            <h4><code>${issue.file}</code> line ${issue.line}</h4>
+            <p><strong>Pattern:</strong> ${issue.pattern}</p>
+            <p>Pre-render class in HTML or apply only after user interaction.</p>
+          </div>
+        `).join('')}
+      ` : ''}
+      
+      ${styleManipulation.length > 0 ? `
+        <h3>Direct Style Manipulation (${styleManipulation.length})</h3>
+        ${styleManipulation.map(issue => `
+          <div class="issue-item">
+            <h4><code>${issue.file}</code> line ${issue.line}</h4>
+            <p><strong>Pattern:</strong> ${issue.pattern}</p>
+            <p>Use CSS classes instead of direct style manipulation.</p>
+          </div>
+        `).join('')}
+      ` : ''}
+    </div>`;
+  }
+
   buildFormValidationSection(results) {
     const validationErrors = results.ruleCycles?.after?.validationErrors;
     if (!validationErrors || !validationErrors.dataRefErrors && !validationErrors.typeConflicts) return '';
@@ -936,6 +1002,79 @@ export class HTMLReporter {
   }
 
   /**
+   * Build custom functions section for scheduled reports with issue breakdown
+   */
+  buildScheduledCustomFunctionsSection(issues) {
+    if (!issues || issues.length === 0) return '';
+    
+    const httpIssues = issues.filter(i => i.type === 'http-request-in-custom-function');
+    const domIssues = issues.filter(i => i.type === 'dom-access-in-custom-function');
+    const windowIssues = issues.filter(i => i.type === 'window-access-in-custom-function');
+    const runtimeErrors = issues.filter(i => i.type === 'runtime-error-in-custom-function');
+    const otherIssues = issues.filter(i => !['http-request-in-custom-function', 'dom-access-in-custom-function', 'window-access-in-custom-function', 'runtime-error-in-custom-function'].includes(i.type));
+    
+    let html = `<h2>Custom Function Issues (${issues.length})</h2>
+    <div class="issue-list" style="max-height: 500px; overflow-y: auto;">`;
+    
+    if (windowIssues.length > 0) {
+      html += `<h3>Window Access (${windowIssues.length})</h3>`;
+      html += windowIssues.map(issue => `
+        <div class="issue-item error">
+          <strong>Window Access</strong> in <code>${issue.functionName || 'unknown'}</code><br>
+          File: <code>${issue.file || 'unknown'}</code><br>
+          Direct window object access can break headless forms.
+        </div>
+      `).join('');
+    }
+    
+    if (httpIssues.length > 0) {
+      html += `<h3>HTTP Requests (${httpIssues.length})</h3>`;
+      html += httpIssues.map(issue => `
+        <div class="issue-item error">
+          <strong>HTTP Request</strong> in <code>${issue.functionName || 'unknown'}</code><br>
+          File: <code>${issue.file || 'unknown'}</code><br>
+          Direct HTTP calls bypass form's request() API.
+        </div>
+      `).join('');
+    }
+    
+    if (domIssues.length > 0) {
+      html += `<h3>DOM Access (${domIssues.length})</h3>`;
+      html += domIssues.map(issue => `
+        <div class="issue-item warning">
+          <strong>DOM Access</strong> in <code>${issue.functionName || 'unknown'}</code><br>
+          File: <code>${issue.file || 'unknown'}</code><br>
+          Direct DOM manipulation bypasses form state.
+        </div>
+      `).join('');
+    }
+    
+    if (runtimeErrors.length > 0) {
+      html += `<h3>Runtime Errors (${runtimeErrors.length})</h3>`;
+      html += runtimeErrors.map(issue => `
+        <div class="issue-item error">
+          <strong>Runtime Error</strong> in <code>${issue.functionName || 'unknown'}</code><br>
+          File: <code>${issue.file || 'unknown'}</code><br>
+          ${issue.recommendation || 'Function encountered errors during execution.'}
+        </div>
+      `).join('');
+    }
+    
+    if (otherIssues.length > 0) {
+      html += `<h3>Other Issues (${otherIssues.length})</h3>`;
+      html += otherIssues.map(issue => `
+        <div class="issue-item ${issue.severity || 'warning'}">
+          <strong>${issue.type || 'Issue'}</strong> in <code>${issue.functionName || 'unknown'}</code><br>
+          ${issue.message || 'No description'}
+        </div>
+      `).join('');
+    }
+    
+    html += '</div>';
+    return html;
+  }
+
+  /**
    * Generate scheduled scan HTML report
    */
   generateScheduledReport(results, options = {}) {
@@ -947,14 +1086,16 @@ export class HTMLReporter {
     const totalFormIssues = results.forms?.issues?.length || 0;
     const totalRuleIssues = results.rules?.issues?.length || 0;
     const totalHTMLIssues = results.html?.issues?.length || 0;
-    const totalIssues = totalCSSIssues + totalFunctionIssues + totalFormIssues + totalRuleIssues + totalHTMLIssues;
+    const totalRuntimeCLSIssues = results.runtimeCLS?.newIssues?.length || 0;
+    const totalIssues = totalCSSIssues + totalFunctionIssues + totalFormIssues + totalRuleIssues + totalHTMLIssues + totalRuntimeCLSIssues;
     
     const criticalCSS = results.css?.issues?.filter(i => i.severity === 'error').length || 0;
     const criticalFunctions = results.customFunctions?.issues?.filter(i => i.severity === 'error').length || 0;
     const criticalForms = results.forms?.issues?.filter(i => i.severity === 'error').length || 0;
     const criticalRules = totalRuleIssues; // All rule cycles are critical
     const criticalHTML = results.html?.issues?.filter(i => i.severity === 'error').length || 0;
-    const totalCritical = criticalCSS + criticalFunctions + criticalForms + criticalRules + criticalHTML;
+    const criticalRuntimeCLS = results.runtimeCLS?.newIssues?.filter(i => i.type === 'dynamic-css-loading' || i.type === 'dynamic-style-injection').length || 0;
+    const totalCritical = criticalCSS + criticalFunctions + criticalForms + criticalRules + criticalHTML + criticalRuntimeCLS;
     
     const hasFormAnalysis = !!results.formJson;
     
@@ -1041,17 +1182,7 @@ export class HTMLReporter {
     </div>
     ` : ''}
     
-    ${totalFunctionIssues > 0 ? `
-    <h2>Custom Function Issues (${totalFunctionIssues})</h2>
-    <div class="issue-list" style="max-height: 500px; overflow-y: auto;">
-      ${results.customFunctions.issues.map(issue => `
-        <div class="issue-item ${issue.severity || 'warning'}">
-          <strong>${issue.type || 'Function Issue'}</strong> - <code>${issue.functionName || 'unknown'}</code><br>
-          ${issue.message || 'No description'}
-        </div>
-      `).join('')}
-    </div>
-    ` : ''}
+    ${totalFunctionIssues > 0 ? this.buildScheduledCustomFunctionsSection(results.customFunctions.issues) : ''}
     
     ${totalRuleIssues > 0 ? `
     <h2>Rule Cycle Issues (${totalRuleIssues})</h2>
@@ -1086,6 +1217,18 @@ export class HTMLReporter {
           <strong>${issue.type || 'HTML Issue'}</strong><br>
           ${issue.message || 'No description'}
           ${issue.count ? `<br><em>Count: ${issue.count}</em>` : ''}
+        </div>
+      `).join('')}
+    </div>
+    ` : ''}
+    
+    ${(results.runtimeCLS?.newIssues?.length || 0) > 0 ? `
+    <h2>Runtime CLS Issues (${results.runtimeCLS.newIssues.length})</h2>
+    <div class="issue-list" style="max-height: 500px; overflow-y: auto;">
+      ${results.runtimeCLS.newIssues.map(issue => `
+        <div class="issue-item ${issue.type?.includes('css') || issue.type?.includes('style-injection') ? 'error' : 'warning'}">
+          <strong>${issue.type || 'CLS Issue'}</strong> in <code>${issue.file || 'unknown'}</code> line ${issue.line || '?'}<br>
+          ${issue.pattern || 'No pattern'}
         </div>
       `).join('')}
     </div>
