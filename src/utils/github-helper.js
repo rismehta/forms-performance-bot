@@ -245,6 +245,12 @@ export function filterResultsToPRFiles(results, prFiles) {
     }
   }
   
+  // Filter disabled fields (check if form JSON is in PR)
+  if (!hasFormJSON && filtered.disabledFields?.after?.disabledFields) {
+    filtered.disabledFields.after.disabledFields = [];
+    filtered.disabledFields.after.totalDisabledFields = 0;
+  }
+  
   // Filter rule cycles (check if form JSON is in PR)
   if (!hasFormJSON) {
     if (filtered.ruleCycles?.newIssues) {

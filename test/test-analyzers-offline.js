@@ -14,6 +14,7 @@
 import { FormAnalyzer } from '../src/analyzers/form-analyzer.js';
 import { FormEventsAnalyzer } from '../src/analyzers/form-events-analyzer.js';
 import { HiddenFieldsAnalyzer } from '../src/analyzers/hidden-fields-analyzer.js';
+import { DisabledFieldsAnalyzer } from '../src/analyzers/disabled-fields-analyzer.js';
 import { RulePerformanceAnalyzer } from '../src/analyzers/rule-performance-analyzer.js';
 import { CustomFunctionAnalyzer } from '../src/analyzers/custom-function-analyzer.js';
 import { FormHTMLAnalyzer } from '../src/analyzers/form-html-analyzer.js';
@@ -88,6 +89,7 @@ async function runTests() {
     const formAnalyzer = new FormAnalyzer(config);
     const formEventsAnalyzer = new FormEventsAnalyzer(config);
     const hiddenFieldsAnalyzer = new HiddenFieldsAnalyzer(config);
+    const disabledFieldsAnalyzer = new DisabledFieldsAnalyzer(config);
     const rulePerformanceAnalyzer = new RulePerformanceAnalyzer(config);
     const customFunctionAnalyzer = new CustomFunctionAnalyzer(config);
     const formHTMLAnalyzer = new FormHTMLAnalyzer(config);
@@ -144,6 +146,18 @@ async function runTests() {
         console.log(`  - ${issue.field}: ${issue.path} - ${issue.message}`);
       });
     }
+
+    console.log('\n═══════════════════════════════════════════════════════════\n');
+    console.log('TEST 3b: Disabled Fields Analysis\n');
+    console.log('───────────────────────────────────────────────────────────\n');
+    
+    const disabledFields = disabledFieldsAnalyzer.analyze(mockFormJSON, mockJSFiles);
+    console.log('Total Disabled Fields:', disabledFields.totalDisabledFields);
+    if (disabledFields.disabledFields && disabledFields.disabledFields.length > 0) {
+      console.log('Fields Found:', disabledFields.disabledFields.map(f => `${f.name} (${f.source || f.sources?.join(',')})`).join(', '));
+    }
+    console.log('Disabled in JSON:', disabledFields.disabledInJson ?? 0);
+    console.log('Disabled via Rules:', disabledFields.disabledViaRules ?? 0);
 
     console.log('\n═══════════════════════════════════════════════════════════\n');
     console.log('TEST 4: Rule Cycle Detection\n');
@@ -230,6 +244,7 @@ async function runTests() {
     console.log('  - Form Structure:', formStructure.issues.length);
     console.log('  - Form Events:', formEvents.issues.length);
     console.log('  - Hidden Fields:', hiddenFields.issues.length);
+    console.log('  - Disabled Fields (informational):', disabledFields.totalDisabledFields);
     console.log('  - Rule Cycles:', ruleCycles.issues?.length || 0);
     console.log('  - Custom Functions:', customFunctions.issues.length);
     console.log('  - Form HTML:', htmlAnalysis.issues.length);
@@ -257,6 +272,7 @@ async function runTests() {
       formStructure,
       formEvents,
       hiddenFields,
+      disabledFields,
       ruleCycles,
       customFunctions,
       htmlAnalysis,
@@ -295,6 +311,13 @@ async function runTests() {
         after: hiddenFields,
         delta: {},
         newIssues: hiddenFields.issues,
+        resolvedIssues: []
+      },
+      disabledFields: {
+        before: disabledFields,
+        after: disabledFields,
+        delta: {},
+        newIssues: [],
         resolvedIssues: []
       },
       ruleCycles: {

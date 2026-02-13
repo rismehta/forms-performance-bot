@@ -173788,6 +173788,311 @@ class HiddenFieldsAnalyzer {
 }
 
 
+;// CONCATENATED MODULE: ./src/analyzers/disabled-fields-analyzer.js
+/**
+ * Analyzes disabled fields in adaptive forms.
+ * Disabled fields do not submit their data; use readOnly when the value should be included in submission.
+ */
+
+
+class DisabledFieldsAnalyzer {
+  constructor(config = null) {
+    this.config = config;
+  }
+
+  /**
+   * Analyze form JSON and JavaScript for disabled field usage
+   * @param {Object} formJson - Form JSON object
+   * @param {Array} jsFiles - Array of {filename, content} objects
+   * @returns {Object} Analysis results
+   */
+  analyze(formJson, jsFiles = []) {
+    if (!formJson) {
+      return { error: 'No form JSON provided' };
+    }
+
+    lib_core.info(`[DisabledFields] Starting analysis with ${jsFiles.length} JS file(s)`);
+
+    const disabledInJson = this.findDisabledFieldsInJson(formJson);
+    lib_core.info(`[DisabledFields] Found ${disabledInJson.length} disabled field(s) in form JSON`);
+
+    const enabledChangesInJS = this.analyzeJSForEnabledChanges(jsFiles);
+    const jsCount = Object.keys(enabledChangesInJS).length;
+    lib_core.info(`[DisabledFields] Found enable/disable changes for ${jsCount} field identifier(s) in JS`);
+
+    const enabledChangesInEvents = this.analyzeEventsForEnabledChanges(formJson);
+    const eventsCount = Object.keys(enabledChangesInEvents).length;
+    lib_core.info(`[DisabledFields] Found enable/disable changes for ${eventsCount} field identifier(s) in events/rules`);
+
+    const disabledViaRules = this.findDisabledViaRules(formJson);
+
+    const allDisabled = this.mergeDisabledSources(
+      disabledInJson,
+      enabledChangesInJS,
+      enabledChangesInEvents,
+      disabledViaRules
+    );
+
+    return {
+      totalDisabledFields: allDisabled.length,
+      disabledFields: allDisabled,
+      disabledInJson: disabledInJson.length,
+      disabledViaRules: disabledViaRules.length,
+      enabledChangesInJS,
+      enabledChangesInEvents,
+    };
+  }
+
+  /**
+   * Find all fields with enabled === false in form JSON
+   */
+  findDisabledFieldsInJson(node, fields = [], path = '') {
+    if (!node) return fields;
+
+    const isDisabled = node.enabled === false || node.properties?.enabled === false;
+    const hasEnabledRule = node.rules?.enabled !== undefined;
+    const hasEnabledEvent =
+      node.events &&
+      Object.keys(node.events).some(
+        (event) =>
+          typeof node.events[event] === 'string' && node.events[event].includes('enabled')
+      );
+    const isReadOnly = node.readOnly === true || node.properties?.readOnly === true;
+
+    if (isDisabled && node.name) {
+      const fieldName = node.name;
+      const fieldPath = path || fieldName;
+      fields.push({
+        name: fieldName,
+        path: fieldPath,
+        fieldType: node.fieldType,
+        source: 'json',
+        hasEnabledRule,
+        hasEnabledEvent,
+        enabledRule: node.rules?.enabled,
+        isReadOnly,
+      });
+    }
+
+    if (node.items && Array.isArray(node.items)) {
+      node.items.forEach((child, index) => {
+        const childPath = child?.name
+          ? (path ? `${path}.${child.name}` : child.name)
+          : (path ? `${path}.items[${index}]` : `items[${index}]`);
+        this.findDisabledFieldsInJson(child, fields, childPath);
+      });
+    }
+    if (node[':items']) {
+      Object.entries(node[':items']).forEach(([key, child]) => {
+        const childPath = child?.name
+          ? (path ? `${path}.${child.name}` : child.name)
+          : (path ? `${path}.${key}` : key);
+        this.findDisabledFieldsInJson(child, fields, childPath);
+      });
+    }
+    return fields;
+  }
+
+  /**
+   * Find fields that are disabled via fd:rules (setProperty with enabled: false)
+   */
+  findDisabledViaRules(formJson) {
+    const disabledByRule = [];
+    const traverse = (node, path = '') => {
+      if (!node) return;
+      const rules = node.properties?.['fd:rules'] || node.rules;
+      if (rules && typeof rules === 'object') {
+        const ruleStr = JSON.stringify(rules);
+        if (/enabled\s*:\s*false\s*\(\)|enabled\s*:\s*false\b/i.test(ruleStr)) {
+          if (node.name) {
+            const fieldPath = path || node.name;
+            disabledByRule.push({
+              name: node.name,
+              path: fieldPath,
+              fieldType: node.fieldType,
+              source: 'rules',
+            });
+          }
+        }
+      }
+      if (node[':items']) {
+        Object.entries(node[':items']).forEach(([key, child]) => {
+          const childPath = child?.name
+            ? (path ? `${path}.${child.name}` : child.name)
+            : (path ? `${path}.${key}` : key);
+          traverse(child, childPath);
+        });
+      }
+      if (node.items && Array.isArray(node.items)) {
+        node.items.forEach((child, index) => {
+          const childPath = child?.name
+            ? (path ? `${path}.${child.name}` : child.name)
+            : (path ? `${path}.items[${index}]` : `items[${index}]`);
+          traverse(child, childPath);
+        });
+      }
+    };
+    traverse(formJson);
+    return disabledByRule;
+  }
+
+  /**
+   * Analyze events for setProperty / dispatchEvent that change enabled
+   */
+  analyzeEventsForEnabledChanges(formJson) {
+    const changes = {};
+    const hasEnabledChange = /enabled\s*:\s*(true|false)\s*\(\)/;
+    const targetPathPattern = /dispatchEvent\s*\(\s*['"]?([^'",\s][^'",]*?)['"]?\s*,/;
+
+    const traverse = (node) => {
+      if (!node) return;
+      if (node.events && typeof node.events === 'object') {
+        Object.entries(node.events).forEach(([eventType, handlers]) => {
+          if (!Array.isArray(handlers)) return;
+          handlers.forEach((handler) => {
+            if (typeof handler !== 'string') return;
+            if (handler.includes('dispatchEvent') && hasEnabledChange.test(handler)) {
+              const targetMatch = handler.match(targetPathPattern);
+              const enabledMatch = handler.match(/enabled\s*:\s*(true|false)\s*\(\)/);
+              if (targetMatch && enabledMatch) {
+                const targetPath = this.normalizeEventPath(targetMatch[1].trim());
+                const enabledValue = enabledMatch[1].toLowerCase() === 'true';
+                if (!changes[targetPath]) {
+                  changes[targetPath] = { madeEnabled: false, madeDisabled: false, rules: [] };
+                }
+                changes[targetPath].rules.push(handler);
+                if (enabledValue) changes[targetPath].madeEnabled = true;
+                else changes[targetPath].madeDisabled = true;
+              }
+            }
+          });
+        });
+      }
+      if (node[':items']) Object.values(node[':items']).forEach(traverse);
+      if (node.items && Array.isArray(node.items)) node.items.forEach(traverse);
+    };
+    traverse(formJson);
+    return changes;
+  }
+
+  /**
+   * Analyze JavaScript for setProperty / direct assignment that change enabled
+   */
+  analyzeJSForEnabledChanges(jsFiles) {
+    const changes = {};
+    jsFiles.forEach((file) => {
+      const { filename, content } = file;
+      const setPropertyPattern =
+        /globals\.functions\.setProperty\s*\(\s*globals\.form(?:\?\.)?([a-zA-Z0-9_.?]+)\s*,\s*\{[^}]*enabled\s*:\s*(true|false)[^}]*\}/g;
+      let match;
+      while ((match = setPropertyPattern.exec(content)) !== null) {
+        const fieldPath = match[1];
+        const enabledValue = match[2] === 'true';
+        const pathSegments = fieldPath.split(/[.?]/).filter(Boolean);
+        const fieldName = pathSegments[pathSegments.length - 1];
+        const fullPath = pathSegments.join('.');
+        [fieldName, fullPath].forEach((key) => {
+          if (!key) return;
+          if (!changes[key]) {
+            changes[key] = { files: [], madeEnabled: false, madeDisabled: false };
+          }
+          changes[key].files.push({
+            filename,
+            enabled: enabledValue,
+            line: this.getLineNumber(content, match.index),
+          });
+          if (enabledValue) changes[key].madeEnabled = true;
+          else changes[key].madeDisabled = true;
+        });
+      }
+      const directPattern = /globals\.form(?:\?\.)?([a-zA-Z0-9_.?]+)\.enabled\s*=\s*(true|false)/g;
+      while ((match = directPattern.exec(content)) !== null) {
+        const fieldPath = match[1];
+        const enabledValue = match[2] === 'true';
+        const pathSegments = fieldPath.split(/[.?]/).filter(Boolean);
+        const fieldName = pathSegments[pathSegments.length - 1];
+        const fullPath = pathSegments.join('.');
+        [fieldName, fullPath].forEach((key) => {
+          if (!key) return;
+          if (!changes[key]) {
+            changes[key] = { files: [], madeEnabled: false, madeDisabled: false };
+          }
+          changes[key].files.push({
+            filename,
+            enabled: enabledValue,
+            line: this.getLineNumber(content, match.index),
+          });
+          if (enabledValue) changes[key].madeEnabled = true;
+          else changes[key].madeDisabled = true;
+        });
+      }
+    });
+    return changes;
+  }
+
+  getLineNumber(content, index) {
+    return content.substring(0, index).split('\n').length;
+  }
+
+  normalizeEventPath(path) {
+    return path.replace(/^\$form\.?/, '').replace(/\?\./g, '.');
+  }
+
+  /**
+   * Merge disabled fields from JSON, rules, and optionally from JS/events (fields only disabled in script/rule)
+   */
+  mergeDisabledSources(disabledInJson, enabledChangesInJS, enabledChangesInEvents, disabledViaRules) {
+    const byPath = new Map();
+    disabledInJson.forEach((f) => {
+      byPath.set(f.path, { ...f, source: 'json', sources: ['json'] });
+    });
+    disabledViaRules.forEach((f) => {
+      const existing = byPath.get(f.path);
+      if (existing) {
+        if (!existing.sources.includes('rules')) existing.sources.push('rules');
+      } else {
+        byPath.set(f.path, { ...f, sources: ['rules'] });
+      }
+    });
+    const onlyInScriptOrEvents = new Set();
+    [...Object.entries(enabledChangesInJS), ...Object.entries(enabledChangesInEvents)].forEach(
+      ([key, data]) => {
+        if (data.madeDisabled && !byPath.has(key)) {
+          const pathSegments = key.split('.');
+          const name = pathSegments[pathSegments.length - 1];
+          if (!byPath.has(name)) onlyInScriptOrEvents.add(key);
+        }
+      }
+    );
+    onlyInScriptOrEvents.forEach((path) => {
+      const pathSegments = path.split('.');
+      const name = pathSegments[pathSegments.length - 1];
+      if (!byPath.has(path) && !byPath.has(name)) {
+        byPath.set(path, {
+          name,
+          path,
+          fieldType: 'unknown',
+          source: 'rules_or_script',
+          sources: ['rules_or_script'],
+        });
+      }
+    });
+    return Array.from(byPath.values());
+  }
+
+  compare(beforeData, afterData) {
+    return {
+      before: beforeData,
+      after: afterData,
+      delta: {
+        disabledFields: (afterData.totalDisabledFields || 0) - (beforeData.totalDisabledFields || 0),
+      },
+      newIssues: [],
+      resolvedIssues: [],
+    };
+  }
+}
+
 // EXTERNAL MODULE: ./node_modules/@aemforms/af-core/lib/index.js
 var af_core_lib = __nccwpck_require__(39866);
 // EXTERNAL MODULE: external "crypto"
@@ -189129,6 +189434,7 @@ class HTMLReporter {
     ${this.buildFormStructureSection(results)}
     ${this.buildFormEventsSection(results)}
     ${this.buildHiddenFieldsSection(results)}
+    ${this.buildDisabledFieldsSection(results)}
     ${this.buildRuleCyclesSection(results)}
     ${this.buildFormHTMLSection(results)}
     ${this.buildFormCSSSection(results)}
@@ -189366,6 +189672,33 @@ class HTMLReporter {
       </div>
       
       <p><strong>Recommendation:</strong> Use <strong>Visual Rule Editor</strong> to replace hidden fields with Form Variables (<code>setVariable()</code> instead of field-based storage). Remove the hidden fields from form JSON. Hidden fields that are never shown bloat the DOM (each adds ~50-100 bytes) and slow down rendering. Configure state management via the rule editor's variable actions.</p>
+    </div>`;
+  }
+
+  buildDisabledFieldsSection(results) {
+    const data = results.disabledFields?.after;
+    if (!data || !data.disabledFields || data.disabledFields.length === 0) {
+      return '<div class="section"><h2> Disabled Fields</h2><p>No disabled fields detected</p></div>';
+    }
+
+    const fields = data.disabledFields;
+    const sourceLabel = (s) => (Array.isArray(s) ? s.join(', ') : (s || 'json'));
+
+    return `
+    <div class="section">
+      <h2> Disabled Fields (${data.totalDisabledFields})</h2>
+      <p><strong>Important:</strong> Disabled fields do <strong>not</strong> submit their values when the form is submitted. If you need the value to be included in the submission (e.g. for display-only or pre-filled data), use <strong>readOnly</strong> instead of disabled.</p>
+      <p><strong>Recommendation:</strong> Use <strong>readOnly</strong> when the field should be visible and its value must be sent with the form. Use <strong>disabled</strong> only when the field must be non-editable and its value intentionally excluded from submission.</p>
+      <h3>Fields that are disabled (in JSON, rules, or script)</h3>
+      <div class="issue-list" style="border: 1px solid #30363d; padding: 15px; border-radius: 6px; background: #0d1117; margin-bottom: 20px;">
+        ${fields.map((f, idx) => `
+          <div style="margin-bottom: 8px;">
+            <strong>${idx + 1}.</strong> <code style="background: #161b22; padding: 2px 6px; border-radius: 3px; color: #79c0ff;">${f.name}</code>
+            ${f.path !== f.name ? ` <span style="color: #8b949e;">(${f.path})</span>` : ''}
+            <span style="color: #8b949e; font-size: 0.9em;"> — source: ${sourceLabel(f.sources || f.source)}</span>
+          </div>
+        `).join('')}
+      </div>
     </div>`;
   }
 
@@ -189991,6 +190324,19 @@ class HTMLReporter {
         <div class="issue-item ${issue.severity || 'warning'}">
           <strong>${issue.type || 'Form Issue'}</strong><br>
           ${issue.message || 'No description'}
+        </div>
+      `).join('')}
+    </div>
+    ` : ''}
+    
+    ${(results.disabledFields?.totalDisabledFields || 0) > 0 ? `
+    <h2>Disabled Fields (${results.disabledFields.totalDisabledFields})</h2>
+    <p><strong>Important:</strong> Disabled fields do <strong>not</strong> submit their values when the form is submitted. If you need the value included in submission, use <strong>readOnly</strong> instead of disabled.</p>
+    <p><strong>Recommendation:</strong> Use <strong>readOnly</strong> when the field should be visible and its value must be sent with the form. Use <strong>disabled</strong> only when the value must be excluded from submission.</p>
+    <div class="issue-list">
+      ${(results.disabledFields.disabledFields || []).map((f, idx) => `
+        <div class="issue-item warning">
+          <strong>${idx + 1}.</strong> <code>${f.name}</code>${f.path !== f.name ? ` (${f.path})` : ''} — source: ${Array.isArray(f.sources) ? f.sources.join(', ') : (f.source || 'json')}
         </div>
       `).join('')}
     </div>
@@ -190729,6 +191075,12 @@ function filterResultsToPRFiles(results, prFiles) {
     }
   }
   
+  // Filter disabled fields (check if form JSON is in PR)
+  if (!hasFormJSON && filtered.disabledFields?.after?.disabledFields) {
+    filtered.disabledFields.after.disabledFields = [];
+    filtered.disabledFields.after.totalDisabledFields = 0;
+  }
+  
   // Filter rule cycles (check if form JSON is in PR)
   if (!hasFormJSON) {
     if (filtered.ruleCycles?.newIssues) {
@@ -191003,6 +191355,7 @@ async function loadConfig(configPath = null) {
 
 
 
+
 /**
  * Get tokens for different operations
  * - GITHUB_TOKEN (default): For Checks API, PR comments, and reading files
@@ -191175,6 +191528,7 @@ async function runPRMode(context, octokit, patOctokit, config) {
   let beforeRuleCycles, afterRuleCycles, formHTMLAnalysis, cssAnalysis;
   let beforeCustomFunctions, afterCustomFunctions;
   let runtimeCLSAnalysis;
+  let disabledFieldsAnalysis;
   
   if (hasUrls) {
     // Full analysis with form JSON
@@ -191184,6 +191538,7 @@ async function runPRMode(context, octokit, patOctokit, config) {
     const formAnalyzer = new FormAnalyzer(config);
     const formEventsAnalyzer = new FormEventsAnalyzer(config);
     const hiddenFieldsAnalyzer = new HiddenFieldsAnalyzer(config);
+    const disabledFieldsAnalyzer = new DisabledFieldsAnalyzer(config);
     const rulePerformanceAnalyzer = new RulePerformanceAnalyzer(config);
     const formHTMLAnalyzer = new FormHTMLAnalyzer(config);
     
@@ -191191,6 +191546,7 @@ async function runPRMode(context, octokit, patOctokit, config) {
       fsa,
       fea,
       { beforeHiddenFields: bhf, afterHiddenFields: ahf },
+      { beforeDisabledFields: bdf, afterDisabledFields: adf },
       { beforeRuleCycles: brc, afterRuleCycles: arc },
       fha,
       css,
@@ -191207,6 +191563,12 @@ async function runPRMode(context, octokit, patOctokit, config) {
       Promise.resolve({
         beforeHiddenFields: hiddenFieldsAnalyzer.analyze(beforeData.formJson, jsFiles),
         afterHiddenFields: hiddenFieldsAnalyzer.analyze(afterData.formJson, jsFiles)
+      }),
+      
+      // 3b. Disabled Fields (synchronous)
+      Promise.resolve({
+        beforeDisabledFields: disabledFieldsAnalyzer.analyze(beforeData.formJson, jsFiles),
+        afterDisabledFields: disabledFieldsAnalyzer.analyze(afterData.formJson, jsFiles)
       }),
       
       // 4. Rule Cycles (async - uses real function implementations from checked-out repo)
@@ -191261,6 +191623,7 @@ async function runPRMode(context, octokit, patOctokit, config) {
     formEventsAnalysis = fea;
     beforeHiddenFields = bhf;
     afterHiddenFields = ahf;
+    disabledFieldsAnalysis = disabledFieldsAnalyzer.compare(bdf, adf);
     beforeRuleCycles = brc;
     afterRuleCycles = arc;
     formHTMLAnalysis = fha;
@@ -191292,6 +191655,7 @@ async function runPRMode(context, octokit, patOctokit, config) {
     formEventsAnalysis = { after: { apiCallsInInitialize: [] }, newIssues: [], resolvedIssues: [] };
     beforeHiddenFields = { unnecessaryHiddenFields: 0, fields: [] };
     afterHiddenFields = { unnecessaryHiddenFields: 0, fields: [] };
+    disabledFieldsAnalysis = { after: { totalDisabledFields: 0, disabledFields: [] }, before: { totalDisabledFields: 0, disabledFields: [] } };
     beforeRuleCycles = { totalRules: 0, cycles: 0, slowRuleCount: 0, runtimeErrors: [] };
     afterRuleCycles = { totalRules: 0, cycles: 0, slowRuleCount: 0, runtimeErrors: [] };
     formHTMLAnalysis = { after: { issues: [] }, newIssues: [], resolvedIssues: [] };
@@ -191420,6 +191784,7 @@ async function runPRMode(context, octokit, patOctokit, config) {
     formStructure: formStructureAnalysis,
     formEvents: formEventsAnalysis,
     hiddenFields: hiddenFieldsAnalysis,
+    disabledFields: disabledFieldsAnalysis,
     ruleCycles: ruleCycleAnalysis,
     formHTML: formHTMLAnalysis,
     formCSS: formCSSAnalysis,
@@ -191576,6 +191941,7 @@ async function runScheduledMode(context, octokit, patOctokit, config) {
   const formAnalyzer = new FormAnalyzer(config);
   const formEventsAnalyzer = new FormEventsAnalyzer(config);
   const hiddenFieldsAnalyzer = new HiddenFieldsAnalyzer(config);
+  const disabledFieldsAnalyzer = new DisabledFieldsAnalyzer(config);
   const formHTMLAnalyzer = new FormHTMLAnalyzer(config);
   const urlAnalyzer = new URLAnalyzer();
   
@@ -191613,6 +191979,7 @@ async function runScheduledMode(context, octokit, patOctokit, config) {
         customFunctions: { issues: [] },
         rules: { issues: [] },
         forms: { issues: [] },
+        disabledFields: { totalDisabledFields: 0, disabledFields: [] },
         html: null,
         performance: null,
         formJson: null,
@@ -191652,6 +192019,11 @@ async function runScheduledMode(context, octokit, patOctokit, config) {
           formResult.forms.issues.push(...hiddenFieldsAnalysis.issues);
         }
         lib_core.info(`    Found ${hiddenFieldsAnalysis.issues?.length || 0} hidden field issues`);
+        
+        lib_core.info('  Analyzing disabled fields...');
+        const disabledFieldsAnalysisPerForm = disabledFieldsAnalyzer.analyze(urlData.formJson, jsFiles);
+        formResult.disabledFields = disabledFieldsAnalysisPerForm;
+        lib_core.info(`    Found ${disabledFieldsAnalysisPerForm.totalDisabledFields || 0} disabled field(s)`);
         
         lib_core.info('  Analyzing rule cycles...');
         const ruleCyclesAnalysis = await rulePerformanceAnalyzer.analyze(urlData.formJson);

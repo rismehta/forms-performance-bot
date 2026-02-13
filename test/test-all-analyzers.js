@@ -14,6 +14,7 @@
 import { FormAnalyzer } from '../src/analyzers/form-analyzer.js';
 import { FormEventsAnalyzer } from '../src/analyzers/form-events-analyzer.js';
 import { HiddenFieldsAnalyzer } from '../src/analyzers/hidden-fields-analyzer.js';
+import { DisabledFieldsAnalyzer } from '../src/analyzers/disabled-fields-analyzer.js';
 import { RulePerformanceAnalyzer } from '../src/analyzers/rule-performance-analyzer.js';
 import { CustomFunctionAnalyzer } from '../src/analyzers/custom-function-analyzer.js';
 import { FormHTMLAnalyzer } from '../src/analyzers/form-html-analyzer.js';
@@ -141,6 +142,20 @@ async function testAnalyzers(config, fixtures) {
     fail('HiddenFieldsAnalyzer', e);
   }
   
+  // 3b. Disabled Fields Analyzer
+  try {
+    const analyzer = new DisabledFieldsAnalyzer(config);
+    const result = analyzer.analyze(mockFormJSON, mockJSFiles);
+    if (result && typeof result.totalDisabledFields === 'number') {
+      pass('DisabledFieldsAnalyzer', `${result.totalDisabledFields} disabled fields`);
+      results.disabledFields = result;
+    } else {
+      throw new Error('Invalid result structure');
+    }
+  } catch (e) {
+    fail('DisabledFieldsAnalyzer', e);
+  }
+  
   // 4. Rule Performance Analyzer
   try {
     const analyzer = new RulePerformanceAnalyzer(config);
@@ -238,6 +253,13 @@ async function testPRModeReporter(analyzerResults) {
       before: analyzerResults.hiddenFields,
       after: analyzerResults.hiddenFields,
       newIssues: analyzerResults.hiddenFields?.issues || [],
+      resolvedIssues: []
+    },
+    disabledFields: {
+      before: analyzerResults.disabledFields || { totalDisabledFields: 0, disabledFields: [] },
+      after: analyzerResults.disabledFields || { totalDisabledFields: 0, disabledFields: [] },
+      delta: { disabledFields: 0 },
+      newIssues: [],
       resolvedIssues: []
     },
     ruleCycles: {

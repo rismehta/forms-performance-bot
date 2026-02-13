@@ -342,6 +342,7 @@ export class HTMLReporter {
     ${this.buildFormStructureSection(results)}
     ${this.buildFormEventsSection(results)}
     ${this.buildHiddenFieldsSection(results)}
+    ${this.buildDisabledFieldsSection(results)}
     ${this.buildRuleCyclesSection(results)}
     ${this.buildFormHTMLSection(results)}
     ${this.buildFormCSSSection(results)}
@@ -579,6 +580,33 @@ export class HTMLReporter {
       </div>
       
       <p><strong>Recommendation:</strong> Use <strong>Visual Rule Editor</strong> to replace hidden fields with Form Variables (<code>setVariable()</code> instead of field-based storage). Remove the hidden fields from form JSON. Hidden fields that are never shown bloat the DOM (each adds ~50-100 bytes) and slow down rendering. Configure state management via the rule editor's variable actions.</p>
+    </div>`;
+  }
+
+  buildDisabledFieldsSection(results) {
+    const data = results.disabledFields?.after;
+    if (!data || !data.disabledFields || data.disabledFields.length === 0) {
+      return '<div class="section"><h2> Disabled Fields</h2><p>No disabled fields detected</p></div>';
+    }
+
+    const fields = data.disabledFields;
+    const sourceLabel = (s) => (Array.isArray(s) ? s.join(', ') : (s || 'json'));
+
+    return `
+    <div class="section">
+      <h2> Disabled Fields (${data.totalDisabledFields})</h2>
+      <p><strong>Important:</strong> Disabled fields do <strong>not</strong> submit their values when the form is submitted. If you need the value to be included in the submission (e.g. for display-only or pre-filled data), use <strong>readOnly</strong> instead of disabled.</p>
+      <p><strong>Recommendation:</strong> Use <strong>readOnly</strong> when the field should be visible and its value must be sent with the form. Use <strong>disabled</strong> only when the field must be non-editable and its value intentionally excluded from submission.</p>
+      <h3>Fields that are disabled (in JSON, rules, or script)</h3>
+      <div class="issue-list" style="border: 1px solid #30363d; padding: 15px; border-radius: 6px; background: #0d1117; margin-bottom: 20px;">
+        ${fields.map((f, idx) => `
+          <div style="margin-bottom: 8px;">
+            <strong>${idx + 1}.</strong> <code style="background: #161b22; padding: 2px 6px; border-radius: 3px; color: #79c0ff;">${f.name}</code>
+            ${f.path !== f.name ? ` <span style="color: #8b949e;">(${f.path})</span>` : ''}
+            <span style="color: #8b949e; font-size: 0.9em;"> — source: ${sourceLabel(f.sources || f.source)}</span>
+          </div>
+        `).join('')}
+      </div>
     </div>`;
   }
 
@@ -1204,6 +1232,19 @@ export class HTMLReporter {
         <div class="issue-item ${issue.severity || 'warning'}">
           <strong>${issue.type || 'Form Issue'}</strong><br>
           ${issue.message || 'No description'}
+        </div>
+      `).join('')}
+    </div>
+    ` : ''}
+    
+    ${(results.disabledFields?.totalDisabledFields || 0) > 0 ? `
+    <h2>Disabled Fields (${results.disabledFields.totalDisabledFields})</h2>
+    <p><strong>Important:</strong> Disabled fields do <strong>not</strong> submit their values when the form is submitted. If you need the value included in submission, use <strong>readOnly</strong> instead of disabled.</p>
+    <p><strong>Recommendation:</strong> Use <strong>readOnly</strong> when the field should be visible and its value must be sent with the form. Use <strong>disabled</strong> only when the value must be excluded from submission.</p>
+    <div class="issue-list">
+      ${(results.disabledFields.disabledFields || []).map((f, idx) => `
+        <div class="issue-item warning">
+          <strong>${idx + 1}.</strong> <code>${f.name}</code>${f.path !== f.name ? ` (${f.path})` : ''} — source: ${Array.isArray(f.sources) ? f.sources.join(', ') : (f.source || 'json')}
         </div>
       `).join('')}
     </div>

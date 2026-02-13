@@ -9,7 +9,7 @@
     "build": "npm run test:build && ncc build src/index.js -o dist --license licenses.txt",
     "build:skip-test": "ncc build src/index.js -o dist --license licenses.txt",
     "test": "node test/run-test.js --sample",
-    "test:build": "node test/test-all-analyzers.js",
+    "test:build": "node test/test-all-analyzers.js && node test/test-disabled-fields.js",
     "test:live": "node test/run-test.js",
     "test:cls": "node test/test-runtime-cls.js",
     "analyze-events": "node src/cli/event-impact-cli.js"

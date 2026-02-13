@@ -6,6 +6,7 @@ import { URLAnalyzer } from './analyzers/url-analyzer.js';
 import { FormAnalyzer } from './analyzers/form-analyzer.js';
 import { FormEventsAnalyzer } from './analyzers/form-events-analyzer.js';
 import { HiddenFieldsAnalyzer } from './analyzers/hidden-fields-analyzer.js';
+import { DisabledFieldsAnalyzer } from './analyzers/disabled-fields-analyzer.js';
 import { RulePerformanceAnalyzer } from './analyzers/rule-performance-analyzer.js';
 import { FormHTMLAnalyzer } from './analyzers/form-html-analyzer.js';
 import { FormCSSAnalyzer } from './analyzers/form-css-analyzer.js';
@@ -189,6 +190,7 @@ async function runPRMode(context, octokit, patOctokit, config) {
   let beforeRuleCycles, afterRuleCycles, formHTMLAnalysis, cssAnalysis;
   let beforeCustomFunctions, afterCustomFunctions;
   let runtimeCLSAnalysis;
+  let disabledFieldsAnalysis;
   
   if (hasUrls) {
     // Full analysis with form JSON
@@ -198,6 +200,7 @@ async function runPRMode(context, octokit, patOctokit, config) {
     const formAnalyzer = new FormAnalyzer(config);
     const formEventsAnalyzer = new FormEventsAnalyzer(config);
     const hiddenFieldsAnalyzer = new HiddenFieldsAnalyzer(config);
+    const disabledFieldsAnalyzer = new DisabledFieldsAnalyzer(config);
     const rulePerformanceAnalyzer = new RulePerformanceAnalyzer(config);
     const formHTMLAnalyzer = new FormHTMLAnalyzer(config);
     
@@ -205,6 +208,7 @@ async function runPRMode(context, octokit, patOctokit, config) {
       fsa,
       fea,
       { beforeHiddenFields: bhf, afterHiddenFields: ahf },
+      { beforeDisabledFields: bdf, afterDisabledFields: adf },
       { beforeRuleCycles: brc, afterRuleCycles: arc },
       fha,
       css,
@@ -221,6 +225,12 @@ async function runPRMode(context, octokit, patOctokit, config) {
       Promise.resolve({
         beforeHiddenFields: hiddenFieldsAnalyzer.analyze(beforeData.formJson, jsFiles),
         afterHiddenFields: hiddenFieldsAnalyzer.analyze(afterData.formJson, jsFiles)
+      }),
+      
+      // 3b. Disabled Fields (synchronous)
+      Promise.resolve({
+        beforeDisabledFields: disabledFieldsAnalyzer.analyze(beforeData.formJson, jsFiles),
+        afterDisabledFields: disabledFieldsAnalyzer.analyze(afterData.formJson, jsFiles)
       }),
       
       // 4. Rule Cycles (async - uses real function implementations from checked-out repo)
@@ -275,6 +285,7 @@ async function runPRMode(context, octokit, patOctokit, config) {
     formEventsAnalysis = fea;
     beforeHiddenFields = bhf;
     afterHiddenFields = ahf;
+    disabledFieldsAnalysis = disabledFieldsAnalyzer.compare(bdf, adf);
     beforeRuleCycles = brc;
     afterRuleCycles = arc;
     formHTMLAnalysis = fha;
@@ -306,6 +317,7 @@ async function runPRMode(context, octokit, patOctokit, config) {
     formEventsAnalysis = { after: { apiCallsInInitialize: [] }, newIssues: [], resolvedIssues: [] };
     beforeHiddenFields = { unnecessaryHiddenFields: 0, fields: [] };
     afterHiddenFields = { unnecessaryHiddenFields: 0, fields: [] };
+    disabledFieldsAnalysis = { after: { totalDisabledFields: 0, disabledFields: [] }, before: { totalDisabledFields: 0, disabledFields: [] } };
     beforeRuleCycles = { totalRules: 0, cycles: 0, slowRuleCount: 0, runtimeErrors: [] };
     afterRuleCycles = { totalRules: 0, cycles: 0, slowRuleCount: 0, runtimeErrors: [] };
     formHTMLAnalysis = { after: { issues: [] }, newIssues: [], resolvedIssues: [] };
@@ -434,6 +446,7 @@ async function runPRMode(context, octokit, patOctokit, config) {
     formStructure: formStructureAnalysis,
     formEvents: formEventsAnalysis,
     hiddenFields: hiddenFieldsAnalysis,
+    disabledFields: disabledFieldsAnalysis,
     ruleCycles: ruleCycleAnalysis,
     formHTML: formHTMLAnalysis,
     formCSS: formCSSAnalysis,
@@ -590,6 +603,7 @@ async function runScheduledMode(context, octokit, patOctokit, config) {
   const formAnalyzer = new FormAnalyzer(config);
   const formEventsAnalyzer = new FormEventsAnalyzer(config);
   const hiddenFieldsAnalyzer = new HiddenFieldsAnalyzer(config);
+  const disabledFieldsAnalyzer = new DisabledFieldsAnalyzer(config);
   const formHTMLAnalyzer = new FormHTMLAnalyzer(config);
   const urlAnalyzer = new URLAnalyzer();
   
@@ -627,6 +641,7 @@ async function runScheduledMode(context, octokit, patOctokit, config) {
         customFunctions: { issues: [] },
         rules: { issues: [] },
         forms: { issues: [] },
+        disabledFields: { totalDisabledFields: 0, disabledFields: [] },
         html: null,
         performance: null,
         formJson: null,
@@ -666,6 +681,11 @@ async function runScheduledMode(context, octokit, patOctokit, config) {
           formResult.forms.issues.push(...hiddenFieldsAnalysis.issues);
         }
         core.info(`    Found ${hiddenFieldsAnalysis.issues?.length || 0} hidden field issues`);
+        
+        core.info('  Analyzing disabled fields...');
+        const disabledFieldsAnalysisPerForm = disabledFieldsAnalyzer.analyze(urlData.formJson, jsFiles);
+        formResult.disabledFields = disabledFieldsAnalysisPerForm;
+        core.info(`    Found ${disabledFieldsAnalysisPerForm.totalDisabledFields || 0} disabled field(s)`);
         
         core.info('  Analyzing rule cycles...');
         const ruleCyclesAnalysis = await rulePerformanceAnalyzer.analyze(urlData.formJson);
