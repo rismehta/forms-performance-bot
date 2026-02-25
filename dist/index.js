@@ -183554,6 +183554,108 @@ class RuntimeCLSAnalyzer {
   }
 
   /**
+   * True if this node is inside a callback passed to subscribe(...).
+   * Class/style inside subscribe callbacks can cause CLS unless inside the 'change' branch.
+   */
+  isInsideSubscribeCallback(ancestors) {
+    for (let i = ancestors.length - 1; i >= 0; i--) {
+      const ancestor = ancestors[i];
+      if (ancestor.type === 'ArrowFunctionExpression' || ancestor.type === 'FunctionExpression') {
+        const parent = ancestors[i - 1];
+        if (parent?.type === 'CallExpression') {
+          const calleeName = this.getCalleeName(parent.callee);
+          if (calleeName === 'subscribe' || calleeName.endsWith('.subscribe')) {
+            return true;
+          }
+        }
+        break;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * True if test expression is (variable) === value, e.g. eventType === 'register',
+   * a === 'change', etc. Variable name can be anything. Used to detect register vs
+   * change branches in subscribe callbacks.
+   */
+  isEventTypeEquals(testNode, value) {
+    if (!testNode || typeof value !== 'string') return false;
+    if (testNode.type === 'BinaryExpression' && (testNode.operator === '===' || testNode.operator === '==')) {
+      const leftIsIdentifier = testNode.left?.type === 'Identifier';
+      const rightVal = this.getStringValue(testNode.right);
+      if (leftIsIdentifier && rightVal === value) return true;
+    }
+    return false;
+  }
+
+  /**
+   * True if this node is inside a callback passed to x.subscribe (any name: fieldModel,
+   * model, a, etc.). That callback runs on model change events, after form load — no CLS.
+   * Loop is bounded: we walk the fixed ancestors array once (root → current).
+   */
+  isInsideModelSubscribeCallback(ancestors) {
+    for (let i = ancestors.length - 1; i >= 0; i -= 1) {
+      const ancestor = ancestors[i];
+      if (ancestor.type === 'ArrowFunctionExpression' || ancestor.type === 'FunctionExpression') {
+        const parent = ancestors[i - 1];
+        if (parent?.type === 'CallExpression') {
+          const callee = parent.callee;
+          if (callee?.type === 'MemberExpression' && callee.property?.name === 'subscribe') {
+            return true;
+          }
+          // Top-level subscribe(el, formId, cb): keep looking for inner model.subscribe
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * True if this node is inside the "change" branch of a subscribe callback
+   * (e.g. inside "if (eventType === 'change') { ... }" or "else if (eventType === 'change') { ... }").
+   * Class/style in the change branch runs after form load, so no CLS - do not flag.
+   */
+  isInsideSubscribeChangeBranch(ancestors) {
+    if (!this.isInsideSubscribeCallback(ancestors)) return false;
+    for (let i = 0; i < ancestors.length; i++) {
+      const ancestor = ancestors[i];
+      if (ancestor.type === 'IfStatement') {
+        const ifStmt = ancestor;
+        if (!this.isEventTypeEquals(ifStmt.test, 'change')) continue;
+        const childInPath = ancestors[i + 1];
+        if (!childInPath) continue;
+        if (childInPath === ifStmt.consequent) return true;
+        if (ifStmt.alternate && childInPath === ifStmt.alternate) {
+          if (ifStmt.alternate.type === 'IfStatement' && this.isEventTypeEquals(ifStmt.alternate.test, 'change')) return true;
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * True if this node is in the direct body of an init function (e.g. decorate),
+   * not inside a nested callback. Class/style in decorate's direct body is allowed (one-time setup).
+   */
+  isInDirectBodyOfInitFunction(ancestors) {
+    const initContext = this.getInitializationContext(ancestors);
+    if (!initContext) return false;
+
+    for (let i = ancestors.length - 1; i >= 0; i--) {
+      const ancestor = ancestors[i];
+      if (ancestor.type === 'FunctionDeclaration' && ancestor.id?.name === initContext) {
+        return true;
+      }
+      if (ancestor.type === 'ArrowFunctionExpression' || ancestor.type === 'FunctionExpression') {
+        return false;
+      }
+    }
+    return false;
+  }
+
+  /**
    * Detect problematic call expressions
    */
   detectCallExpression(node, ancestors, content, context, issues) {
@@ -183642,6 +183744,18 @@ class RuntimeCLSAnalyzer {
       if (['add', 'remove', 'toggle'].includes(method)) {
         // Check if it's classList
         if (this.isClassListMethod(node.callee)) {
+          // Allow in direct body of decorate (one-time setup). Flag inside subscribe and other callbacks.
+          if (this.isInDirectBodyOfInitFunction(ancestors)) {
+            return;
+          }
+          // Allow in subscribe's change branch (runs after form load, no CLS). Flag in register branch.
+          if (this.isInsideSubscribeChangeBranch(ancestors)) {
+            return;
+          }
+          // Allow inside model.subscribe / fieldModel.subscribe callback (runs on model change, after load).
+          if (this.isInsideModelSubscribeCallback(ancestors)) {
+            return;
+          }
           // Check if the class name is in the allowlist
           const className = this.getClassNameArgument(node);
           if (className && !this.isAllowedStateClass(className)) {
@@ -183737,6 +183851,19 @@ class RuntimeCLSAnalyzer {
     
     if (!shouldFlag) {
       return; // Not in initialization context
+    }
+
+    // Allow style/class in direct body of decorate (one-time setup). Flag inside subscribe and other callbacks.
+    if (this.isInDirectBodyOfInitFunction(ancestors)) {
+      return;
+    }
+    // Allow in subscribe's change branch (runs after form load, no CLS). Flag in register branch.
+    if (this.isInsideSubscribeChangeBranch(ancestors)) {
+      return;
+    }
+    // Allow inside model.subscribe / fieldModel.subscribe callback (runs on model change, after load).
+    if (this.isInsideModelSubscribeCallback(ancestors)) {
+      return;
     }
 
     const left = node.left;
@@ -187722,9 +187849,9 @@ class FormPRReporter {
     const sections = [];
 
     // Header with issue count
-    // Count from totalVisibleComments (accurately reflects what user sees in PR)
-    // Falls back to counting from results.*.newIssues if totalVisibleComments not provided
-    const critical = this.countCriticalIssues(results, urls.totalVisibleComments);
+    // Prefer criticalCountFromInlineStep when we ran the inline step (matches posted + skipped comments)
+    // Else totalVisibleComments, else fallback to results.*.newIssues
+    const critical = this.countCriticalIssues(results, urls.criticalCountFromInlineStep ?? urls.totalVisibleComments);
     
     if (critical === 0) {
       sections.push('## Performance Analysis\n');
@@ -188875,25 +189002,16 @@ class FormPRReporter {
   /**
    * Count critical issues (counts only issues that are actually visible in PR as inline comments)
    * 
-   * IMPORTANT: Use totalVisibleComments if available - this is the MOST ACCURATE count.
-   * Why? Because filterResultsToPRFiles() only filters by FILE, not by LINE.
-   * GitHub rejects comments on lines not in the diff, so totalVisibleComments = actual visible issues.
-   * 
-   * Example (without totalVisibleComments):
-   * - results.*.newIssues = 21 issues in file (file is in PR)
-   * - Try to post 21 comments → GitHub rejects 18 (lines not in diff)
-   * - Main comment says "21 issues" but only 3 are visible ❌
-   * 
-   * Example (with totalVisibleComments):
-   * - totalVisibleComments = 3 (1 posted + 2 existing)
-   * - Main comment says "3 issues" → matches what user sees ✓
-   * 
+   * IMPORTANT: Use criticalCountFromInlineStep or totalVisibleComments when available - that is the
+   * count from the inline comment step (posted + skipped), so the PR body matches what users see.
+   * Fallback (results.*.newIssues) can overcount because it filters by FILE only, not by LINE.
+   *
    * @param {Object} results - All analyzer results
-   * @param {number} totalVisibleComments - Count of inline comments actually visible in PR (if available)
+   * @param {number} totalVisibleComments - Count from inline step (if available); use for header
    * @returns {number} Total count of critical issues visible in PR
    */
   countCriticalIssues(results, totalVisibleComments = null) {
-    // If we have totalVisibleComments, use it (most accurate)
+    // If we have a count from the inline step (or totalVisibleComments), use it for the header
     if (typeof totalVisibleComments === 'number' && totalVisibleComments >= 0) {
       return totalVisibleComments;
     }
@@ -191835,7 +191953,8 @@ async function runPRMode(context, octokit, patOctokit, config) {
   // Post inline PR review comments FIRST to know which ones succeed
   // Only count issues that have inline comments posted (files in PR diff)
   let postedInlineComments = [];
-  let totalVisibleComments = 0;
+  let totalVisibleComments = null; // null = did not run inline step; number = count from step
+  let criticalCountFromInlineStep = null; // Explicit count to show in PR body (posted + skipped)
   if (autoFixSuggestions?.enabled && autoFixSuggestions.suggestions.length > 0) {
     lib_core.info(` Posting ${autoFixSuggestions.suggestions.length} inline suggestion(s)...`);
     try {
@@ -191850,6 +191969,7 @@ async function runPRMode(context, octokit, patOctokit, config) {
       
       postedInlineComments = reviewComments;
       totalVisibleComments = totalVisible;
+      criticalCountFromInlineStep = totalVisible; // Use this for PR body so it matches inline comments
       
       if (reviewComments.length > 0) {
         lib_core.info(` Posted ${reviewComments.length} inline suggestion(s) on PR`);
@@ -191868,7 +191988,7 @@ async function runPRMode(context, octokit, patOctokit, config) {
   // Generate and post minimal PR comment (NO HTML report link in PR mode)
   // HTML reports are only for scheduled scans (full codebase analysis)
   // PR mode only shows issues in PR diff files via inline comments
-  // Count ONLY issues that are actually visible in PR (posted + skipped = total visible)
+  // Count ONLY issues that are actually visible in PR (use criticalCountFromInlineStep when we ran the step)
   const reporter = new FormPRReporter(octokit, owner, repo, prNumber);
   await reporter.generateReport(results, {
     before: urls.before,
@@ -191877,7 +191997,8 @@ async function runPRMode(context, octokit, patOctokit, config) {
     afterData,  // Include performance metrics
     autoFixSuggestions, // Include AI-generated fix suggestions
     gistUrl: null, // No HTML report in PR mode
-    totalVisibleComments, // Pass total visible comments (posted + existing) for accurate counting
+    totalVisibleComments,
+    criticalCountFromInlineStep, // When set, PR body must show this count (matches inline comments)
   }, prNumber, `${owner}/${repo}`);
 
   // Fail the build if critical issues are detected
@@ -192214,12 +192335,14 @@ function detectCriticalIssues(results, totalVisibleComments = null) {
   issues: [],
   };
   
-  // If we have totalVisibleComments, use it directly (most accurate for PR mode)
-  // This represents issues that are ACTUALLY visible in the PR, not just detected
-  if (typeof totalVisibleComments === 'number' && totalVisibleComments > 0) {
-    critical.hasCritical = true;
+  // If we have totalVisibleComments from the inline step, use it (most accurate for PR mode)
+  // This represents issues that are ACTUALLY visible in the PR (posted + skipped), not just from results
+  if (typeof totalVisibleComments === 'number' && totalVisibleComments >= 0) {
     critical.count = totalVisibleComments;
-    critical.issues.push(`${totalVisibleComments} issue(s) found in PR diff (see inline comments)`);
+    critical.hasCritical = totalVisibleComments > 0;
+    if (totalVisibleComments > 0) {
+      critical.issues.push(`${totalVisibleComments} issue(s) found in PR diff (see inline comments)`);
+    }
     return critical;
   }
 
