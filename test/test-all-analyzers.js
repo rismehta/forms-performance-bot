@@ -334,7 +334,87 @@ async function testPRModeReporter(analyzerResults) {
   } catch (e) {
     fail('PR Reporter - Runtime CLS section', e);
   }
-  
+
+  // --- PR comment critical count: inline step count must drive body (fixes "body shows 3 after fixing 1") ---
+  try {
+    const reporter = new FormPRReporter(null, 'test-owner', 'test-repo', 999);
+    const resultsWithThreeIssues = {
+      ...prResults,
+      runtimeCLS: {
+        after: { issues: [] },
+        newIssues: [
+          { type: 'dynamic-class-manipulation', file: 'a.js', line: 10, severity: 'warning' },
+          { type: 'direct-style-manipulation', file: 'a.js', line: 20, severity: 'warning' },
+          { type: 'dynamic-css-loading', file: 'b.js', line: 5, severity: 'error' }
+        ],
+        resolvedIssues: []
+      }
+    };
+    const urlsBase = { before: 'https://a.aem.live/', after: 'https://b.aem.live/' };
+
+    const bodyWithInlineCount2 = reporter.buildMarkdownReport(resultsWithThreeIssues, {
+      ...urlsBase,
+      criticalCountFromInlineStep: 2,
+      totalVisibleComments: 2
+    });
+    if (!bodyWithInlineCount2.includes('2 critical issue') || bodyWithInlineCount2.includes('3 critical')) {
+      throw new Error('When criticalCountFromInlineStep=2, body must show "2 critical issues", not 3');
+    }
+    pass('PR Reporter - critical count uses criticalCountFromInlineStep (body shows 2 when inline=2)', 'OK');
+  } catch (e) {
+    fail('PR Reporter - critical count uses criticalCountFromInlineStep', e);
+  }
+
+  try {
+    const reporter = new FormPRReporter(null, 'test-owner', 'test-repo', 999);
+    const resultsWithIssues = {
+      ...prResults,
+      runtimeCLS: { after: { issues: [] }, newIssues: [{ type: 'x', file: 'f.js', line: 1, severity: 'error' }], resolvedIssues: [] }
+    };
+    const bodyWithZeroVisible = reporter.buildMarkdownReport(resultsWithIssues, {
+      before: 'https://a.aem.live/',
+      after: 'https://b.aem.live/',
+      totalVisibleComments: 0,
+      criticalCountFromInlineStep: 0
+    });
+    if (!bodyWithZeroVisible.includes('No critical issues found')) {
+      throw new Error('When criticalCountFromInlineStep=0 (or totalVisibleComments=0), body must show no critical issues');
+    }
+    pass('PR Reporter - critical count 0 shows "No critical issues found"', 'OK');
+  } catch (e) {
+    fail('PR Reporter - critical count 0 shows no issues', e);
+  }
+
+  try {
+    const reporter = new FormPRReporter(null, 'test-owner', 'test-repo', 999);
+    const resultsFallback = {
+      ...prResults,
+      runtimeCLS: {
+        after: { issues: [] },
+        newIssues: [
+          { type: 'dynamic-css-loading', file: 'x.js', line: 1, severity: 'error' },
+          { type: 'direct-style-manipulation', file: 'x.js', line: 2, severity: 'warning' }
+        ],
+        resolvedIssues: []
+      }
+    };
+    const bodyFallback = reporter.buildMarkdownReport(resultsFallback, {
+      before: 'https://a.aem.live/',
+      after: 'https://b.aem.live/'
+      // no criticalCountFromInlineStep or totalVisibleComments => use fallback from results
+    });
+    const countFromFallback = reporter.countCriticalIssues(resultsFallback, null);
+    if (countFromFallback < 1) {
+      throw new Error('Fallback count from results should be >= 1 when runtimeCLS has issues');
+    }
+    if (!bodyFallback.includes(`${countFromFallback} critical issue`) && !bodyFallback.includes('No critical issues')) {
+      throw new Error('When no inline count passed, body must use fallback count or no issues');
+    }
+    pass('PR Reporter - critical count fallback when no inline count passed', 'OK');
+  } catch (e) {
+    fail('PR Reporter - critical count fallback', e);
+  }
+
   return prResults;
 }
 

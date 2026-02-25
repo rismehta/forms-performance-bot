@@ -4,89 +4,59 @@ A GitHub Action that analyzes Adaptive Form performance by comparing before/afte
 
 ## Features
 
-- 🔍 **Form Structure Analysis**: Analyzes component count, nesting depth, and complexity
--  **Form Events Analysis**: Detects blocking API calls in initialize events
-- 👁️ **Hidden Fields Detection**: Identifies unnecessary hidden fields bloating the DOM
-- 🔄 **Rule Cycle Detection**: Finds circular dependencies in form rules using @aemforms/af-core
-- ⚙️ **Custom Function Validation**: Detects DOM access and HTTP requests in custom functions
-- 🎨 **Form HTML Analysis**: Checks lazy loading, image dimensions, blocking scripts
--  **CSS Analysis**: Detects architectural issues like background-image, @import, deep selectors
--  **AI Auto-Fix PR**: Automatically creates a PR with fixes for CSS issues, ready to merge into your branch (Azure OpenAI GPT-4.1)
--  **CWV-Optimized Reports**: Actionable insights with Core Web Vitals impact
-- ⚙️ **Configurable Thresholds**: Smart defaults, fully customizable
+- **Form structure** – Component count, nesting depth, complexity
+- **Form events** – Blocking API calls in `initialize` events (move to custom events after render)
+- **Hidden fields** – Unnecessary hidden fields that bloat the DOM (never made visible)
+- **Disabled fields** – Disabled vs readOnly; disabled fields do not submit data
+- **Rule performance** – Circular dependencies (infinite loops) and slow rules (via @aemforms/af-core)
+- **Custom functions** – DOM access, **window** access, and HTTP requests (use API tool / `request()` instead)
+- **Runtime CLS** – Dynamic CSS/style/class during form load (e.g. in `subscribe` or init) that causes layout shift
+- **Form HTML** – Lazy loading, image dimensions, blocking/inline scripts, iframes, autoplay
+- **Form CSS** – background-image, large data URIs, @import, deep/duplicate selectors, !important, hardcoded colors, large files
+- **AI auto-fix** – Optional PR with fixes (CSS + JS suggestions for DOM/HTTP/window); Azure OpenAI
+- **CWV-focused reports** – Impact mapped to Core Web Vitals; configurable thresholds
 
 ## Quick Start
 
-### Test Locally First
+### Run tests locally
 
 ```bash
-# Quick offline test with fixtures (no network)
+# Pre-build test suite (no network)
+npm run test:build
+
+# Offline test with fixtures
 node test/test-analyzers-offline.js
 
-# Or test with live URLs
-./test-local.sh https://your-before-url.aem.live/ https://your-after-url.aem.live/
+# Live URLs
+node test/run-test.js --sample
+# or
+./test-local.sh https://before.aem.live/ https://after.aem.live/
 ```
 
-**📖 See [Local Testing](#local-testing) for complete testing guide.**
+### Use in a PR
 
-### Deploy to GitHub
-
-1. Add the following to your PR description:
+1. Add to your PR description:
 
 ```
 Test URLs:
 
-Before: https://main--forms-engine--hdfc-forms.aem.live/
-After: https://branch--forms-engine--hdfc-forms.aem.live/
+Before: https://main--your-project.aem.live/
+After: https://branch--your-project.aem.live/
 ```
 
-2. The bot will automatically analyze both URLs and comment on the PR with findings.
+2. The bot analyzes both URLs and comments on the PR with findings.
 
 ## Configuration
 
-The Performance Bot works out-of-the-box with **Core Web Vitals (CWV) optimized defaults**. No configuration needed!
-
-### Optional: Customize Thresholds
-
-Create `.performance-bot.json` in your project root:
-
-```json
-{
-  "thresholds": {
-    "form": {
-      "maxComponents": 100,
-      "maxDepth": 10
-    },
-    "html": {
-      "maxDOMSize": 1000
-    }
-  }
-}
-```
-
-**📋 For all available configuration options**, see [`.performance-bot.example.json`](.performance-bot.example.json) or [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md).
+Defaults are tuned for Core Web Vitals. Optional: add `.performance-bot.json` in the project root (see [.performance-bot.example.json](.performance-bot.example.json) or [docs/CONFIGURATION.md](docs/CONFIGURATION.md)).
 
 ## Setup
 
-### As a GitHub Action
+### GitHub Action
 
-#### 1. Create Personal Access Token (PAT)
+1. **PAT** (for auto-fix PRs and Gists): GitHub → Settings → Developer settings → Personal Access Tokens. Scopes: `repo`, `workflow`, `gist`. Store as `PAT_TOKEN` in repo Secrets.
 
-**Required for:** Auto-fix PRs and Gist creation
-
-1. Go to **GitHub → Settings → Developer Settings → Personal Access Tokens → Tokens (classic)**
-2. Click **Generate new token (classic)**
-3. **Scopes required:**
-   -  `repo` (Full repository access)
-   -  `workflow` (Update workflows)
-   -  `gist` (Create gists for inline report viewing) ← **NEW!**
-4. Click **Generate token** and copy it
-5. Go to your repository → **Settings → Secrets → Actions**
-6. Add secret: `PAT_TOKEN` with the token value
-
-#### 2. Create Workflow
-
-Create `.github/workflows/performance-check.yml` in your repository:
+2. **Workflow** – Create `.github/workflows/performance-check.yml`:
 
 ```yaml
 name: Performance Check
@@ -96,32 +66,31 @@ on:
     types: [opened, synchronize, reopened, edited]
 
 permissions:
-  contents: write  # Required for auto-fix PR creation
+  contents: write
   pull-requests: write
 
 jobs:
   performance-analysis:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          token: ${{ secrets.PAT_TOKEN }}  # Use PAT, not GITHUB_TOKEN
+          token: ${{ secrets.PAT_TOKEN }}
           fetch-depth: 0
-      
+
       - name: Run Performance Bot
-        uses: rismehta/forms-performance-bot@v1
+        uses: rismehta/forms-performance-bot@v1.73
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}  # Default token (has checks:write)
+          github-token: ${{ secrets.GITHUB_TOKEN }}
         env:
-          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}  # Only for PR creation + Gist
-          # Optional: Enable AI Auto-Fix with Codex
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+          # Optional: AI auto-fix
           AZURE_API_KEY: ${{ secrets.AZURE_API_KEY }}
-          AZURE_OPENAI_ENDPOINT: 'https://your-endpoint.openai.azure.com/openai/responses'
-          AZURE_OPENAI_MODEL: 'gpt-5.1-codex'
-          AZURE_OPENAI_API_VERSION: '2025-04-01-preview'
-      
-      - name: Upload Performance Report
+          AZURE_OPENAI_ENDPOINT: ${{ secrets.AZURE_OPENAI_ENDPOINT }}
+          AZURE_OPENAI_MODEL: ${{ secrets.AZURE_OPENAI_MODEL }}
+          AZURE_OPENAI_API_VERSION: ${{ secrets.AZURE_OPENAI_API_VERSION }}
+
+      - name: Upload report
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -130,294 +99,110 @@ jobs:
           retention-days: 90
 ```
 
-### AI Auto-Fix Configuration (Optional)
+### AI auto-fix (optional)
 
-To enable AI-powered auto-fix suggestions with Codex, add Azure OpenAI credentials to your repository secrets:
-
-1. Go to **Settings** → **Secrets and variables** → **Actions**
-2. Add secret: `AZURE_API_KEY` with your Azure OpenAI API key
-3. Update workflow env vars with your endpoint details
-
-**Environment Variables:**
-
-| Variable | Description | Default | Required |
-|----------|-------------|---------|----------|
-| `AZURE_API_KEY` (or `AZURE_OPENAI_API_KEY`) | Azure OpenAI API key | - | Yes |
-| `AZURE_OPENAI_ENDPOINT` | Custom endpoint URL | `.../openai/responses` | Yes |
-| `AZURE_OPENAI_MODEL` | Model name (e.g., gpt-5.1-codex) | `gpt-5.1-codex` | Yes |
-| `AZURE_OPENAI_API_VERSION` | API version | `2025-04-01-preview` | Yes |
-
-**Note:** The bot supports both standard Azure OpenAI and custom Codex endpoints. Use `AZURE_API_KEY` for Bearer auth or `AZURE_OPENAI_API_KEY` for api-key header.
-
-**Old Variable Names (Deprecated):**
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `AZURE_OPENAI_API_KEY` | Azure OpenAI API Key | *(required for AI features)* |
-| `AZURE_OPENAI_ENDPOINT` | Azure OpenAI endpoint URL | `https://forms-azure-openai-stg-eastus2.openai.azure.com/` |
-| `AZURE_OPENAI_DEPLOYMENT` | Model deployment name | `gpt-4.1-garage-week` |
-| `AZURE_OPENAI_API_VERSION` | Azure API version | `2024-12-01-preview` |
-
-**What AI Auto-Fix Does:**
--  **Creates Auto-Fix PR** with fixes and annotations applied
--  **CSS Fixes:**
-  - Comments out @import statements (with bundling guidance)
-  - Comments out background-image (with lazy-load guidance)
--  **JS Fixes with GitHub Suggestions:**
-  - Generates refactored code for HTTP requests → custom events
-  - Generates refactored code for DOM access → setProperty()
-  - **One-click "Apply suggestion" button** in PR comment
-  - AI-powered code generation using Azure OpenAI GPT-4.1
--  **JS Annotations in Auto-Fix PR:**
-  - Flags problematic functions with warning comments
-- 💡 **Detailed Suggestions** for complex issues:
-  - Hidden fields → setVariable() migration
-  - API calls from initialize → custom events
-
-**How Auto-Fix PR Works:**
-1. Bot analyzes your PR and detects fixable issues (CSS + JS annotations)
-2. Bot creates a **separate PR** targeting your feature branch
-3. You review the auto-fix PR and merge if acceptable
-4. Your original PR automatically includes the fixes
-
-**GitHub Suggestions (One-Click Fix):**
-
-The bot generates AI-powered refactored code and posts it as **GitHub suggestions** in the PR comment:
-
-```markdown
-### Custom Function: fetchMergedBranchDetails()
-
-**File:** `blocks/form/functions.js:123`
-
-**Issue:** Makes direct HTTP request, bypassing form's error handling
-
-**One-Click Fix:** Apply the suggestion below
-
-```suggestion
-export function fetchMergedBranchDetails(field, globals) {
-  globals.functions.dispatchEvent(field, 'custom:fetchBranchData', {
-    branchId: field.$value
-  });
-}
-```
-
-**Step 2: Add to Form JSON**
-```json
-"events": {
-  "custom:fetchBranchData": [
-    "request(externalize('/api/branches/' & $event.detail.branchId), 'GET')"
-  ]
-}
-```
-
-Click **"Apply suggestion"** → Code is automatically updated in your PR!
-
-**Re-runs:**
-- If you edit your original PR (adding URLs, etc.), the bot runs again
-- The bot **updates the existing auto-fix PR** (force push) with latest changes
-- No duplicate PRs are created
-
-All changes are **non-destructive** (comments/annotations only) and **fully reversible** — you control what gets merged.
-
-```
+Set repo secrets: `AZURE_API_KEY`, `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_MODEL`, `AZURE_OPENAI_API_VERSION`. The bot can open a PR with CSS fixes and JS suggestions (DOM/HTTP/window → model.dispatch, request(), etc.). You review and merge the auto-fix PR into your branch.
 
 ## Architecture
 
-### How It Works
-
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  1. PR Trigger → Bot reads PR description for URLs          │
-└─────────────────────────────────────────────────────────────┘
-                           ↓
-┌─────────────────────────────────────────────────────────────┐
-│  2. URL Extraction Phase                                     │
-│     • Fetch Before & After URLs                             │
-│     • Extract Form JSON (from div.form pre)                 │
-│     • Extract HTML content                                  │
-│     • Fetch JS/CSS files from PR branch                     │
-└─────────────────────────────────────────────────────────────┘
-                           ↓
-┌─────────────────────────────────────────────────────────────┐
-│  3. Parallel Analysis Phase (7 Analyzers)                   │
-│     ├─ FormAnalyzer: Structure & complexity                 │
-│     ├─ FormEventsAnalyzer: API calls in initialize          │
-│     ├─ HiddenFieldsAnalyzer: Unnecessary hidden fields      │
-│     ├─ RuleCycleAnalyzer: Circular dependencies             │
-│     ├─ CustomFunctionAnalyzer: DOM/HTTP violations          │
-│     ├─ FormHTMLAnalyzer: Rendering performance              │
-│     └─ FormCSSAnalyzer: CSS architectural issues            │
-└─────────────────────────────────────────────────────────────┘
-                           ↓
-┌─────────────────────────────────────────────────────────────┐
-│  4. Comparison & Reporting                                   │
-│     • Compare Before vs After                               │
-│     • Detect new/resolved issues                            │
-│     • Calculate CWV impact                                  │
-│     • Post formatted PR comment                             │
-└─────────────────────────────────────────────────────────────┘
+PR (Before/After URLs) → URL extraction (HTML, Form JSON, JS/CSS from branch)
+                     → Parallel analysis (analyzers)
+                     → Compare before/after, report, optional auto-fix PR
 ```
 
-### Project Structure
+### Analyzers
+
+| Analyzer | Purpose |
+|----------|---------|
+| **FormAnalyzer** | Structure, component count, depth |
+| **FormEventsAnalyzer** | API calls in `events.initialize` (blocks render) |
+| **HiddenFieldsAnalyzer** | Hidden fields never made visible (JS/events) |
+| **DisabledFieldsAnalyzer** | Disabled vs readOnly; enable/disable in JS and events |
+| **RulePerformanceAnalyzer** | Circular rule dependencies + slow rules (@aemforms/af-core) |
+| **CustomFunctionAnalyzer** | DOM access, **window** access, HTTP (fetch/XHR/axios) in custom functions |
+| **RuntimeCLSAnalyzer** | Dynamic CSS/style/class during form load (decorate vs subscribe) |
+| **FormHTMLAnalyzer** | Lazy load, dimensions, blocking/inline scripts, iframes, videos |
+| **FormCSSAnalyzer** | background-image, data URIs, @import, selectors, !important, colors, file size |
+| **EventImpactAnalyzer** | Event/rule → impacted field names (reporting/CLI) |
+
+### Project structure
 
 ```
 src/
-├── index.js                          # Orchestrates entire analysis flow
+├── index.js
 ├── extractors/
-│   └── json-extractor.js             # Extracts form JSON from HTML
+│   └── json-extractor.js
 ├── analyzers/
-│   ├── url-analyzer.js               # Fetches URLs & extracts data
-│   ├── form-analyzer.js              # Analyzes form structure
-│   ├── form-events-analyzer.js       # Detects API calls in initialize
-│   ├── hidden-fields-analyzer.js     # Finds unnecessary hidden fields
-│   ├── rule-cycle-analyzer.js        # Detects circular dependencies
-│   ├── custom-function-analyzer.js   # Validates custom functions
-│   ├── form-html-analyzer.js         # Analyzes form HTML performance
-│   └── form-css-analyzer.js          # Detects CSS issues
+│   ├── url-analyzer.js
+│   ├── form-analyzer.js
+│   ├── form-events-analyzer.js
+│   ├── hidden-fields-analyzer.js
+│   ├── disabled-fields-analyzer.js
+│   ├── rule-performance-analyzer.js
+│   ├── custom-function-analyzer.js
+│   ├── runtime-cls-analyzer.js
+│   ├── form-html-analyzer.js
+│   ├── form-css-analyzer.js
+│   ├── event-impact-analyzer.js
+│   └── ai-autofix-analyzer.js
 ├── reporters/
-│   └── pr-reporter-form.js           # Generates markdown PR comments
+│   └── pr-reporter-form.js
 └── utils/
-    ├── config-loader.js              # Loads configuration with CWV defaults
-    └── github-helper.js              # GitHub API utilities
+    ├── config-loader.js
+    └── github-helper.js
 ```
 
-## Local Testing
+## Performance checks (what the bot enforces)
 
-The Performance Bot provides three testing modes to validate analyzers locally before deploying to GitHub:
+### Form structure
+- Component count and nesting depth (configurable thresholds).
 
-### 1. 🧪 Offline Unit Test (Fastest)
+### Form events
+- **No API calls in `initialize`** – `request`/`fetch`/XHR/axios in `events.initialize` blocks rendering; move to custom events after render or lazy flows.
 
-**No network required** - Tests all analyzers with mock fixtures in `test/fixtures/`
+### Hidden fields
+- **Unnecessary hidden fields** – Hidden fields with no visibility toggles in JS or events bloat the DOM; add visibility logic or remove.
 
-```bash
-cd /Users/rismehta/performance-bot
-node test/test-analyzers-offline.js
-```
+### Disabled fields
+- **Disabled vs readOnly** – Disabled fields do not submit; use readOnly when the value must be in submission. Bot reports disabled fields and enable/disable usage in JS and events.
 
-**What it tests:**
--  Form structure analysis
--  Hidden fields detection with mock JS
--  Rule cycle detection (circular dependencies)
--  Custom function violations (DOM access, HTTP requests)
--  Form HTML analysis
--  CSS architectural issues
+### Rules
+- **Circular dependencies** – Can cause infinite loops.
+- **Slow rules** – Rules over threshold (e.g. 50 ms) can block; optimize or defer.
 
-**Use when:** Quick validation during development
+### Custom functions
+- **No DOM access** – No `document.querySelector`, `createElement`, etc.; use model and rules; DOM in custom components only.
+- **No window access** – No `window`; use scope/globals for headless compatibility.
+- **No direct HTTP** – No `fetch`/XHR/axios; use the form API tool (`request()` / Invoke Service).
 
----
+### Runtime CLS
+- **During form load** (in `decorate`, `decorateForm`, `init`, `setup`, or inside `subscribe` that runs at load): no `loadCSS`, no dynamic `import()` of CSS, no `createElement('style'|'link')`, no `classList.add`/`remove`/`toggle` or `element.style.*` that cause layout shift.
+- **Allowed:** One-time class/style in the **direct body** of init functions; state classes (e.g. valid, error, focused); class/style in **event handlers** (click, change, etc.).
 
-### 2.  Remote URLs (Basic)
+### Form HTML
+- **Images** – Non-hero images must use lazy loading; set width/height to avoid CLS.
+- **Scripts** – No inline or blocking scripts; use async/defer where possible.
+- **Iframes, autoplay video** – Flagged for performance.
+- **Large data attributes, excessive hidden/inline** – Flagged for DOM size.
 
-Tests with **live form URLs** but no local code analysis
+### Form CSS
+- **No `background-image`** – Use Image component for lazy loading.
+- **No large inline data URIs** (>5 KB) in CSS.
+- **@import** – Flagged (prefer build-time bundling).
+- **Excessive !important**, **deep selectors** (>4), **duplicate selectors** – Maintainability and performance.
+- **Hardcoded colors** – Prefer CSS custom properties / design tokens.
+- **Large CSS files** (>100 KB) – Consider splitting.
 
-```bash
-./test-local.sh \
-  https://main--forms-engine--hdfc-forms.aem.live/ \
-  https://branch--forms-engine--hdfc-forms.aem.live/
-```
+## Local testing
 
-**What it tests:**
--  JSON extraction from real pages
--  Form structure
--  Form events (API in initialize)
--  Form HTML
--  Hidden fields (inaccurate - no JS files)
--  Custom functions (none found - no JS files)
--  CSS (none found - no CSS files)
+- **`npm run test:build`** – Runs the suite used on build: `test-all-analyzers.js`, `test-disabled-fields.js`, `test-runtime-cls.js`.
+- **`node test/test-analyzers-offline.js`** – Offline run with fixtures.
+- **`node test/run-test.js`** – With live URLs (see script args).
+- **`node test/test-runtime-cls.js`** – Runtime CLS analyzer only.
 
-**Use when:** Quick sanity check of form structure
-
----
-
-### 3. 🎯 Remote URLs + Local Code (Complete)
-
-Tests with **live URLs AND your local codebase**
-
-```bash
-node test-local-with-files.js \
-  --before https://main--forms-engine--hdfc-forms.aem.live/ \
-  --after https://branch--forms-engine--hdfc-forms.aem.live/ \
-  --js-dir /Users/rismehta/forms-engine/blocks/form \
-  --css-dir /Users/rismehta/forms-engine/styles
-```
-
-**What it tests:**
--  Form JSON from real page
--  Form structure
--  Form events
--  **Hidden fields (accurate!)** - checks against your JS files
--  **Custom functions** - analyzes your actual functions
--  **Rule cycles** - detects circular dependencies using af-core
--  Form HTML
--  **CSS** - analyzes your stylesheets
-
-**Use when:** Complete pre-PR validation
-
----
-
-### Test Output
-
-All tests generate a detailed markdown report:
-
-```bash
-📄 Check the output at: test/output/pr-comment.md
-```
-
-This shows **exactly** what would appear in a GitHub PR comment.
-
-### Example Results
-
-```
-Total Issues Detected: 24
-  - Form Structure: 0
-  - Form Events: 0
-  - Hidden Fields: 6 
-  - Rule Cycles: 1  (fieldA → fieldB → fieldC → fieldA)
-  - Custom Functions: 2 
-  - Form HTML: 0
-  - CSS: 16 
-```
-
-**📖 See [`test/README.md`](test/README.md) for detailed testing documentation.**
-
----
-
-## Performance Checks
-
-### 1. Form Structure
-- **Component count** (default: ≤75) - Impacts DOM size
-- **Nesting depth** (default: ≤8) - Impacts style recalculation
-- **Event handlers** (default: ≤30) - Impacts JavaScript execution
-
-### 2. Form Events
-- **API calls in initialize** - Blocks form rendering (critical issue)
-- Recommends moving to custom events or lazy loading
-
-### 3. Hidden Fields
-- **Unnecessary hidden fields** - Bloat DOM unnecessarily
-- Cross-references with JavaScript to check if ever made visible
-
-### 4. Rule Cycles
-- **Circular dependencies** - Can cause infinite loops
-- Uses @aemforms/af-core to build accurate dependency graph
-
-### 5. Custom Functions
-- **DOM access detection** - Custom functions shouldn't manipulate DOM
-- **HTTP request detection** - Should use API tool (request()) instead
-
-### 6. Form HTML
-- **Non-lazy loaded images** - Impacts LCP
-- **Missing image dimensions** - Causes CLS
-- **Blocking scripts** - Delays interactivity
-- **Iframes, autoplay videos** - Performance impact
-
-### 7. CSS
-- **background-image usage** - Should use Image component
-- **@import statements** - Blocks parallel loading
-- **Deep selectors** (>3 levels) - Slow selector matching
-- **Excessive !important** - Code smell
+Report output: e.g. `test/output/pr-comment.md`. See [test/README.md](test/README.md) for more.
 
 ## License
 
 MIT
-

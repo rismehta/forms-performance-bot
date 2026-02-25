@@ -497,7 +497,8 @@ async function runPRMode(context, octokit, patOctokit, config) {
   // Post inline PR review comments FIRST to know which ones succeed
   // Only count issues that have inline comments posted (files in PR diff)
   let postedInlineComments = [];
-  let totalVisibleComments = 0;
+  let totalVisibleComments = null; // null = did not run inline step; number = count from step
+  let criticalCountFromInlineStep = null; // Explicit count to show in PR body (posted + skipped)
   if (autoFixSuggestions?.enabled && autoFixSuggestions.suggestions.length > 0) {
     core.info(` Posting ${autoFixSuggestions.suggestions.length} inline suggestion(s)...`);
     try {
@@ -512,6 +513,7 @@ async function runPRMode(context, octokit, patOctokit, config) {
       
       postedInlineComments = reviewComments;
       totalVisibleComments = totalVisible;
+      criticalCountFromInlineStep = totalVisible; // Use this for PR body so it matches inline comments
       
       if (reviewComments.length > 0) {
         core.info(` Posted ${reviewComments.length} inline suggestion(s) on PR`);
@@ -530,7 +532,7 @@ async function runPRMode(context, octokit, patOctokit, config) {
   // Generate and post minimal PR comment (NO HTML report link in PR mode)
   // HTML reports are only for scheduled scans (full codebase analysis)
   // PR mode only shows issues in PR diff files via inline comments
-  // Count ONLY issues that are actually visible in PR (posted + skipped = total visible)
+  // Count ONLY issues that are actually visible in PR (use criticalCountFromInlineStep when we ran the step)
   const reporter = new FormPRReporter(octokit, owner, repo, prNumber);
   await reporter.generateReport(results, {
     before: urls.before,
@@ -539,7 +541,8 @@ async function runPRMode(context, octokit, patOctokit, config) {
     afterData,  // Include performance metrics
     autoFixSuggestions, // Include AI-generated fix suggestions
     gistUrl: null, // No HTML report in PR mode
-    totalVisibleComments, // Pass total visible comments (posted + existing) for accurate counting
+    totalVisibleComments,
+    criticalCountFromInlineStep, // When set, PR body must show this count (matches inline comments)
   }, prNumber, `${owner}/${repo}`);
 
   // Fail the build if critical issues are detected
@@ -876,12 +879,14 @@ function detectCriticalIssues(results, totalVisibleComments = null) {
   issues: [],
   };
   
-  // If we have totalVisibleComments, use it directly (most accurate for PR mode)
-  // This represents issues that are ACTUALLY visible in the PR, not just detected
-  if (typeof totalVisibleComments === 'number' && totalVisibleComments > 0) {
-    critical.hasCritical = true;
+  // If we have totalVisibleComments from the inline step, use it (most accurate for PR mode)
+  // This represents issues that are ACTUALLY visible in the PR (posted + skipped), not just from results
+  if (typeof totalVisibleComments === 'number' && totalVisibleComments >= 0) {
     critical.count = totalVisibleComments;
-    critical.issues.push(`${totalVisibleComments} issue(s) found in PR diff (see inline comments)`);
+    critical.hasCritical = totalVisibleComments > 0;
+    if (totalVisibleComments > 0) {
+      critical.issues.push(`${totalVisibleComments} issue(s) found in PR diff (see inline comments)`);
+    }
     return critical;
   }
 

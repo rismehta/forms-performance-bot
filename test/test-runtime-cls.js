@@ -61,32 +61,46 @@ function init(container) {
     ]
   },
 
-  // 4. Dynamic class manipulation in decorateForm
-  classListInDecorateForm: {
-    filename: 'blocks/form/decorateForm.js',
+  // 4. Dynamic class manipulation inside subscribe callback (not direct body of decorate)
+  classListInSubscribeCallback: {
+    filename: 'blocks/form/consent-popup.js',
     content: `
-export default function decorateForm(form, formDef) {
-  // This should be flagged - dynamic class during form load
-  form.classList.add('large-form-layout');
-  
-  // This should also be flagged
-  form.classList.remove('compact-mode');
+import { subscribe } from './subscribe.js';
+
+export default function decorate(element, fd, container, formId) {
+  element.classList.add('consent-popup-wrapper');
+  subscribe(element, formId, (_element, model) => {
+    if (!model) return;
+    const checkbox = model.items?.find((item) => item.fieldType === 'checkbox');
+    const modal = model.items?.find((item) => item[':type'] === 'modal');
+    const button = modal?.items?.find((item) => item.fieldType === 'button');
+    if (!checkbox || !modal || !button) return;
+    const checkboxElement = element.querySelector(\`input[id="\${checkbox?.id}"]\`);
+    checkboxElement.classList.add('consent-checkbox-highlight');
+    button.style.display = 'none';
+  });
 }
 `,
     expectedIssues: [
       { type: 'dynamic-class-manipulation', severity: 'warning' },
-      { type: 'dynamic-class-manipulation', severity: 'warning' }
+      { type: 'direct-style-manipulation', severity: 'warning' }
     ]
   },
 
-  // 5. Direct style manipulation in setup function
-  directStyleInSetup: {
-    filename: 'blocks/form/layout.js',
+  // 5. Direct style manipulation inside subscribe callback
+  styleInSubscribeCallback: {
+    filename: 'blocks/form/component.js',
     content: `
-function setup(element) {
-  // This should be flagged - direct style during setup
-  element.style.display = 'block';
-  element.style.width = '100%';
+import { subscribe } from './subscribe.js';
+
+export function decorate(el, fd, container, formId) {
+  el.classList.add('wrapper');
+  subscribe(el, formId, (_, model) => {
+    if (model?.properties?.visible) {
+      el.style.display = 'block';
+      el.style.visibility = 'visible';
+    }
+  });
 }
 `,
     expectedIssues: [
@@ -127,31 +141,42 @@ export default async function decorateForm(form) {
     ]
   },
 
-  // 8. className assignment in initialize
-  classNameInInitialize: {
+  // 8. Class/style inside subscribe's REGISTER branch (one-time setup during load) - should FLAG
+  classListAndStyleInSubscribeRegisterBranch: {
     filename: 'blocks/form/component.js',
     content: `
-function initialize(element) {
-  // className assignment during init - should be flagged
-  element.className = 'new-layout expanded';
+import { subscribe } from './subscribe.js';
+
+export function decorate(el, fd, container, formId) {
+  subscribe(el, formId, (element, model, eventType, payload) => {
+    if (eventType === 'register') {
+      element.classList.add('one-time-setup');
+      element.style.display = 'block';
+    } else if (eventType === 'change') {
+      payload?.changes?.forEach(() => {});
+    }
+  }, { listenChanges: true });
 }
 `,
     expectedIssues: [
-      { type: 'dynamic-class-manipulation', severity: 'warning' }
+      { type: 'dynamic-class-manipulation', severity: 'warning' },
+      { type: 'direct-style-manipulation', severity: 'warning' }
     ]
   },
 
-  // 9. style.cssText in loadBlock
-  cssTextInLoadBlock: {
-    filename: 'scripts/loader.js',
+  // 9. loadCSS still flagged in init (class in direct body is allowed)
+  loadCSSInDecorateFormWithClass: {
+    filename: 'blocks/form/decorateForm.js',
     content: `
-async function loadBlock(block) {
-  // cssText assignment - should be flagged
-  block.style.cssText = 'display: flex; width: 100%;';
+import { loadCSS } from '../../scripts/aem.js';
+
+export default function decorateForm(form) {
+  form.classList.add('form-loaded');
+  loadCSS('/styles/form.css');
 }
 `,
     expectedIssues: [
-      { type: 'direct-style-manipulation', severity: 'warning' }
+      { type: 'dynamic-css-loading', severity: 'error' }
     ]
   }
 };
@@ -206,7 +231,140 @@ function setupValidation(input) {
     expectedIssues: []
   },
 
-  // 4. State classes should be allowed
+  // 4. Class/style inside fieldModel.subscribe callback (runs on model change, after load) - should NOT flag
+  classListAndStyleInModelSubscribeCallback: {
+    filename: 'blocks/form/components/card-choice/card-choice.js',
+    content: `
+import { subscribe } from '../../rules/index.js';
+
+export function decorate(element, fd, container, formId) {
+  subscribe(element, formId, (fieldDiv, fieldModel) => {
+    fieldModel.subscribe((e) => {
+      const { payload } = e;
+      payload?.changes?.forEach((change) => {
+        const { propertyName, currentValue } = change;
+        if (propertyName === 'enum') {
+          fieldDiv.classList.add('updated');
+          fieldDiv.style.visibility = 'visible';
+        }
+      });
+    });
+  });
+}
+`,
+    expectedIssues: []
+  },
+
+  // 5. Class/style inside subscribe's CHANGE branch (runs after form load) - should NOT flag
+  classListAndStyleInSubscribeChangeBranch: {
+    filename: 'blocks/form/component.js',
+    content: `
+import { subscribe } from './subscribe.js';
+
+export function decorate(el, fd, container, formId) {
+  subscribe(el, formId, (element, model, eventType, payload) => {
+    if (eventType === 'register') {
+      // one-time setup only, no class/style here
+    } else if (eventType === 'change') {
+      element.classList.add('updated');
+      element.style.visibility = 'visible';
+    }
+  }, { listenChanges: true });
+}
+`,
+    expectedIssues: []
+  },
+
+  // 5b. CHANGE branch with generic variable name (a === 'change') - should NOT flag
+  classListInSubscribeChangeBranchGenericVar: {
+    filename: 'blocks/form/component.js',
+    content: `
+import { subscribe } from './subscribe.js';
+
+export function decorate(el, fd, container, formId) {
+  subscribe(el, formId, (element, model, a, payload) => {
+    if (a === 'register') {
+      // no class here
+    } else if (a === 'change') {
+      element.classList.add('updated');
+    }
+  }, { listenChanges: true });
+}
+`,
+    expectedIssues: []
+  },
+
+  // 5c. a.subscribe (any name, not just fieldModel) - should NOT flag
+  classListInGenericModelSubscribe: {
+    filename: 'blocks/form/component.js',
+    content: `
+import { subscribe } from './subscribe.js';
+
+export function decorate(el, fd, container, formId) {
+  subscribe(el, formId, (fieldDiv, a) => {
+    a.subscribe((e) => {
+      fieldDiv.classList.add('updated');
+    });
+  });
+}
+`,
+    expectedIssues: []
+  },
+
+  // 6. Negative test: class/style in direct body of decorate must NOT be flagged.
+  //    If the analyzer wrongly flagged this, we would get 1+ issues and this test would fail.
+  negativeTest_directBodyNotFlagged: {
+    filename: 'blocks/form/negative-test-decorate.js',
+    content: `
+export default function decorate(element) {
+  element.classList.add('wrapper');
+  element.style.display = 'block';
+}
+`,
+    expectedIssues: []
+  },
+
+  // 7. Class/style in direct body of decorate (one-time setup) - allowed
+  classListInDirectBodyOfDecorate: {
+    filename: 'blocks/form/consent-popup.js',
+    content: `
+export default function decorate(element, fd, container, formId) {
+  element.classList.add('consent-popup-wrapper');
+  const wrapper = document.createElement('div');
+  wrapper.className = 'inner';
+  element.style.position = 'relative';
+  element.appendChild(wrapper);
+}
+`,
+    expectedIssues: []
+  },
+
+  // 8. Class/style in direct body of decorateForm - allowed
+  classListInDirectBodyOfDecorateForm: {
+    filename: 'blocks/form/decorateForm.js',
+    content: `
+export default function decorateForm(form, formDef) {
+  form.classList.add('large-form-layout');
+  form.classList.remove('compact-mode');
+  form.style.display = 'flex';
+}
+`,
+    expectedIssues: []
+  },
+
+  // 9. Style in direct body of setup - allowed
+  directStyleInDirectBodyOfSetup: {
+    filename: 'blocks/form/layout.js',
+    content: `
+function setup(element) {
+  element.style.display = 'block';
+  element.style.width = '100%';
+}
+`,
+    expectedIssues: []
+  },
+
+  // 10. State classes should be allowed
   stateClassesInDecorate: {
     filename: 'blocks/form/decorateForm.js',
     content: `
@@ -221,7 +379,7 @@ export default function decorateForm(form, formDef) {
     expectedIssues: []
   },
 
-  // 5. Class with state suffix should be allowed
+  // 11. Class with state suffix should be allowed
   stateClassSuffix: {
     filename: 'blocks/form/decorateForm.js',
     content: `
@@ -235,7 +393,7 @@ export default function decorateForm(form, formDef) {
     expectedIssues: []
   },
 
-  // 6. onclick property assignment
+  // 12. onclick property assignment
   onclickHandler: {
     filename: 'blocks/form/buttons.js',
     content: `
@@ -251,7 +409,7 @@ function setupButtons(container) {
     expectedIssues: []
   },
 
-  // 7. Submit handler
+  // 13. Submit handler
   submitHandler: {
     filename: 'blocks/form/submit.js',
     content: `
@@ -267,7 +425,7 @@ function setupSubmit(form) {
     expectedIssues: []
   },
 
-  // 8. Non-layout style properties in decorateForm
+  // 14. Non-layout style properties in decorateForm
   nonLayoutStyles: {
     filename: 'blocks/form/decorateForm.js',
     content: `
@@ -280,7 +438,7 @@ export default function decorateForm(form) {
     expectedIssues: []
   },
 
-  // 9. Regular function not related to initialization
+  // 15. Regular function not related to initialization
   regularFunction: {
     filename: 'blocks/form/utils.js',
     content: `
@@ -299,7 +457,7 @@ function processData(data) {
     expectedIssues: []
   },
 
-  // 10. Focus/blur handlers
+  // 16. Focus/blur handlers
   focusBlurHandlers: {
     filename: 'blocks/form/focus.js',
     content: `
@@ -320,29 +478,24 @@ function setupFocus(input) {
 
 // Mixed test case - some should flag, some shouldn't
 const MIXED_CASES = {
-  // decorateForm with both load-time and event handler code
+  // decorateForm: loadCSS flagged; class/style in direct body not flagged; event handler not flagged
   mixedContext: {
     filename: 'blocks/form/decorateForm.js',
     content: `
 import { loadCSS } from '../../scripts/aem.js';
 
 export default function decorateForm(form, formDef) {
-  // This SHOULD be flagged - during form load
   loadCSS('/styles/form.css');
   form.classList.add('custom-layout');
-  
-  // This should NOT be flagged - inside click handler
   form.addEventListener('click', () => {
     form.classList.add('clicked');
     loadCSS('/styles/modal.css');
   });
-  
-  // This SHOULD be flagged - back in decorateForm context
   form.style.display = 'flex';
 }
 `,
-    expectedIssueCount: 3, // loadCSS, classList.add('custom-layout'), style.display
-    shouldFlagTypes: ['dynamic-css-loading', 'dynamic-class-manipulation', 'direct-style-manipulation']
+    expectedIssueCount: 1, // only loadCSS (class/style in direct body allowed)
+    shouldFlagTypes: ['dynamic-css-loading']
   }
 };
 

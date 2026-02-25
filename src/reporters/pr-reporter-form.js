@@ -37,9 +37,9 @@ export class FormPRReporter {
     const sections = [];
 
     // Header with issue count
-    // Count from totalVisibleComments (accurately reflects what user sees in PR)
-    // Falls back to counting from results.*.newIssues if totalVisibleComments not provided
-    const critical = this.countCriticalIssues(results, urls.totalVisibleComments);
+    // Prefer criticalCountFromInlineStep when we ran the inline step (matches posted + skipped comments)
+    // Else totalVisibleComments, else fallback to results.*.newIssues
+    const critical = this.countCriticalIssues(results, urls.criticalCountFromInlineStep ?? urls.totalVisibleComments);
     
     if (critical === 0) {
       sections.push('## Performance Analysis\n');
@@ -1190,25 +1190,16 @@ export class FormPRReporter {
   /**
    * Count critical issues (counts only issues that are actually visible in PR as inline comments)
    * 
-   * IMPORTANT: Use totalVisibleComments if available - this is the MOST ACCURATE count.
-   * Why? Because filterResultsToPRFiles() only filters by FILE, not by LINE.
-   * GitHub rejects comments on lines not in the diff, so totalVisibleComments = actual visible issues.
-   * 
-   * Example (without totalVisibleComments):
-   * - results.*.newIssues = 21 issues in file (file is in PR)
-   * - Try to post 21 comments → GitHub rejects 18 (lines not in diff)
-   * - Main comment says "21 issues" but only 3 are visible ❌
-   * 
-   * Example (with totalVisibleComments):
-   * - totalVisibleComments = 3 (1 posted + 2 existing)
-   * - Main comment says "3 issues" → matches what user sees ✓
-   * 
+   * IMPORTANT: Use criticalCountFromInlineStep or totalVisibleComments when available - that is the
+   * count from the inline comment step (posted + skipped), so the PR body matches what users see.
+   * Fallback (results.*.newIssues) can overcount because it filters by FILE only, not by LINE.
+   *
    * @param {Object} results - All analyzer results
-   * @param {number} totalVisibleComments - Count of inline comments actually visible in PR (if available)
+   * @param {number} totalVisibleComments - Count from inline step (if available); use for header
    * @returns {number} Total count of critical issues visible in PR
    */
   countCriticalIssues(results, totalVisibleComments = null) {
-    // If we have totalVisibleComments, use it (most accurate)
+    // If we have a count from the inline step (or totalVisibleComments), use it for the header
     if (typeof totalVisibleComments === 'number' && totalVisibleComments >= 0) {
       return totalVisibleComments;
     }

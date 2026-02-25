@@ -350,6 +350,108 @@ export class RuntimeCLSAnalyzer {
   }
 
   /**
+   * True if this node is inside a callback passed to subscribe(...).
+   * Class/style inside subscribe callbacks can cause CLS unless inside the 'change' branch.
+   */
+  isInsideSubscribeCallback(ancestors) {
+    for (let i = ancestors.length - 1; i >= 0; i--) {
+      const ancestor = ancestors[i];
+      if (ancestor.type === 'ArrowFunctionExpression' || ancestor.type === 'FunctionExpression') {
+        const parent = ancestors[i - 1];
+        if (parent?.type === 'CallExpression') {
+          const calleeName = this.getCalleeName(parent.callee);
+          if (calleeName === 'subscribe' || calleeName.endsWith('.subscribe')) {
+            return true;
+          }
+        }
+        break;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * True if test expression is (variable) === value, e.g. eventType === 'register',
+   * a === 'change', etc. Variable name can be anything. Used to detect register vs
+   * change branches in subscribe callbacks.
+   */
+  isEventTypeEquals(testNode, value) {
+    if (!testNode || typeof value !== 'string') return false;
+    if (testNode.type === 'BinaryExpression' && (testNode.operator === '===' || testNode.operator === '==')) {
+      const leftIsIdentifier = testNode.left?.type === 'Identifier';
+      const rightVal = this.getStringValue(testNode.right);
+      if (leftIsIdentifier && rightVal === value) return true;
+    }
+    return false;
+  }
+
+  /**
+   * True if this node is inside a callback passed to x.subscribe (any name: fieldModel,
+   * model, a, etc.). That callback runs on model change events, after form load — no CLS.
+   * Loop is bounded: we walk the fixed ancestors array once (root → current).
+   */
+  isInsideModelSubscribeCallback(ancestors) {
+    for (let i = ancestors.length - 1; i >= 0; i -= 1) {
+      const ancestor = ancestors[i];
+      if (ancestor.type === 'ArrowFunctionExpression' || ancestor.type === 'FunctionExpression') {
+        const parent = ancestors[i - 1];
+        if (parent?.type === 'CallExpression') {
+          const callee = parent.callee;
+          if (callee?.type === 'MemberExpression' && callee.property?.name === 'subscribe') {
+            return true;
+          }
+          // Top-level subscribe(el, formId, cb): keep looking for inner model.subscribe
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * True if this node is inside the "change" branch of a subscribe callback
+   * (e.g. inside "if (eventType === 'change') { ... }" or "else if (eventType === 'change') { ... }").
+   * Class/style in the change branch runs after form load, so no CLS - do not flag.
+   */
+  isInsideSubscribeChangeBranch(ancestors) {
+    if (!this.isInsideSubscribeCallback(ancestors)) return false;
+    for (let i = 0; i < ancestors.length; i++) {
+      const ancestor = ancestors[i];
+      if (ancestor.type === 'IfStatement') {
+        const ifStmt = ancestor;
+        if (!this.isEventTypeEquals(ifStmt.test, 'change')) continue;
+        const childInPath = ancestors[i + 1];
+        if (!childInPath) continue;
+        if (childInPath === ifStmt.consequent) return true;
+        if (ifStmt.alternate && childInPath === ifStmt.alternate) {
+          if (ifStmt.alternate.type === 'IfStatement' && this.isEventTypeEquals(ifStmt.alternate.test, 'change')) return true;
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * True if this node is in the direct body of an init function (e.g. decorate),
+   * not inside a nested callback. Class/style in decorate's direct body is allowed (one-time setup).
+   */
+  isInDirectBodyOfInitFunction(ancestors) {
+    const initContext = this.getInitializationContext(ancestors);
+    if (!initContext) return false;
+
+    for (let i = ancestors.length - 1; i >= 0; i--) {
+      const ancestor = ancestors[i];
+      if (ancestor.type === 'FunctionDeclaration' && ancestor.id?.name === initContext) {
+        return true;
+      }
+      if (ancestor.type === 'ArrowFunctionExpression' || ancestor.type === 'FunctionExpression') {
+        return false;
+      }
+    }
+    return false;
+  }
+
+  /**
    * Detect problematic call expressions
    */
   detectCallExpression(node, ancestors, content, context, issues) {
@@ -438,6 +540,18 @@ export class RuntimeCLSAnalyzer {
       if (['add', 'remove', 'toggle'].includes(method)) {
         // Check if it's classList
         if (this.isClassListMethod(node.callee)) {
+          // Allow in direct body of decorate (one-time setup). Flag inside subscribe and other callbacks.
+          if (this.isInDirectBodyOfInitFunction(ancestors)) {
+            return;
+          }
+          // Allow in subscribe's change branch (runs after form load, no CLS). Flag in register branch.
+          if (this.isInsideSubscribeChangeBranch(ancestors)) {
+            return;
+          }
+          // Allow inside model.subscribe / fieldModel.subscribe callback (runs on model change, after load).
+          if (this.isInsideModelSubscribeCallback(ancestors)) {
+            return;
+          }
           // Check if the class name is in the allowlist
           const className = this.getClassNameArgument(node);
           if (className && !this.isAllowedStateClass(className)) {
@@ -533,6 +647,19 @@ export class RuntimeCLSAnalyzer {
     
     if (!shouldFlag) {
       return; // Not in initialization context
+    }
+
+    // Allow style/class in direct body of decorate (one-time setup). Flag inside subscribe and other callbacks.
+    if (this.isInDirectBodyOfInitFunction(ancestors)) {
+      return;
+    }
+    // Allow in subscribe's change branch (runs after form load, no CLS). Flag in register branch.
+    if (this.isInsideSubscribeChangeBranch(ancestors)) {
+      return;
+    }
+    // Allow inside model.subscribe / fieldModel.subscribe callback (runs on model change, after load).
+    if (this.isInsideModelSubscribeCallback(ancestors)) {
+      return;
     }
 
     const left = node.left;
