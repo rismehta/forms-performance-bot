@@ -18,7 +18,53 @@ A GitHub Action that analyzes Adaptive Form performance by comparing before/afte
 
 ## Quick Start
 
-### Run tests locally
+### Run locally
+
+1. **Install** (from repo root):
+
+   ```bash
+   git clone <repo-url> && cd performance-bot
+   npm install
+   ```
+
+2. **Run with form URLs** (before/after form page URLs):
+
+   ```bash
+   # Using the shell script (installs deps if needed)
+   ./test-local.sh "https://main--your-project.aem.live/" "https://branch--your-project.aem.live/"
+
+   # Or using Node directly
+   node test/run-test.js --before "https://main--your-project.aem.live/" --after "https://branch--your-project.aem.live/"
+
+   # Sample run (built-in demo URLs)
+   node test/run-test.js --sample
+   ```
+
+3. **Run with form URLs + local JS/CSS paths** (for accurate hidden-field and custom-function analysis):
+
+   ```bash
+   node test-local-with-files.js \
+     --before "https://your-form-url/" \
+     --after "https://your-form-url/" \
+     --js-dir /path/to/your/form/blocks \
+     --css-dir /path/to/your/styles
+   ```
+
+4. **Check the report**:
+
+   - **Live URL runs** (run-test.js, test-local.sh, test-local-with-files.js): open **`test/output/pr-comment.md`** (Markdown summary).
+   - **Offline run** (test-analyzers-offline.js): open **`test/output/offline-pr-comment.md`**.
+   - **In CI**: download the **`performance-report-pr-<number>`** artifact to get `performance-report.html`.
+
+   **Local vs CI:** Locally there is no PR diff—the run uses **full** before/after analysis. `pr-comment.md` shows the same summary format (critical-issue count); the detailed breakdown is printed in the **console**. In CI, results are filtered to PR diff files and details appear as inline comments on the PR.
+
+   ```bash
+   cat test/output/pr-comment.md
+   ```
+
+For more options (offline tests, full vs basic live test), see [test/README.md](test/README.md).
+
+### Run tests (CI/build)
 
 ```bash
 # Pre-build test suite (no network)
@@ -26,11 +72,6 @@ npm run test:build
 
 # Offline test with fixtures
 node test/test-analyzers-offline.js
-
-# Live URLs
-node test/run-test.js --sample
-# or
-./test-local.sh https://before.aem.live/ https://after.aem.live/
 ```
 
 ### Use in a PR
@@ -194,14 +235,14 @@ src/
 - **Hardcoded colors** – Prefer CSS custom properties / design tokens.
 - **Large CSS files** (>100 KB) – Consider splitting.
 
-## Local testing
+## Local testing (reference)
 
-- **`npm run test:build`** – Runs the suite used on build: `test-all-analyzers.js`, `test-disabled-fields.js`, `test-runtime-cls.js`.
-- **`node test/test-analyzers-offline.js`** – Offline run with fixtures.
-- **`node test/run-test.js`** – With live URLs (see script args).
-- **`node test/test-runtime-cls.js`** – Runtime CLS analyzer only.
+- **`npm run test:build`** – Full test suite used on build.
+- **`node test/test-analyzers-offline.js`** – Offline run with fixtures; report: `test/output/offline-pr-comment.md`.
+- **`node test/run-test.js --before <url> --after <url>`** – Live URL analysis; report: `test/output/pr-comment.md`.
+- **`node test-local-with-files.js --before <url> --after <url> [--js-dir <path>] [--css-dir <path>]`** – Full analysis with local form code; report: `test/output/pr-comment.md`.
 
-Report output: e.g. `test/output/pr-comment.md`. See [test/README.md](test/README.md) for more.
+See [test/README.md](test/README.md) for the three test modes and limitations.
 
 ## License
 
