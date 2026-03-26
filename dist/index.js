@@ -173286,6 +173286,7 @@ class FormEventsAnalyzer {
 
     // Common API call patterns in adaptive forms
     const patterns = [
+      { regex: /requestWithRetry\s*\([^)]+\)/gi, type: 'requestWithRetry' },
       { regex: /request\s*\([^)]+\)/gi, type: 'request' },
       { regex: /fetch\s*\([^)]+\)/gi, type: 'fetch' },
       { regex: /\$\.(get|post|ajax|getJSON)\s*\(/gi, type: 'jquery-ajax' },
