@@ -175058,6 +175058,24 @@ class RulePerformanceAnalyzer {
 ;// CONCATENATED MODULE: ./src/analyzers/form-html-analyzer.js
 
 
+// Properties that force layout / are non-composited when animated
+const NON_COMPOSITED_ANIM_PROPS = new Set([
+  'top', 'left', 'right', 'bottom',
+  'width', 'height',
+  'margin', 'margin-top', 'margin-right', 'margin-bottom', 'margin-left',
+  'padding', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left',
+  'font-size',
+]);
+
+// CSS selectors / tag names considered "above the fold"
+const ABOVE_FOLD_SELECTORS = (/* unused pure expression or super */ null && ([
+  'header',
+  '.header',
+  '[class*="header"]',
+  '.banner',
+  '[class*="banner"]',
+]));
+
 /**
  * Analyzes rendered form HTML for performance issues
  * Focus: Client-side rendered form content
@@ -175158,6 +175176,8 @@ class FormHTMLAnalyzer {
       scripts: this.analyzePageScripts($), // Analyze ALL scripts on page (not just in form)
       resources: this.analyzeFormResources($, formContainer),
       rendering: this.analyzeRenderingPerformance($, formContainer),
+      aboveFoldLazyIssues: this.detectAboveFoldLazyImages($),
+      imageUrls: this.collectImageUrls($),
       issues: [],
     };
   }
@@ -175343,6 +175363,250 @@ class FormHTMLAnalyzer {
   }
 
   /**
+   * Classify image URLs (with known sizes) into issues.
+   * Called from analyzeWithIssues (sync) or tests directly.
+   * @param {Array<{url: string, fileSizeKb: number|null}>} imageSizes
+   * @returns {Array} issues
+   */
+  classifyImageIssues(imageSizes) {
+    const issues = [];
+
+    for (const { url, fileSizeKb } of imageSizes) {
+      const isGif = /\.gif(\?|$)/i.test(url);
+
+      if (isGif) {
+        if (fileSizeKb === null) {
+          // HEAD request failed — flag on URL alone
+          issues.push({
+            severity: 'warning',
+            type: 'animated-gif-detected',
+            url,
+            fileSizeKb: null,
+            message: `Animated GIF detected: "${url}". GIF format is inefficient regardless of size.`,
+            recommendation: 'Replace GIFs with video (<video autoplay loop muted playsinline>) or WebP animations for smaller file size and better performance.',
+          });
+        } else if (fileSizeKb > 200) {
+          issues.push({
+            severity: 'error',
+            type: 'animated-gif-detected',
+            url,
+            fileSizeKb,
+            message: `Large animated GIF (${fileSizeKb.toFixed(1)} KB): "${url}". Severely impacts page weight.`,
+            recommendation: 'Replace GIFs with video (<video autoplay loop muted playsinline>) or WebP animations for smaller file size and better performance.',
+          });
+        } else if (fileSizeKb > 50) {
+          issues.push({
+            severity: 'warning',
+            type: 'animated-gif-detected',
+            url,
+            fileSizeKb,
+            message: `Animated GIF (${fileSizeKb.toFixed(1)} KB): "${url}". GIF format is inefficient.`,
+            recommendation: 'Replace GIFs with video (<video autoplay loop muted playsinline>) or WebP animations for smaller file size and better performance.',
+          });
+        }
+      }
+
+      // Oversized image check — applies to ALL formats (when size is known)
+      if (fileSizeKb !== null) {
+        if (fileSizeKb > 500) {
+          issues.push({
+            severity: 'error',
+            type: 'oversized-image',
+            url,
+            fileSizeKb,
+            message: `Oversized image (${fileSizeKb.toFixed(1)} KB): "${url}". Exceeds 500 KB threshold.`,
+            recommendation: 'Compress and resize images. Use modern formats (WebP/AVIF). Target < 150 KB for most images.',
+          });
+        } else if (fileSizeKb > 150) {
+          issues.push({
+            severity: 'warning',
+            type: 'oversized-image',
+            url,
+            fileSizeKb,
+            message: `Large image (${fileSizeKb.toFixed(1)} KB): "${url}". Exceeds 150 KB warning threshold.`,
+            recommendation: 'Compress and resize images. Use modern formats (WebP/AVIF). Target < 150 KB for most images.',
+          });
+        }
+      }
+    }
+
+    return issues;
+  }
+
+  /**
+   * Collect image URLs from HTML (img src + source type=image/gif).
+   * @param {CheerioAPI} $ - Cheerio instance
+   * @returns {string[]} array of absolute-or-relative URLs
+   */
+  collectImageUrls($) {
+    const urls = new Set();
+
+    $('img[src]').each((_, el) => {
+      const src = $(el).attr('src');
+      if (src && !src.startsWith('data:')) {
+        urls.add(src);
+      }
+    });
+
+    // <picture><source type="image/gif" srcset="...">
+    $('source[type="image/gif"]').each((_, el) => {
+      const srcset = $(el).attr('srcset') || $(el).attr('src');
+      if (srcset && !srcset.startsWith('data:')) {
+        // srcset may have multiple values; take the first URL part
+        const firstUrl = srcset.split(',')[0].trim().split(/\s+/)[0];
+        if (firstUrl) urls.add(firstUrl);
+      }
+    });
+
+    return Array.from(urls);
+  }
+
+  /**
+   * Fetch Content-Length for a list of URLs using HEAD requests.
+   * Max 10 concurrent, 3s timeout per request. Never throws.
+   * @param {string[]} urls
+   * @returns {Promise<Map<string, number|null>>} url → fileSizeKb (or null on failure)
+   */
+  async fetchImageSizes(urls) {
+    const result = new Map();
+    const CONCURRENCY = 10;
+    const TIMEOUT_MS = 3000;
+
+    async function fetchOne(url) {
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+        const resp = await fetch(url, { method: 'HEAD', signal: controller.signal });
+        clearTimeout(timer);
+        const contentLength = resp.headers.get('content-length');
+        return contentLength ? parseInt(contentLength, 10) / 1024 : null;
+      } catch {
+        return null;
+      }
+    }
+
+    // Process in batches of CONCURRENCY
+    for (let i = 0; i < urls.length; i += CONCURRENCY) {
+      const batch = urls.slice(i, i + CONCURRENCY);
+      const sizes = await Promise.all(batch.map(fetchOne));
+      batch.forEach((url, idx) => result.set(url, sizes[idx]));
+    }
+
+    return result;
+  }
+
+  /**
+   * Detect above-fold images with loading="lazy".
+   * Checks:
+   *  1. Any <img loading="lazy"> inside header/.header/[class*="header"]/.banner/[class*="banner"]
+   *  2. The first <img> on the page that is lazy but has no fetchpriority="high"
+   * @param {CheerioAPI} $
+   * @returns {Array} issues
+   */
+  detectAboveFoldLazyImages($) {
+    const issues = [];
+    const seen = new Set();
+
+    // Check 1 — images in above-fold containers
+    const aboveFoldContainerSelectors = [
+      'header',
+      '.header',
+      '[class*="header"]',
+      '.banner',
+      '[class*="banner"]',
+    ];
+
+    for (const containerSel of aboveFoldContainerSelectors) {
+      $(`${containerSel} img[loading="lazy"]`).each((_, el) => {
+        const $img = $(el);
+        const src = $img.attr('src') || '';
+        if (seen.has(src)) return;
+        seen.add(src);
+
+        issues.push({
+          severity: 'warning',
+          type: 'above-fold-image-lazy-loaded',
+          url: src,
+          alt: $img.attr('alt') || '',
+          container: containerSel,
+          message: `Above-fold image "${src}" inside "${containerSel}" has loading="lazy". This delays LCP.`,
+          recommendation: 'Use loading="eager" (or omit the loading attribute) for images inside header/banner containers. Reserve lazy loading for below-fold images.',
+        });
+      });
+    }
+
+    // Check 2 — first <img> on the entire page that is lazy without fetchpriority="high"
+    const allImgs = $('img').toArray();
+    if (allImgs.length > 0) {
+      const firstImg = $(allImgs[0]);
+      const isLazy = firstImg.attr('loading') === 'lazy';
+      const hasFetchPriority = firstImg.attr('fetchpriority') === 'high';
+      const src = firstImg.attr('src') || '';
+
+      if (isLazy && !hasFetchPriority && !seen.has(src)) {
+        seen.add(src);
+        issues.push({
+          severity: 'warning',
+          type: 'above-fold-image-lazy-loaded',
+          url: src,
+          alt: firstImg.attr('alt') || '',
+          container: 'first-image-on-page',
+          message: `First image on page "${src}" has loading="lazy" without fetchpriority="high". This delays LCP.`,
+          recommendation: 'The first visible image should use loading="eager" or fetchpriority="high" to ensure fast LCP.',
+        });
+      }
+    }
+
+    return issues;
+  }
+
+  /**
+   * Static analysis of JS files for loadFragment() calls without eager override.
+   * @param {Array<{filename: string, content: string}>} jsFiles
+   * @returns {Array} issues
+   */
+  detectFragmentIssues(jsFiles) {
+    const issues = [];
+
+    if (!jsFiles || jsFiles.length === 0) {
+      return issues;
+    }
+
+    for (const { filename, content } of jsFiles) {
+      // Find all loadFragment( calls and their line numbers
+      const lines = content.split('\n');
+      const loadFragmentLines = [];
+
+      lines.forEach((line, idx) => {
+        if (line.includes('loadFragment(')) {
+          loadFragmentLines.push(idx + 1); // 1-based line number
+        }
+      });
+
+      if (loadFragmentLines.length === 0) continue;
+
+      // Check if the file contains an eager override anywhere
+      // Patterns: img.loading = 'eager' / img.loading='eager' / loading = 'eager' / setAttribute('loading', 'eager')
+      const hasEagerOverride = /img\.loading\s*=\s*['"]eager['"]/.test(content)
+        || /loading\s*=\s*['"]eager['"]/.test(content)
+        || /setAttribute\s*\(\s*['"]loading['"]\s*,\s*['"]eager['"]/.test(content);
+
+      if (!hasEagerOverride) {
+        issues.push({
+          severity: 'warning',
+          type: 'fragment-images-not-eagerly-loaded',
+          file: filename,
+          line: loadFragmentLines[0],
+          message: `loadFragment() called in "${filename}" but no img.loading = 'eager' override found. Fragment images will default to lazy loading.`,
+          recommendation: "After loadFragment(), set eager loading on images: fragment.querySelectorAll('img').forEach(img => { img.loading = 'eager'; })",
+        });
+      }
+    }
+
+    return issues;
+  }
+
+  /**
    * Detect form HTML performance issues
    */
   detectIssues(analysis) {
@@ -175494,19 +175758,31 @@ class FormHTMLAnalyzer {
       });
     }
 
+    // Above-fold images with lazy loading (Gap 2)
+    if (analysis.aboveFoldLazyIssues && analysis.aboveFoldLazyIssues.length > 0) {
+      issues.push(...analysis.aboveFoldLazyIssues);
+    }
+
     return issues;
   }
 
   /**
-   * Perform full analysis with issue detection
+   * Perform full analysis with issue detection.
+   * Optionally accepts jsFiles for Gap 5 (fragment eager-load check).
    */
-  analyzeWithIssues(html) {
+  analyzeWithIssues(html, jsFiles = []) {
     const analysis = this.analyze(html);
     if (analysis.error) {
       return analysis;
     }
 
     analysis.issues = this.detectIssues(analysis);
+
+    // Gap 5 — fragment eager-load check (static JS analysis)
+    if (jsFiles && jsFiles.length > 0) {
+      analysis.issues.push(...this.detectFragmentIssues(jsFiles));
+    }
+
     return analysis;
   }
 
@@ -175649,6 +175925,12 @@ class FormCSSAnalyzer {
 
     // Check for large CSS files (use original content for size)
     issues.push(...this.detectLargeFiles(filename, content));
+
+    // Check for non-composited animations
+    issues.push(...this.detectNonCompositedAnimations(filename, activeContent));
+
+    // Check for missing will-change on transform transitions/animations
+    issues.push(...this.detectMissingWillChange(filename, activeContent));
 
     return issues;
   }
@@ -175970,6 +176252,120 @@ class FormCSSAnalyzer {
         size,
         recommendation: 'Split into critical and non-critical CSS. Load critical CSS inline and defer non-critical styles. Large CSS files delay form rendering.',
       });
+    }
+
+    return issues;
+  }
+
+  /**
+   * Detect @keyframes that animate non-composited CSS properties.
+   * Non-composited properties force layout/paint and are expensive to animate.
+   * @param {string} filename
+   * @param {string} content - comment-stripped CSS
+   * @returns {Array} issues
+   */
+  detectNonCompositedAnimations(filename, content) {
+    const issues = [];
+
+    // Properties that are non-composited when animated
+    const nonCompositedProps = [
+      'top', 'left', 'right', 'bottom',
+      'width', 'height',
+      'margin', 'margin-top', 'margin-right', 'margin-bottom', 'margin-left',
+      'padding', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left',
+      'font-size',
+    ];
+
+    // Match @keyframes blocks: @keyframes name { ... }
+    // Use a manual scan to correctly handle nested braces
+    const keyframePattern = /@keyframes\s+([\w-]+)\s*\{/g;
+    let match;
+
+    while ((match = keyframePattern.exec(content)) !== null) {
+      const keyframeName = match[1];
+      const blockStart = match.index + match[0].length;
+
+      // Find the matching closing brace, tracking nesting
+      let depth = 1;
+      let i = blockStart;
+      while (i < content.length && depth > 0) {
+        if (content[i] === '{') depth++;
+        else if (content[i] === '}') depth--;
+        i++;
+      }
+      const blockContent = content.substring(blockStart, i - 1);
+
+      // Check if any non-composited property appears in this keyframe block
+      for (const prop of nonCompositedProps) {
+        // Match the property as a CSS property name (preceded by whitespace or { or ;)
+        const propPattern = new RegExp(`(?:^|[{;,\\s])${prop.replace('-', '\\-')}\\s*:`, 'm');
+        if (propPattern.test(blockContent)) {
+          const lineNumber = this.getLineNumber(content, match.index);
+          issues.push({
+            severity: 'warning',
+            type: 'non-composited-animation',
+            file: filename,
+            line: lineNumber,
+            property: prop,
+            keyframeName,
+            message: `@keyframes "${keyframeName}" animates non-composited property "${prop}". This forces layout/paint on every frame.`,
+            recommendation: `Replace "${prop}" animation with "transform" equivalent (e.g. translateX/Y for left/top, scaleX/Y for width/height). Non-composited animations cause jank.`,
+          });
+          break; // One issue per keyframe block — report the first offending property
+        }
+      }
+    }
+
+    return issues;
+  }
+
+  /**
+   * Detect transition/animation declarations referencing "transform" without will-change: transform.
+   * Covers:
+   *   - transition: ... transform ... (transform mentioned in transition value)
+   *   - animation: ... (rule block or global CSS has @keyframes using transform)
+   *   - rule block directly contains both animation: and transform:
+   * @param {string} filename
+   * @param {string} content - comment-stripped CSS
+   * @returns {Array} issues
+   */
+  detectMissingWillChange(filename, content) {
+    const issues = [];
+
+    // Pre-check: does this CSS file have any @keyframes that use transform?
+    const keyframesUseTransform = /@keyframes[\s\S]*?transform\s*:/i.test(content);
+
+    // Match rule blocks: selector { ... }
+    const ruleBlockPattern = /([^{}@][^{}]*?)\{([^{}]*)\}/g;
+    let match;
+
+    while ((match = ruleBlockPattern.exec(content)) !== null) {
+      const selector = match[1].trim();
+      const block = match[2];
+
+      // Skip @-rules (keyframes, media, etc.) and empty selectors
+      if (selector.startsWith('@') || selector === '') continue;
+
+      const hasTransformTransition = /transition\s*:[^;]*transform/i.test(block);
+      // animation: in rule block AND (transform in same block, or any keyframe uses transform)
+      const hasAnimation = /animation\s*:/i.test(block);
+      const hasAnimationWithTransform = hasAnimation && (/transform/i.test(block) || keyframesUseTransform);
+
+      if (hasTransformTransition || hasAnimationWithTransform) {
+        const hasWillChange = /will-change\s*:\s*transform/i.test(block);
+        if (!hasWillChange) {
+          const lineNumber = this.getLineNumber(content, match.index);
+          issues.push({
+            severity: 'info',
+            type: 'missing-will-change',
+            file: filename,
+            line: lineNumber,
+            selector: selector.substring(0, 80),
+            message: `Rule "${selector.substring(0, 60)}" uses transform transition/animation without will-change: transform.`,
+            recommendation: 'Add "will-change: transform" to hint the browser to promote this element to its own compositor layer, improving animation smoothness.',
+          });
+        }
+      }
     }
 
     return issues;
