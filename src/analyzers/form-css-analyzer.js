@@ -101,6 +101,12 @@ export class FormCSSAnalyzer {
     // Check for large CSS files (use original content for size)
     issues.push(...this.detectLargeFiles(filename, content));
 
+    // Check for non-composited animations
+    issues.push(...this.detectNonCompositedAnimations(filename, activeContent));
+
+    // Check for missing will-change on transform transitions/animations
+    issues.push(...this.detectMissingWillChange(filename, activeContent));
+
     return issues;
   }
 
@@ -421,6 +427,120 @@ export class FormCSSAnalyzer {
         size,
         recommendation: 'Split into critical and non-critical CSS. Load critical CSS inline and defer non-critical styles. Large CSS files delay form rendering.',
       });
+    }
+
+    return issues;
+  }
+
+  /**
+   * Detect @keyframes that animate non-composited CSS properties.
+   * Non-composited properties force layout/paint and are expensive to animate.
+   * @param {string} filename
+   * @param {string} content - comment-stripped CSS
+   * @returns {Array} issues
+   */
+  detectNonCompositedAnimations(filename, content) {
+    const issues = [];
+
+    // Properties that are non-composited when animated
+    const nonCompositedProps = [
+      'top', 'left', 'right', 'bottom',
+      'width', 'height',
+      'margin', 'margin-top', 'margin-right', 'margin-bottom', 'margin-left',
+      'padding', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left',
+      'font-size',
+    ];
+
+    // Match @keyframes blocks: @keyframes name { ... }
+    // Use a manual scan to correctly handle nested braces
+    const keyframePattern = /@keyframes\s+([\w-]+)\s*\{/g;
+    let match;
+
+    while ((match = keyframePattern.exec(content)) !== null) {
+      const keyframeName = match[1];
+      const blockStart = match.index + match[0].length;
+
+      // Find the matching closing brace, tracking nesting
+      let depth = 1;
+      let i = blockStart;
+      while (i < content.length && depth > 0) {
+        if (content[i] === '{') depth++;
+        else if (content[i] === '}') depth--;
+        i++;
+      }
+      const blockContent = content.substring(blockStart, i - 1);
+
+      // Check if any non-composited property appears in this keyframe block
+      for (const prop of nonCompositedProps) {
+        // Match the property as a CSS property name (preceded by whitespace or { or ;)
+        const propPattern = new RegExp(`(?:^|[{;,\\s])${prop.replace('-', '\\-')}\\s*:`, 'm');
+        if (propPattern.test(blockContent)) {
+          const lineNumber = this.getLineNumber(content, match.index);
+          issues.push({
+            severity: 'warning',
+            type: 'non-composited-animation',
+            file: filename,
+            line: lineNumber,
+            property: prop,
+            keyframeName,
+            message: `@keyframes "${keyframeName}" animates non-composited property "${prop}". This forces layout/paint on every frame.`,
+            recommendation: `Replace "${prop}" animation with "transform" equivalent (e.g. translateX/Y for left/top, scaleX/Y for width/height). Non-composited animations cause jank.`,
+          });
+          break; // One issue per keyframe block — report the first offending property
+        }
+      }
+    }
+
+    return issues;
+  }
+
+  /**
+   * Detect transition/animation declarations referencing "transform" without will-change: transform.
+   * Covers:
+   *   - transition: ... transform ... (transform mentioned in transition value)
+   *   - animation: ... (rule block or global CSS has @keyframes using transform)
+   *   - rule block directly contains both animation: and transform:
+   * @param {string} filename
+   * @param {string} content - comment-stripped CSS
+   * @returns {Array} issues
+   */
+  detectMissingWillChange(filename, content) {
+    const issues = [];
+
+    // Pre-check: does this CSS file have any @keyframes that use transform?
+    const keyframesUseTransform = /@keyframes[\s\S]*?transform\s*:/i.test(content);
+
+    // Match rule blocks: selector { ... }
+    const ruleBlockPattern = /([^{}@][^{}]*?)\{([^{}]*)\}/g;
+    let match;
+
+    while ((match = ruleBlockPattern.exec(content)) !== null) {
+      const selector = match[1].trim();
+      const block = match[2];
+
+      // Skip @-rules (keyframes, media, etc.) and empty selectors
+      if (selector.startsWith('@') || selector === '') continue;
+
+      const hasTransformTransition = /transition\s*:[^;]*transform/i.test(block);
+      // animation: in rule block AND (transform in same block, or any keyframe uses transform)
+      const hasAnimation = /animation\s*:/i.test(block);
+      const hasAnimationWithTransform = hasAnimation && (/transform/i.test(block) || keyframesUseTransform);
+
+      if (hasTransformTransition || hasAnimationWithTransform) {
+        const hasWillChange = /will-change\s*:\s*transform/i.test(block);
+        if (!hasWillChange) {
+          const lineNumber = this.getLineNumber(content, match.index);
+          issues.push({
+            severity: 'info',
+            type: 'missing-will-change',
+            file: filename,
+            line: lineNumber,
+            selector: selector.substring(0, 80),
+            message: `Rule "${selector.substring(0, 60)}" uses transform transition/animation without will-change: transform.`,
+            recommendation: 'Add "will-change: transform" to hint the browser to promote this element to its own compositor layer, improving animation smoothness.',
+          });
+        }
+      }
     }
 
     return issues;

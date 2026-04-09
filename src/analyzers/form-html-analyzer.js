@@ -1,5 +1,23 @@
 import * as cheerio from 'cheerio';
 
+// Properties that force layout / are non-composited when animated
+const NON_COMPOSITED_ANIM_PROPS = new Set([
+  'top', 'left', 'right', 'bottom',
+  'width', 'height',
+  'margin', 'margin-top', 'margin-right', 'margin-bottom', 'margin-left',
+  'padding', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left',
+  'font-size',
+]);
+
+// CSS selectors / tag names considered "above the fold"
+const ABOVE_FOLD_SELECTORS = [
+  'header',
+  '.header',
+  '[class*="header"]',
+  '.banner',
+  '[class*="banner"]',
+];
+
 /**
  * Analyzes rendered form HTML for performance issues
  * Focus: Client-side rendered form content
@@ -100,6 +118,8 @@ export class FormHTMLAnalyzer {
       scripts: this.analyzePageScripts($), // Analyze ALL scripts on page (not just in form)
       resources: this.analyzeFormResources($, formContainer),
       rendering: this.analyzeRenderingPerformance($, formContainer),
+      aboveFoldLazyIssues: this.detectAboveFoldLazyImages($),
+      imageUrls: this.collectImageUrls($),
       issues: [],
     };
   }
@@ -285,6 +305,250 @@ export class FormHTMLAnalyzer {
   }
 
   /**
+   * Classify image URLs (with known sizes) into issues.
+   * Called from analyzeWithIssues (sync) or tests directly.
+   * @param {Array<{url: string, fileSizeKb: number|null}>} imageSizes
+   * @returns {Array} issues
+   */
+  classifyImageIssues(imageSizes) {
+    const issues = [];
+
+    for (const { url, fileSizeKb } of imageSizes) {
+      const isGif = /\.gif(\?|$)/i.test(url);
+
+      if (isGif) {
+        if (fileSizeKb === null) {
+          // HEAD request failed — flag on URL alone
+          issues.push({
+            severity: 'warning',
+            type: 'animated-gif-detected',
+            url,
+            fileSizeKb: null,
+            message: `Animated GIF detected: "${url}". GIF format is inefficient regardless of size.`,
+            recommendation: 'Replace GIFs with video (<video autoplay loop muted playsinline>) or WebP animations for smaller file size and better performance.',
+          });
+        } else if (fileSizeKb > 200) {
+          issues.push({
+            severity: 'error',
+            type: 'animated-gif-detected',
+            url,
+            fileSizeKb,
+            message: `Large animated GIF (${fileSizeKb.toFixed(1)} KB): "${url}". Severely impacts page weight.`,
+            recommendation: 'Replace GIFs with video (<video autoplay loop muted playsinline>) or WebP animations for smaller file size and better performance.',
+          });
+        } else if (fileSizeKb > 50) {
+          issues.push({
+            severity: 'warning',
+            type: 'animated-gif-detected',
+            url,
+            fileSizeKb,
+            message: `Animated GIF (${fileSizeKb.toFixed(1)} KB): "${url}". GIF format is inefficient.`,
+            recommendation: 'Replace GIFs with video (<video autoplay loop muted playsinline>) or WebP animations for smaller file size and better performance.',
+          });
+        }
+      }
+
+      // Oversized image check — applies to ALL formats (when size is known)
+      if (fileSizeKb !== null) {
+        if (fileSizeKb > 500) {
+          issues.push({
+            severity: 'error',
+            type: 'oversized-image',
+            url,
+            fileSizeKb,
+            message: `Oversized image (${fileSizeKb.toFixed(1)} KB): "${url}". Exceeds 500 KB threshold.`,
+            recommendation: 'Compress and resize images. Use modern formats (WebP/AVIF). Target < 150 KB for most images.',
+          });
+        } else if (fileSizeKb > 150) {
+          issues.push({
+            severity: 'warning',
+            type: 'oversized-image',
+            url,
+            fileSizeKb,
+            message: `Large image (${fileSizeKb.toFixed(1)} KB): "${url}". Exceeds 150 KB warning threshold.`,
+            recommendation: 'Compress and resize images. Use modern formats (WebP/AVIF). Target < 150 KB for most images.',
+          });
+        }
+      }
+    }
+
+    return issues;
+  }
+
+  /**
+   * Collect image URLs from HTML (img src + source type=image/gif).
+   * @param {CheerioAPI} $ - Cheerio instance
+   * @returns {string[]} array of absolute-or-relative URLs
+   */
+  collectImageUrls($) {
+    const urls = new Set();
+
+    $('img[src]').each((_, el) => {
+      const src = $(el).attr('src');
+      if (src && !src.startsWith('data:')) {
+        urls.add(src);
+      }
+    });
+
+    // <picture><source type="image/gif" srcset="...">
+    $('source[type="image/gif"]').each((_, el) => {
+      const srcset = $(el).attr('srcset') || $(el).attr('src');
+      if (srcset && !srcset.startsWith('data:')) {
+        // srcset may have multiple values; take the first URL part
+        const firstUrl = srcset.split(',')[0].trim().split(/\s+/)[0];
+        if (firstUrl) urls.add(firstUrl);
+      }
+    });
+
+    return Array.from(urls);
+  }
+
+  /**
+   * Fetch Content-Length for a list of URLs using HEAD requests.
+   * Max 10 concurrent, 3s timeout per request. Never throws.
+   * @param {string[]} urls
+   * @returns {Promise<Map<string, number|null>>} url → fileSizeKb (or null on failure)
+   */
+  async fetchImageSizes(urls) {
+    const result = new Map();
+    const CONCURRENCY = 10;
+    const TIMEOUT_MS = 3000;
+
+    async function fetchOne(url) {
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+        const resp = await fetch(url, { method: 'HEAD', signal: controller.signal });
+        clearTimeout(timer);
+        const contentLength = resp.headers.get('content-length');
+        return contentLength ? parseInt(contentLength, 10) / 1024 : null;
+      } catch {
+        return null;
+      }
+    }
+
+    // Process in batches of CONCURRENCY
+    for (let i = 0; i < urls.length; i += CONCURRENCY) {
+      const batch = urls.slice(i, i + CONCURRENCY);
+      const sizes = await Promise.all(batch.map(fetchOne));
+      batch.forEach((url, idx) => result.set(url, sizes[idx]));
+    }
+
+    return result;
+  }
+
+  /**
+   * Detect above-fold images with loading="lazy".
+   * Checks:
+   *  1. Any <img loading="lazy"> inside header/.header/[class*="header"]/.banner/[class*="banner"]
+   *  2. The first <img> on the page that is lazy but has no fetchpriority="high"
+   * @param {CheerioAPI} $
+   * @returns {Array} issues
+   */
+  detectAboveFoldLazyImages($) {
+    const issues = [];
+    const seen = new Set();
+
+    // Check 1 — images in above-fold containers
+    const aboveFoldContainerSelectors = [
+      'header',
+      '.header',
+      '[class*="header"]',
+      '.banner',
+      '[class*="banner"]',
+    ];
+
+    for (const containerSel of aboveFoldContainerSelectors) {
+      $(`${containerSel} img[loading="lazy"]`).each((_, el) => {
+        const $img = $(el);
+        const src = $img.attr('src') || '';
+        if (seen.has(src)) return;
+        seen.add(src);
+
+        issues.push({
+          severity: 'warning',
+          type: 'above-fold-image-lazy-loaded',
+          url: src,
+          alt: $img.attr('alt') || '',
+          container: containerSel,
+          message: `Above-fold image "${src}" inside "${containerSel}" has loading="lazy". This delays LCP.`,
+          recommendation: 'Use loading="eager" (or omit the loading attribute) for images inside header/banner containers. Reserve lazy loading for below-fold images.',
+        });
+      });
+    }
+
+    // Check 2 — first <img> on the entire page that is lazy without fetchpriority="high"
+    const allImgs = $('img').toArray();
+    if (allImgs.length > 0) {
+      const firstImg = $(allImgs[0]);
+      const isLazy = firstImg.attr('loading') === 'lazy';
+      const hasFetchPriority = firstImg.attr('fetchpriority') === 'high';
+      const src = firstImg.attr('src') || '';
+
+      if (isLazy && !hasFetchPriority && !seen.has(src)) {
+        seen.add(src);
+        issues.push({
+          severity: 'warning',
+          type: 'above-fold-image-lazy-loaded',
+          url: src,
+          alt: firstImg.attr('alt') || '',
+          container: 'first-image-on-page',
+          message: `First image on page "${src}" has loading="lazy" without fetchpriority="high". This delays LCP.`,
+          recommendation: 'The first visible image should use loading="eager" or fetchpriority="high" to ensure fast LCP.',
+        });
+      }
+    }
+
+    return issues;
+  }
+
+  /**
+   * Static analysis of JS files for loadFragment() calls without eager override.
+   * @param {Array<{filename: string, content: string}>} jsFiles
+   * @returns {Array} issues
+   */
+  detectFragmentIssues(jsFiles) {
+    const issues = [];
+
+    if (!jsFiles || jsFiles.length === 0) {
+      return issues;
+    }
+
+    for (const { filename, content } of jsFiles) {
+      // Find all loadFragment( calls and their line numbers
+      const lines = content.split('\n');
+      const loadFragmentLines = [];
+
+      lines.forEach((line, idx) => {
+        if (line.includes('loadFragment(')) {
+          loadFragmentLines.push(idx + 1); // 1-based line number
+        }
+      });
+
+      if (loadFragmentLines.length === 0) continue;
+
+      // Check if the file contains an eager override anywhere
+      // Patterns: img.loading = 'eager' / img.loading='eager' / loading = 'eager' / setAttribute('loading', 'eager')
+      const hasEagerOverride = /img\.loading\s*=\s*['"]eager['"]/.test(content)
+        || /loading\s*=\s*['"]eager['"]/.test(content)
+        || /setAttribute\s*\(\s*['"]loading['"]\s*,\s*['"]eager['"]/.test(content);
+
+      if (!hasEagerOverride) {
+        issues.push({
+          severity: 'warning',
+          type: 'fragment-images-not-eagerly-loaded',
+          file: filename,
+          line: loadFragmentLines[0],
+          message: `loadFragment() called in "${filename}" but no img.loading = 'eager' override found. Fragment images will default to lazy loading.`,
+          recommendation: "After loadFragment(), set eager loading on images: fragment.querySelectorAll('img').forEach(img => { img.loading = 'eager'; })",
+        });
+      }
+    }
+
+    return issues;
+  }
+
+  /**
    * Detect form HTML performance issues
    */
   detectIssues(analysis) {
@@ -436,19 +700,31 @@ export class FormHTMLAnalyzer {
       });
     }
 
+    // Above-fold images with lazy loading (Gap 2)
+    if (analysis.aboveFoldLazyIssues && analysis.aboveFoldLazyIssues.length > 0) {
+      issues.push(...analysis.aboveFoldLazyIssues);
+    }
+
     return issues;
   }
 
   /**
-   * Perform full analysis with issue detection
+   * Perform full analysis with issue detection.
+   * Optionally accepts jsFiles for Gap 5 (fragment eager-load check).
    */
-  analyzeWithIssues(html) {
+  analyzeWithIssues(html, jsFiles = []) {
     const analysis = this.analyze(html);
     if (analysis.error) {
       return analysis;
     }
 
     analysis.issues = this.detectIssues(analysis);
+
+    // Gap 5 — fragment eager-load check (static JS analysis)
+    if (jsFiles && jsFiles.length > 0) {
+      analysis.issues.push(...this.detectFragmentIssues(jsFiles));
+    }
+
     return analysis;
   }
 
