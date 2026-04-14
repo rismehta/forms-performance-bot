@@ -183465,6 +183465,8 @@ class CustomFunctionAnalyzer {
       },
     });
 
+    const bulkSetPropertyGroups = this.detectBulkSetProperty(node);
+
     return {
       functionName,
       file: file.filename,
@@ -183472,10 +183474,97 @@ class CustomFunctionAnalyzer {
       hasDOMAccess: domAccesses.length > 0,
       hasWindowAccess: windowAccesses.length > 0,
       hasHTTPRequests: httpRequests.length > 0,
+      hasBulkSetProperty: bulkSetPropertyGroups.length > 0,
       domAccesses,
       windowAccesses,
       httpRequests,
+      bulkSetPropertyGroups,
     };
+  }
+
+  /**
+   * Recursively builds a dotted path string from a MemberExpression node.
+   * Handles optional chaining (a?.b → "a.b").
+   * Returns null if node is not a MemberExpression/Identifier chain.
+   */
+  getMemberExpressionPath(node) {
+    if (!node) return null;
+    if (node.type === 'Identifier') return node.name;
+    if (node.type === 'MemberExpression') {
+      const objectPath = this.getMemberExpressionPath(node.object);
+      const propertyName = node.computed
+        ? null  // skip computed access like obj[key]
+        : node.property?.name;
+      if (!objectPath || !propertyName) return null;
+      return `${objectPath}.${propertyName}`;
+    }
+    // ChainExpression wrapper (acorn wraps a?.b in ChainExpression)
+    if (node.type === 'ChainExpression') {
+      return this.getMemberExpressionPath(node.expression);
+    }
+    return null;
+  }
+
+  /**
+   * Detects bulk setProperty({value}) calls on the same parent panel path.
+   * Returns array of violation groups: { parentPath, calls: [{line, fieldName}] }
+   */
+  detectBulkSetProperty(node) {
+    // Map: parentPath → array of { line, fieldName }
+    const groups = new Map();
+
+    simple(node, {
+      CallExpression: (callNode) => {
+        // Match: globals.functions.setProperty(fieldRef, { value: X })
+        const callee = callNode.callee;
+        if (
+          callee.type !== 'MemberExpression' ||
+          callee.property?.name !== 'setProperty'
+        ) return;
+
+        // Verify callee object is globals.functions
+        const calleeObjPath = this.getMemberExpressionPath(callee.object);
+        if (calleeObjPath !== 'globals.functions') return;
+
+        const args = callNode.arguments;
+        if (args.length < 2) return;
+
+        // Second arg must be an ObjectExpression containing a 'value' key
+        const secondArg = args[1];
+        if (secondArg.type !== 'ObjectExpression') return;
+        const hasValueProp = secondArg.properties.some(
+          p => p.key?.name === 'value' || p.key?.value === 'value'
+        );
+        if (!hasValueProp) return;
+
+        // First arg: extract full path and parent path
+        const fullPath = this.getMemberExpressionPath(args[0]);
+        if (!fullPath) return;
+
+        const segments = fullPath.split('.');
+        if (segments.length < 2) return;
+
+        const fieldName = segments[segments.length - 1];
+        const parentPath = segments.slice(0, -1).join('.');
+
+        if (!groups.has(parentPath)) {
+          groups.set(parentPath, []);
+        }
+        groups.get(parentPath).push({
+          line: callNode.loc?.start.line,
+          fieldName,
+        });
+      },
+    });
+
+    // Return groups with 3+ calls (threshold for flagging)
+    const violations = [];
+    for (const [parentPath, calls] of groups.entries()) {
+      if (calls.length >= 3) {
+        violations.push({ parentPath, calls });
+      }
+    }
+    return violations;
   }
 
   /**
@@ -183543,6 +183632,26 @@ class CustomFunctionAnalyzer {
           recommendation: 'Replace direct HTTP calls with the form\'s API tool (request() function). This ensures proper error handling, loading states, and integration with the forms runtime.',
           cwvImpact: 'LCP, TBT',
         });
+      }
+
+      // Bulk setProperty violation
+      if (analysis.hasBulkSetProperty) {
+        for (const group of analysis.bulkSetPropertyGroups) {
+          violations.push({
+            severity: 'warning',
+            type: 'bulk-set-property-use-import-data',
+            functionName: analysis.functionName,
+            file: analysis.file,
+            line: group.calls[0]?.line || analysis.line,
+            message: `Custom function "${analysis.functionName}" calls setProperty ${group.calls.length} times on fields of "${group.parentPath}". Use importData for batch updates.`,
+            details: group.calls,
+            parentPath: group.parentPath,
+            callCount: group.calls.length,
+            fieldNames: group.calls.map(c => c.fieldName),
+            recommendation: `Replace individual setProperty calls with a single importData call:\n\`globals.functions.importData(${group.parentPath}, { ${group.calls.map(c => `${c.fieldName}: <value>`).join(', ')} })\``,
+            cwvImpact: 'INP, TBT',
+          });
+        }
       }
     }
 
@@ -188946,6 +189055,17 @@ class FormPRReporter {
         lines.push('');
         lines.push('**Recommendation:** Add null/undefined checks before accessing properties. These errors occur when functions don\'t handle missing data gracefully. Can be auto-fixed by AI.\n');
       }
+
+      const bulkSetPropertyIssues = newIssues.filter(i => i.type === 'bulk-set-property-use-import-data');
+
+      if (bulkSetPropertyIssues.length > 0) {
+        lines.push(`**⚡ ${bulkSetPropertyIssues.length} Bulk setProperty Pattern(s) — Use importData:**\n`);
+        bulkSetPropertyIssues.forEach(issue => {
+          lines.push(`- \`${issue.functionName}\` in \`${issue.file}\`: ${issue.callCount} \`setProperty\` calls on \`${issue.parentPath}\``);
+          lines.push(`  - ${issue.recommendation}`);
+        });
+        lines.push('');
+      }
     }
 
     // Show resolved violations
@@ -189263,6 +189383,13 @@ class FormPRReporter {
           impact.critical.push(`${httpRequestIssues.length} custom function(s) making HTTP requests`);
           impact.recommendations.push('Use request() API tool instead of direct HTTP calls in custom functions');
           score -= httpRequestIssues.length * 30;
+        }
+
+        const bulkSetPropertyIssues = newIssues.filter(i => i.type === 'bulk-set-property-use-import-data');
+        if (bulkSetPropertyIssues.length > 0) {
+          impact.warnings.push(`${bulkSetPropertyIssues.length} function(s) use bulk setProperty — replace with importData for batched updates`);
+          impact.recommendations.push('Replace bulk setProperty({value}) calls with importData for batch field updates');
+          score -= bulkSetPropertyIssues.length * 10;
         }
       }
 
