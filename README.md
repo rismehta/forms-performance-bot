@@ -171,7 +171,10 @@ PR (Before/After URLs) → URL extraction (HTML, Form JSON, JS/CSS from branch)
 
 ```
 src/
-├── index.js
+├── index.js           ← GitHub Actions entry point (PR + scheduled modes)
+├── pipeline.js        ← Shared analyzer pipeline (single source of truth)
+├── cli/
+│   └── analyze.js     ← Local CLI entry point
 ├── extractors/
 │   └── json-extractor.js
 ├── analyzers/
@@ -193,6 +196,28 @@ src/
     ├── config-loader.js
     └── github-helper.js
 ```
+
+### Adding a new analyzer
+
+`src/pipeline.js` is the single source of truth for the analyzer pipeline. Both the GitHub Action and the local CLI import from it. You only need to touch it once.
+
+**Steps:**
+
+1. **Create** `src/analyzers/my-analyzer.js` with `analyze(...)` and `compare(before, after)` methods following the existing analyzer pattern.
+
+2. **Wire into `src/pipeline.js`**:
+   - Import the analyzer at the top
+   - Call `analyze()` inside the `Promise.all([...])` in `runAnalysis()`
+   - Call `compare()` in the results assembly block
+   - Add the result key to the returned object
+
+3. **Report the findings** in `src/reporters/pr-reporter-form.js` — add a section that reads from the new results key.
+
+4. **Add unit tests** in `test/test-all-analyzers.js` using fixture data from `test/fixtures/`.
+
+5. **Update `test/test-cli.js`** — add the new key to `EXPECTED_KEYS` and assert the result shape.
+
+That's it. `src/index.js`, `src/cli/analyze.js`, and `test/test-runner.js` all pick up the change automatically through the shared pipeline.
 
 ## Performance checks (what the bot enforces)
 

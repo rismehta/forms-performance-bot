@@ -172877,3538 +172877,6 @@ class URLAnalyzer {
 }
 
 
-;// CONCATENATED MODULE: ./src/analyzers/form-analyzer.js
-/**
- * Analyzes adaptive form JSON for performance issues
- */
-class FormAnalyzer {
-  constructor(config = null) {
-    this.config = config;
-  }
-
-  /**
-   * Analyze a single form JSON
-   * @param {Object} formJson - Form JSON object
-   * @returns {Object} Analysis results
-   */
-  analyze(formJson) {
-    if (!formJson) {
-      return { error: 'No form JSON provided' };
-    }
-
-    return {
-      metadata: this.extractMetadata(formJson),
-      components: this.analyzeComponents(formJson),
-      events: this.analyzeEvents(formJson),
-      rules: this.analyzeRules(formJson),
-      fragments: this.analyzeFragments(formJson),
-      issues: this.detectIssues(formJson),
-    };
-  }
-
-  /**
-   * Extract basic form metadata
-   */
-  extractMetadata(formJson) {
-    return {
-      id: formJson.id,
-      title: formJson.title,
-      action: formJson.action,
-      version: formJson.adaptiveform,
-      theme: formJson.properties?.themeClientLibRef,
-      variant: formJson.properties?.variant,
-    };
-  }
-
-  /**
-   * Analyze form components structure
-   */
-  analyzeComponents(formJson, depth = 0) {
-    const stats = {
-      total: 0,
-      byType: {},
-      maxDepth: 0,
-      nestedPanels: 0,
-      repeatable: 0,
-      visible: 0,
-      hidden: 0,
-    };
-
-    const traverse = (node, currentDepth, isRoot = false) => {
-      if (!node) return;
-
-      // Update max depth
-      stats.maxDepth = Math.max(stats.maxDepth, currentDepth);
-
-      // Don't count the root form itself as a component
-      if (!isRoot) {
-        stats.total++;
-
-        // Count by type (exclude root form)
-        if (node.fieldType) {
-          stats.byType[node.fieldType] = (stats.byType[node.fieldType] || 0) + 1;
-        }
-
-        // Count special attributes (only for actual components, not root)
-        if (node.repeatable) stats.repeatable++;
-        
-        // Visibility check - only count if visible property exists
-        if (node.hasOwnProperty('visible')) {
-          if (node.visible === false) {
-            stats.hidden++;
-          } else {
-            stats.visible++;
-          }
-        } else {
-          // If no visible property, assume visible (default for AEM forms)
-          stats.visible++;
-        }
-        
-        if (node.fieldType === 'panel' && currentDepth > 0) stats.nestedPanels++;
-      }
-
-      // Traverse children
-      if (node[':items']) {
-        Object.values(node[':items']).forEach(child => {
-          traverse(child, currentDepth + 1, false);
-        });
-      }
-    };
-
-    // Start traversal, marking root as true
-    traverse(formJson, 0, true);
-    return stats;
-  }
-
-
-  /**
-   * Analyze event handlers in the form
-   */
-  analyzeEvents(formJson) {
-    const events = {
-      total: 0,
-      byType: {},
-      componentsWithEvents: 0,
-    };
-
-    const traverse = (node) => {
-      if (!node) return;
-
-      if (node.events) {
-        events.componentsWithEvents++;
-        Object.entries(node.events).forEach(([eventType, handlers]) => {
-          const handlerCount = Array.isArray(handlers) ? handlers.length : 1;
-          events.total += handlerCount;
-          events.byType[eventType] = (events.byType[eventType] || 0) + handlerCount;
-        });
-      }
-
-      if (node[':items']) {
-        Object.values(node[':items']).forEach(traverse);
-      }
-    };
-
-    traverse(formJson);
-    return events;
-  }
-
-  /**
-   * Analyze validation rules
-   */
-  analyzeRules(formJson) {
-    const rules = {
-      total: 0,
-      componentsWithRules: 0,
-      validationRules: 0,
-      customRules: 0,
-    };
-
-    const traverse = (node) => {
-      if (!node) return;
-
-      if (node.properties?.['fd:rules']) {
-        rules.componentsWithRules++;
-        rules.total++;
-      }
-
-      if (node.required) rules.validationRules++;
-      if (node.pattern) rules.validationRules++;
-      if (node.minimum !== undefined || node.maximum !== undefined) rules.validationRules++;
-
-      if (node[':items']) {
-        Object.values(node[':items']).forEach(traverse);
-      }
-    };
-
-    traverse(formJson);
-    return rules;
-  }
-
-  /**
-   * Analyze form fragments usage
-   */
-  analyzeFragments(formJson) {
-    const fragments = {
-      count: 0,
-      paths: [],
-    };
-
-    const traverse = (node) => {
-      if (!node) return;
-
-      if (node.fieldType === 'fragment' || node[':type']?.includes('fragment')) {
-        fragments.count++;
-        if (node.properties?.['fd:path']) {
-          fragments.paths.push(node.properties['fd:path']);
-        }
-      }
-
-      if (node[':items']) {
-        Object.values(node[':items']).forEach(traverse);
-      }
-    };
-
-    traverse(formJson);
-    return fragments;
-  }
-
-  /**
-   * Detect potential performance issues
-   */
-  detectIssues(formJson) {
-    const issues = [];
-    const components = this.analyzeComponents(formJson);
-    const events = this.analyzeEvents(formJson);
-
-    // Get thresholds from config or use defaults
-    const maxComponents = this.config?.thresholds?.form?.maxComponents || 75;
-    const maxDepth = this.config?.thresholds?.form?.maxDepth || 8;
-    const maxEventHandlers = this.config?.thresholds?.form?.maxEventHandlers || 30;
-    const maxNestedPanels = this.config?.thresholds?.form?.maxNestedPanels || 15;
-
-    // Too many components
-    if (components.total > maxComponents) {
-      issues.push({
-        severity: 'warning',
-        type: 'component-count',
-        message: `High component count (${components.total}). Consider breaking into multiple forms or using fragments.`,
-        value: components.total,
-        threshold: maxComponents,
-        cwvImpact: 'LCP, INP'
-      });
-    }
-
-    // Deep nesting
-    if (components.maxDepth > maxDepth) {
-      issues.push({
-        severity: 'warning',
-        type: 'nesting-depth',
-        message: `Deep nesting detected (${components.maxDepth} levels). This may impact rendering performance.`,
-        value: components.maxDepth,
-        threshold: maxDepth,
-        cwvImpact: 'INP'
-      });
-    }
-
-    // Too many nested panels
-    if (components.nestedPanels > maxNestedPanels) {
-      issues.push({
-        severity: 'info',
-        type: 'nested-panels',
-        message: `High number of nested panels (${components.nestedPanels}). Consider flattening the structure.`,
-        value: components.nestedPanels,
-        threshold: maxNestedPanels,
-        cwvImpact: 'LCP'
-      });
-    }
-
-    // Too many event handlers
-    if (events.total > maxEventHandlers) {
-      issues.push({
-        severity: 'warning',
-        type: 'event-handlers',
-        message: `High number of event handlers (${events.total}). Consider consolidating event logic.`,
-        value: events.total,
-        threshold: maxEventHandlers,
-        cwvImpact: 'INP, TBT'
-      });
-    }
-
-    return issues;
-  }
-
-  /**
-   * Compare two form JSONs
-   */
-  compare(beforeJson, afterJson) {
-    if (!beforeJson || !afterJson) {
-      return { error: 'Missing form JSON for comparison' };
-    }
-
-    const beforeAnalysis = this.analyze(beforeJson);
-    const afterAnalysis = this.analyze(afterJson);
-
-    return {
-      before: beforeAnalysis,
-      after: afterAnalysis,
-      delta: {
-        components: afterAnalysis.components.total - beforeAnalysis.components.total,
-        events: afterAnalysis.events.total - beforeAnalysis.events.total,
-        maxDepth: afterAnalysis.components.maxDepth - beforeAnalysis.components.maxDepth,
-      },
-      newIssues: this.findNewIssues(beforeAnalysis.issues, afterAnalysis.issues),
-      resolvedIssues: this.findResolvedIssues(beforeAnalysis.issues, afterAnalysis.issues),
-    };
-  }
-
-  /**
-   * Find new issues introduced
-   */
-  findNewIssues(beforeIssues, afterIssues) {
-    return afterIssues.filter(afterIssue => {
-      return !beforeIssues.some(beforeIssue => beforeIssue.type === afterIssue.type);
-    });
-  }
-
-  /**
-   * Find issues that were resolved
-   */
-  findResolvedIssues(beforeIssues, afterIssues) {
-    return beforeIssues.filter(beforeIssue => {
-      return !afterIssues.some(afterIssue => afterIssue.type === beforeIssue.type);
-    });
-  }
-}
-
-
-;// CONCATENATED MODULE: ./src/analyzers/form-events-analyzer.js
-/**
- * Analyzes form events for performance anti-patterns
- * Specific check: API calls in initialize events should be in render instead
- */
-class FormEventsAnalyzer {
-  constructor(config = null) {
-    this.config = config;
-  }
-
-  /**
-   * Analyze form JSON for event-related issues
-   * @param {Object} formJson - Form JSON object
-   * @returns {Object} Analysis results
-   */
-  analyze(formJson) {
-    if (!formJson) {
-      return { error: 'No form JSON provided' };
-    }
-
-    const issues = [];
-    const apiCallPatterns = this.findAPICallsInInitialize(formJson, issues);
-
-    return {
-      apiCallsInInitialize: apiCallPatterns,
-      issues,
-    };
-  }
-
-  /**
-   * Find API calls in initialize events
-   * @param {Object} node - Form node
-   * @param {Array} issues - Issues array to populate
-   * @param {string} path - Current path in form
-   */
-  findAPICallsInInitialize(node, issues, path = '') {
-    const apiCalls = [];
-
-    if (!node) return apiCalls;
-
-    // Check if current node has initialize event with API call
-    if (node.events?.initialize) {
-      const initializeEvent = node.events.initialize;
-      
-      // Handle both string and array formats
-      const expressions = Array.isArray(initializeEvent) ? initializeEvent : [initializeEvent];
-      
-      expressions.forEach(expression => {
-        const hasAPICall = this.detectAPICall(expression);
-
-        if (hasAPICall) {
-          const fieldName = node.name || node.fieldType || path.split('.').pop() || 'form';
-          const fieldPath = path || fieldName;
-
-          apiCalls.push({
-            field: fieldName,
-            path: fieldPath,
-            expression: expression,
-            apiCallType: hasAPICall.type,
-          });
-
-          issues.push({
-            severity: 'error',
-            type: 'api-call-in-initialize',
-            field: fieldName,
-            path: fieldPath,
-            message: `API call found in initialize event for field "${fieldName}". This blocks form rendering.`,
-            expression: expression,
-            apiCallType: hasAPICall.type,
-            recommendation: 'Move API calls to custom events triggered after render, or use lazy loading patterns. Initialize events should only set up initial state, not fetch data.',
-          });
-        }
-      });
-    }
-
-    // Traverse children
-    if (node.items) {
-      if (Array.isArray(node.items)) {
-        node.items.forEach((child, index) => {
-          const childPath = path ? `${path}.items[${index}]` : `items[${index}]`;
-          apiCalls.push(...this.findAPICallsInInitialize(child, issues, childPath));
-        });
-      }
-    }
-
-    if (node[':items']) {
-      Object.entries(node[':items']).forEach(([key, child]) => {
-        const childPath = path ? `${path}.${key}` : key;
-        apiCalls.push(...this.findAPICallsInInitialize(child, issues, childPath));
-      });
-    }
-
-    return apiCalls;
-  }
-
-  /**
-   * Detect if an expression contains an API call
-   * @param {string} expression - Expression to check
-   * @returns {Object|null} API call info or null
-   */
-  detectAPICall(expression) {
-    if (typeof expression !== 'string') return null;
-
-    // Common API call patterns in adaptive forms
-    const patterns = [
-      { regex: /requestWithRetry\s*\([^)]+\)/gi, type: 'requestWithRetry' },
-      { regex: /request\s*\([^)]+\)/gi, type: 'request' },
-      { regex: /fetch\s*\([^)]+\)/gi, type: 'fetch' },
-      { regex: /\$\.(get|post|ajax|getJSON)\s*\(/gi, type: 'jquery-ajax' },
-      { regex: /XMLHttpRequest/gi, type: 'xhr' },
-      { regex: /axios\.(get|post|request)/gi, type: 'axios' },
-    ];
-
-    for (const pattern of patterns) {
-      if (pattern.regex.test(expression)) {
-        return { type: pattern.type };
-      }
-    }
-
-    return null;
-  }
-
-  /**
-   * Compare before and after analyses
-   */
-  compare(beforeJson, afterJson) {
-    if (!beforeJson || !afterJson) {
-      return { error: 'Missing form JSON for comparison' };
-    }
-
-    const beforeAnalysis = this.analyze(beforeJson);
-    const afterAnalysis = this.analyze(afterJson);
-
-    const resolvedIssues = beforeAnalysis.issues.filter(beforeIssue =>
-      !afterAnalysis.issues.some(afterIssue =>
-        afterIssue.field === beforeIssue.field && afterIssue.type === beforeIssue.type
-      )
-    );
-
-    return {
-      before: beforeAnalysis,
-      after: afterAnalysis,
-      delta: {
-        apiCallsAdded: afterAnalysis.apiCallsInInitialize.length - beforeAnalysis.apiCallsInInitialize.length,
-      },
-      newIssues: afterAnalysis.issues, // Report ALL issues in current state
-      resolvedIssues,
-    };
-  }
-}
-
-
-;// CONCATENATED MODULE: ./src/analyzers/hidden-fields-analyzer.js
-/**
- * Analyzes hidden fields to detect unnecessary DOM bloat
- * Detects fields that are always hidden and only used for data storage
- */
-
-
-class HiddenFieldsAnalyzer {
-  constructor(config = null) {
-    this.config = config;
-  }
-
-  /**
-   * Analyze form JSON and JavaScript for hidden field usage
-   * @param {Object} formJson - Form JSON object
-   * @param {Array} jsFiles - Array of {filename, content} objects
-   * @returns {Object} Analysis results
-   */
-  analyze(formJson, jsFiles = []) {
-    if (!formJson) {
-      return { error: 'No form JSON provided' };
-    }
-
-    lib_core.info(`[HiddenFields] Starting analysis with ${jsFiles.length} JS file(s)`);
-    
-    const hiddenFields = this.findHiddenFields(formJson);
-    lib_core.info(`[HiddenFields] Found ${hiddenFields.length} hidden field(s) in form JSON`);
-    
-    const fieldVisibilityChangesInJS = this.analyzeJSForVisibilityChanges(jsFiles);
-    const visibilityChangeCountInJS = Object.keys(fieldVisibilityChangesInJS).length;
-    lib_core.info(`[HiddenFields] Found visibility changes for ${visibilityChangeCountInJS} field identifier(s) in JS`);
-    
-    if (visibilityChangeCountInJS > 0) {
-      lib_core.info(`[HiddenFields] Visibility changes detected for: ${Object.keys(fieldVisibilityChangesInJS).slice(0, 5).join(', ')}${visibilityChangeCountInJS > 5 ? '...' : ''}`);
-    }
-    
-    const visibilityChangesInEvents = this.analyzeEventsForVisibilityChanges(formJson);
-    const visibilityChangeCountInEvents = Object.keys(visibilityChangesInEvents).length;
-    lib_core.info(`[HiddenFields] Found visibility changes for ${visibilityChangeCountInEvents} field identifier(s) in events`);
-    
-    if (visibilityChangeCountInEvents > 0) {
-      lib_core.info(`[HiddenFields] Visibility changes detected for: ${Object.keys(visibilityChangesInEvents).slice(0, 5).join(', ')}${visibilityChangeCountInEvents > 5 ? '...' : ''}`);
-    }
-    
-    const issues = this.detectUnnecessaryHiddenFields(hiddenFields, fieldVisibilityChangesInJS, visibilityChangesInEvents);
-    
-    return {
-      totalHiddenFields: hiddenFields.length,
-      hiddenFields,
-      fieldVisibilityChanges: fieldVisibilityChangesInJS,
-      fieldVisibilityChangesInEvents: visibilityChangesInEvents,
-      unnecessaryHiddenFields: issues.length,
-      issues,
-    };
-  }
-
-  /**
-   * Find all hidden fields in form JSON
-   * @param {Object} node - Form node
-   * @param {Array} fields - Array to populate
-   * @param {string} path - Current path
-   */
-  findHiddenFields(node, fields = [], path = '') {
-    if (!node) return fields;
-
-    // Check if this field is hidden
-    const isHidden = node.visible === false;
-    const hasVisibleRule = node.rules?.visible !== undefined;
-    const hasVisibleEvent = node.events && Object.keys(node.events).some(event =>
-      typeof node.events[event] === 'string' && node.events[event].includes('visible')
-    );
-
-    if (isHidden && node.name) {
-      const fieldName = node.name;
-      const fieldPath = path || fieldName;
-
-      fields.push({
-        name: fieldName,
-        path: fieldPath,
-        fieldType: node.fieldType,
-        hasVisibleRule,
-        hasVisibleEvent,
-        visibleRule: node.rules?.visible,
-        // Initially assume it's unnecessary unless proven otherwise
-        likelyUnnecessary: !hasVisibleRule && !hasVisibleEvent,
-      });
-    }
-
-    // Traverse children
-    if (node.items) {
-      if (Array.isArray(node.items)) {
-        node.items.forEach((child, index) => {
-          // Use child's name if available, otherwise fall back to index
-          const childPath = child?.name 
-            ? (path ? `${path}.${child.name}` : child.name)
-            : (path ? `${path}.items[${index}]` : `items[${index}]`);
-          this.findHiddenFields(child, fields, childPath);
-        });
-      }
-    }
-
-    if (node[':items']) {
-      Object.entries(node[':items']).forEach(([key, child]) => {
-        // Use child's name property, NOT the key (which is the node ID)
-        const childPath = child?.name 
-          ? (path ? `${path}.${child.name}` : child.name)
-          : (path ? `${path}.${key}` : key);
-        this.findHiddenFields(child, fields, childPath);
-      });
-    }
-
-    return fields;
-  }
-
-  /**
-   * Analyze events for visibility changes
-   * @param {object} formJson 
-   * @returns {object} Visibility changes found in events
-   * {
-   *   "node1": {
-   *     "madeVisible": true,
-   *     "files": [
-   *       {
-   *         "rules": ["rule1", "rule2"],
-   *       }
-   *     ]
-   *   }
-   * }
-   */
-  analyzeEventsForVisibilityChanges(formJson) {
-    const visibilityChanges = {};
-
-    // Pattern to check: does this handler set visibility?
-    const hasVisibilityChange = /visible\s*:\s*(true)\s*\(\)/;
-  
-    // Pattern to extract target path from dispatchEvent
-    // Handles: dispatchEvent(path, ...) or dispatchEvent('path', ...) or dispatchEvent("path", ...)
-    const targetPathPattern = /dispatchEvent\s*\(\s*['"]?([^'",\s][^'",]*?)['"]?\s*,/;
-
-
-    const traverse = (node) => {
-      if (!node) return;
-
-      if (node.events && typeof node.events === 'object' && Object.keys(node.events).length > 0) {
-        Object.entries(node.events).forEach(([eventType, handlers]) => {
-          if (Array.isArray(handlers)) {
-            handlers.forEach(handler => {
-              if (typeof handler !== 'string') return;
-
-              if (handler.includes('dispatchEvent') && hasVisibilityChange.test(handler)) {
-                const targetMatch = handler.match(targetPathPattern);
-                const visibleMatch = handler.match(hasVisibilityChange);
-                
-                if (targetMatch && visibleMatch) {
-                  // Normalize the path to remove $form. prefix for consistent matching
-                  const targetPath = this.normalizeEventPath(targetMatch[1].trim());
-                
-                  visibilityChanges[targetPath] = {
-                    madeVisible: true,
-                    rules: [handler],
-                  };
-                }
-              }
-            });
-          }
-        });
-      }
-
-      if (node[':items']) {
-        Object.values(node[':items']).forEach(traverse);
-      }
-
-      if (node.items && Array.isArray(node.items)) {
-        node.items.forEach(traverse);
-      }
-    };
-
-    traverse(formJson);
-    return visibilityChanges;
-  }
-
-  /**
-   * Analyze JavaScript files for setProperty calls that change visibility
-   * @param {Array} jsFiles - Array of {filename, content} objects
-   * @returns {Object} Field visibility changes found in JS
-   */
-  analyzeJSForVisibilityChanges(jsFiles) {
-    const visibilityChanges = {};
-    let totalMatches = 0;
-
-    lib_core.info(`[HiddenFields] Scanning ${jsFiles.length} JS file(s) for visibility changes...`);
-
-    jsFiles.forEach(file => {
-      const { filename, content } = file;
-      let fileMatches = 0;
-      
-      // Pattern 1: globals.functions.setProperty(globals.form.fieldName, { visible: true/false })
-      const setPropertyPattern = /globals\.functions\.setProperty\s*\(\s*globals\.form(?:\?\.)?([a-zA-Z0-9_.?]+)\s*,\s*\{[^}]*visible\s*:\s*(true|false)[^}]*\}/g;
-      
-      let match;
-      while ((match = setPropertyPattern.exec(content)) !== null) {
-        const fieldPath = match[1];
-        const visibleValue = match[2] === 'true';
-        fileMatches++;
-        totalMatches++;
-        
-        // Extract both field name AND full path for matching
-        // e.g., "?.panel?.subPanel?.email" → path: "panel.subPanel.email", name: "email"
-        const pathSegments = fieldPath.split(/[.?]/).filter(Boolean);
-        const fieldName = pathSegments[pathSegments.length - 1];
-        const fullPath = pathSegments.join('.');
-        
-        // Store by both name and full path
-        // This allows matching by name (for simple cases) and path (for duplicates)
-        const keys = [fieldName, fullPath];
-        
-        keys.forEach(key => {
-          if (!visibilityChanges[key]) {
-            visibilityChanges[key] = {
-              files: [],
-              madeVisible: false,
-              madeHidden: false,
-            };
-          }
-
-          visibilityChanges[key].files.push({
-            filename,
-            visible: visibleValue,
-            line: this.getLineNumber(content, match.index),
-          });
-
-          if (visibleValue) {
-            visibilityChanges[key].madeVisible = true;
-          } else {
-            visibilityChanges[key].madeHidden = true;
-          }
-        });
-      }
-
-      // Pattern 2: Direct property assignment like field.visible = true
-      const directAssignmentPattern = /globals\.form(?:\?\.)?([a-zA-Z0-9_.?]+)\.visible\s*=\s*(true|false)/g;
-      
-      while ((match = directAssignmentPattern.exec(content)) !== null) {
-        const fieldPath = match[1];
-        const visibleValue = match[2] === 'true';
-        
-        const pathSegments = fieldPath.split(/[.?]/).filter(Boolean);
-        const fieldName = pathSegments[pathSegments.length - 1];
-        const fullPath = pathSegments.join('.');
-        
-        const keys = [fieldName, fullPath];
-        
-        keys.forEach(key => {
-          if (!visibilityChanges[key]) {
-            visibilityChanges[key] = {
-              files: [],
-              madeVisible: false,
-              madeHidden: false,
-            };
-          }
-
-          visibilityChanges[key].files.push({
-            filename,
-            visible: visibleValue,
-            line: this.getLineNumber(content, match.index),
-          });
-
-          if (visibleValue) {
-            visibilityChanges[key].madeVisible = true;
-          }
-        });
-      }
-    });
-
-    return visibilityChanges;
-  }
-
-  /**
-   * Get line number from content and index
-   */
-  getLineNumber(content, index) {
-    return content.substring(0, index).split('\n').length;
-  }
-
-  /**
-   * Normalize event target path for matching
-   * Removes $form. prefix and optional chaining syntax
-   * @param {string} path - The path to normalize
-   * @returns {string} Normalized path
-   */
-  normalizeEventPath(path) {
-    return path
-      .replace(/^\$form\.?/, '')  // Remove $form. or $form prefix
-      .replace(/\?\./g, '.');      // Remove optional chaining
-  }
-
-  /**
-   * Detect unnecessary hidden fields
-   */
-  detectUnnecessaryHiddenFields(hiddenFields, visibilityChangesInJS, visibilityChangesInEvents) {
-    const issues = [];
-    let foundInJS = 0;
-    let foundInEvents = 0;
-
-    lib_core.info(`[HiddenFields] Analyzing ${hiddenFields.length} hidden field(s) for unnecessary usage...`);
-
-    hiddenFields.forEach((field, index) => {
-      const { name, path, hasVisibleRule, hasVisibleEvent, visibleRule } = field;
-      
-      // Check if field is ever made visible in JS or Events(Rules using dispatchEvent)
-      // Try multiple matching strategies for robustness:
-      // 1. Exact path match (most accurate)
-      // 2. Exact name match (fallback for simple cases)
-      // 3. Fuzzy match: any JS path ends with our path (handles parent path differences)
-      // 4. Fuzzy match: any Events path ends with our path (handles parent path differences)
-      
-      const jsVisibilityByPath = visibilityChangesInJS[path];
-      const jsVisibilityByName = visibilityChangesInJS[name];
-      const eventsVisibilityByPath = visibilityChangesInEvents[path];
-      const eventsVisibilityByName = visibilityChangesInEvents[name];
-      
-      let fuzzyMatchJS = null;
-      let fuzzyMatchJSPath = null;
-      let fuzzyMatchEvents = null;
-      let fuzzyMatchEventsPath = null;
-      if (!jsVisibilityByPath && !jsVisibilityByName) {
-        for (const [jsPath, jsVisibility] of Object.entries(visibilityChangesInJS)) {
-          // Check if JS path ends with our path (e.g., "parentPanel.panel.field" matches "panel.field")
-          if (jsPath.endsWith(path) || jsPath.endsWith(`.${name}`)) {
-            fuzzyMatchJS = jsVisibility;
-            fuzzyMatchJSPath = jsPath;
-            break;
-          }
-        }
-      }
-
-      if (!eventsVisibilityByPath && !eventsVisibilityByName) {
-        for (const [eventsPath, eventsVisibility] of Object.entries(visibilityChangesInEvents)) {
-          if (eventsPath.endsWith(path) || eventsPath.endsWith(`.${name}`)) {
-            fuzzyMatchEvents = eventsVisibility;
-            fuzzyMatchEventsPath = eventsPath;
-            break;
-          }
-        }
-      }
-      
-      const madeVisibleInJSOrEvents = 
-        (jsVisibilityByName?.madeVisible === true || jsVisibilityByPath?.madeVisible === true || fuzzyMatchJS?.madeVisible === true) || 
-        (eventsVisibilityByName?.madeVisible === true || eventsVisibilityByPath?.madeVisible === true || fuzzyMatchEvents?.madeVisible === true);
-
-      // Only log when we find a visibility change in JS (use debug mode to reduce noise)
-      if (jsVisibilityByPath) {
-        foundInJS++;
-        lib_core.debug(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by exact path match`);
-        lib_core.debug(`[HiddenFields]   → Made visible: ${jsVisibilityByPath.madeVisible}, Files: ${jsVisibilityByPath.files.map(f => f.filename).join(', ')}`);
-      } else if (jsVisibilityByName) {
-        foundInJS++;
-        lib_core.debug(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by name match`);
-        lib_core.debug(`[HiddenFields]   → Made visible: ${jsVisibilityByName.madeVisible}, Files: ${jsVisibilityByName.files.map(f => f.filename).join(', ')}`);
-      } else if (fuzzyMatchJS) {
-        foundInJS++;
-        lib_core.debug(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by fuzzy match (JS path: "${fuzzyMatchJSPath}")`);
-        lib_core.debug(`[HiddenFields]   → Made visible: ${fuzzyMatchJS.madeVisible}, Files: ${fuzzyMatchJS.files.map(f => f.filename).join(', ')}`);
-      } else if (fuzzyMatchEvents) {
-        foundInEvents++;
-        lib_core.debug(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by fuzzy match")`);
-        lib_core.debug(`[HiddenFields]   → Made visible: ${fuzzyMatchEvents.madeVisible}, Rules: ${fuzzyMatchEvents.rules.join(', ')}`);
-      } else if(eventsVisibilityByPath) {
-        foundInEvents++;
-        lib_core.debug(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by exact path match`);
-        lib_core.debug(`[HiddenFields]   → Made visible: ${eventsVisibilityByPath.madeVisible}, Rules: ${eventsVisibilityByPath.rules.join(', ')}`);
-      } else if(eventsVisibilityByName) {
-        foundInEvents++;
-        lib_core.debug(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by name match`);
-        lib_core.debug(`[HiddenFields]   → Made visible: ${eventsVisibilityByName.madeVisible}, Rules: ${eventsVisibilityByName.rules.join(', ')}`);
-      }
-      // Note: Fields not found in visibility rules will be flagged as unnecessary below if truly unused
-
-      // Field is potentially unnecessary if:
-      // 1. It has no visible rule in JSON
-      // 2. It has no event that sets visibility
-      // 3. It's never made visible in JavaScript
-      const isUnnecessary = !hasVisibleRule && !hasVisibleEvent && !madeVisibleInJSOrEvents;
-
-      if (isUnnecessary) {
-        issues.push({
-          severity: 'error', // Critical in PR mode (must fix), shown as warning in scheduled mode
-          type: 'unnecessary-hidden-field',
-          field: name,
-          path,
-          message: `Field "${name}" is always hidden and increases DOM size unnecessarily.`,
-          recommendation: 'Consider removing this field from the form and storing this as form variable. Hidden fields that are never shown bloat the DOM and impact performance.',
-        });
-      }
-
-      // Additional check: Field has visible rule but it evaluates to a static false
-      if (hasVisibleRule && this.isStaticFalse(visibleRule)) {
-        issues.push({
-          severity: 'error', // Critical in PR mode (must fix), shown as warning in scheduled mode
-          type: 'static-false-visibility',
-          field: name,
-          path,
-          message: `Field "${name}" has a visibility rule that always evaluates to false.`,
-          visibleRule,
-          recommendation: 'Remove this field or fix the visibility rule. A rule that always returns false serves no purpose.',
-        });
-      }
-    });
-
-    lib_core.info(`[HiddenFields] Summary: ${foundInJS}/${hiddenFields.length} hidden fields have visibility controls in JS, ${foundInEvents}/${hiddenFields.length} hidden fields have visibility controls in events`);
-    lib_core.info(`[HiddenFields] Found ${issues.length} unnecessary hidden field(s)`);
-
-    return issues;
-  }
-
-  /**
-   * Check if a visibility rule is statically false
-   */
-  isStaticFalse(rule) {
-    if (typeof rule !== 'string') return false;
-    
-    const staticFalsePatterns = [
-      /^false\(\)$/,
-      /^false$/,
-      /^0$/,
-      /^null$/,
-      /^undefined$/,
-    ];
-
-    return staticFalsePatterns.some(pattern => pattern.test(rule.trim()));
-  }
-
-  /**
-   * Compare before and after analyses
-   */
-  compare(beforeData, afterData) {
-    const resolvedIssues = beforeData.issues.filter(beforeIssue =>
-      !afterData.issues.some(afterIssue =>
-        afterIssue.field === beforeIssue.field && afterIssue.type === beforeIssue.type
-      )
-    );
-
-    return {
-      before: beforeData,
-      after: afterData,
-      delta: {
-        hiddenFields: afterData.totalHiddenFields - beforeData.totalHiddenFields,
-        unnecessaryFields: afterData.unnecessaryHiddenFields - beforeData.unnecessaryHiddenFields,
-      },
-      newIssues: afterData.issues, // Report ALL issues in current state
-      resolvedIssues,
-    };
-  }
-}
-
-
-;// CONCATENATED MODULE: ./src/analyzers/disabled-fields-analyzer.js
-/**
- * Analyzes disabled fields in adaptive forms.
- * Disabled fields do not submit their data; use readOnly when the value should be included in submission.
- */
-
-
-class DisabledFieldsAnalyzer {
-  constructor(config = null) {
-    this.config = config;
-  }
-
-  /**
-   * Analyze form JSON and JavaScript for disabled field usage
-   * @param {Object} formJson - Form JSON object
-   * @param {Array} jsFiles - Array of {filename, content} objects
-   * @returns {Object} Analysis results
-   */
-  analyze(formJson, jsFiles = []) {
-    if (!formJson) {
-      return { error: 'No form JSON provided' };
-    }
-
-    lib_core.info(`[DisabledFields] Starting analysis with ${jsFiles.length} JS file(s)`);
-
-    const disabledInJson = this.findDisabledFieldsInJson(formJson);
-    lib_core.info(`[DisabledFields] Found ${disabledInJson.length} disabled field(s) in form JSON`);
-
-    const enabledChangesInJS = this.analyzeJSForEnabledChanges(jsFiles);
-    const jsCount = Object.keys(enabledChangesInJS).length;
-    lib_core.info(`[DisabledFields] Found enable/disable changes for ${jsCount} field identifier(s) in JS`);
-
-    const enabledChangesInEvents = this.analyzeEventsForEnabledChanges(formJson);
-    const eventsCount = Object.keys(enabledChangesInEvents).length;
-    lib_core.info(`[DisabledFields] Found enable/disable changes for ${eventsCount} field identifier(s) in events/rules`);
-
-    const disabledViaRules = this.findDisabledViaRules(formJson);
-
-    const allDisabled = this.mergeDisabledSources(
-      disabledInJson,
-      enabledChangesInJS,
-      enabledChangesInEvents,
-      disabledViaRules
-    );
-
-    return {
-      totalDisabledFields: allDisabled.length,
-      disabledFields: allDisabled,
-      disabledInJson: disabledInJson.length,
-      disabledViaRules: disabledViaRules.length,
-      enabledChangesInJS,
-      enabledChangesInEvents,
-    };
-  }
-
-  /**
-   * Find all fields with enabled === false in form JSON
-   */
-  findDisabledFieldsInJson(node, fields = [], path = '') {
-    if (!node) return fields;
-
-    const isDisabled = node.enabled === false || node.properties?.enabled === false;
-    const hasEnabledRule = node.rules?.enabled !== undefined;
-    const hasEnabledEvent =
-      node.events &&
-      Object.keys(node.events).some(
-        (event) =>
-          typeof node.events[event] === 'string' && node.events[event].includes('enabled')
-      );
-    const isReadOnly = node.readOnly === true || node.properties?.readOnly === true;
-
-    if (isDisabled && node.name) {
-      const fieldName = node.name;
-      const fieldPath = path || fieldName;
-      fields.push({
-        name: fieldName,
-        path: fieldPath,
-        fieldType: node.fieldType,
-        source: 'json',
-        hasEnabledRule,
-        hasEnabledEvent,
-        enabledRule: node.rules?.enabled,
-        isReadOnly,
-      });
-    }
-
-    if (node.items && Array.isArray(node.items)) {
-      node.items.forEach((child, index) => {
-        const childPath = child?.name
-          ? (path ? `${path}.${child.name}` : child.name)
-          : (path ? `${path}.items[${index}]` : `items[${index}]`);
-        this.findDisabledFieldsInJson(child, fields, childPath);
-      });
-    }
-    if (node[':items']) {
-      Object.entries(node[':items']).forEach(([key, child]) => {
-        const childPath = child?.name
-          ? (path ? `${path}.${child.name}` : child.name)
-          : (path ? `${path}.${key}` : key);
-        this.findDisabledFieldsInJson(child, fields, childPath);
-      });
-    }
-    return fields;
-  }
-
-  /**
-   * Find fields that are disabled via fd:rules (setProperty with enabled: false)
-   */
-  findDisabledViaRules(formJson) {
-    const disabledByRule = [];
-    const traverse = (node, path = '') => {
-      if (!node) return;
-      const rules = node.properties?.['fd:rules'] || node.rules;
-      if (rules && typeof rules === 'object') {
-        const ruleStr = JSON.stringify(rules);
-        if (/enabled\s*:\s*false\s*\(\)|enabled\s*:\s*false\b/i.test(ruleStr)) {
-          if (node.name) {
-            const fieldPath = path || node.name;
-            disabledByRule.push({
-              name: node.name,
-              path: fieldPath,
-              fieldType: node.fieldType,
-              source: 'rules',
-            });
-          }
-        }
-      }
-      if (node[':items']) {
-        Object.entries(node[':items']).forEach(([key, child]) => {
-          const childPath = child?.name
-            ? (path ? `${path}.${child.name}` : child.name)
-            : (path ? `${path}.${key}` : key);
-          traverse(child, childPath);
-        });
-      }
-      if (node.items && Array.isArray(node.items)) {
-        node.items.forEach((child, index) => {
-          const childPath = child?.name
-            ? (path ? `${path}.${child.name}` : child.name)
-            : (path ? `${path}.items[${index}]` : `items[${index}]`);
-          traverse(child, childPath);
-        });
-      }
-    };
-    traverse(formJson);
-    return disabledByRule;
-  }
-
-  /**
-   * Analyze events for setProperty / dispatchEvent that change enabled
-   */
-  analyzeEventsForEnabledChanges(formJson) {
-    const changes = {};
-    const hasEnabledChange = /enabled\s*:\s*(true|false)\s*\(\)/;
-    const targetPathPattern = /dispatchEvent\s*\(\s*['"]?([^'",\s][^'",]*?)['"]?\s*,/;
-
-    const traverse = (node) => {
-      if (!node) return;
-      if (node.events && typeof node.events === 'object') {
-        Object.entries(node.events).forEach(([eventType, handlers]) => {
-          if (!Array.isArray(handlers)) return;
-          handlers.forEach((handler) => {
-            if (typeof handler !== 'string') return;
-            if (handler.includes('dispatchEvent') && hasEnabledChange.test(handler)) {
-              const targetMatch = handler.match(targetPathPattern);
-              const enabledMatch = handler.match(/enabled\s*:\s*(true|false)\s*\(\)/);
-              if (targetMatch && enabledMatch) {
-                const targetPath = this.normalizeEventPath(targetMatch[1].trim());
-                const enabledValue = enabledMatch[1].toLowerCase() === 'true';
-                if (!changes[targetPath]) {
-                  changes[targetPath] = { madeEnabled: false, madeDisabled: false, rules: [] };
-                }
-                changes[targetPath].rules.push(handler);
-                if (enabledValue) changes[targetPath].madeEnabled = true;
-                else changes[targetPath].madeDisabled = true;
-              }
-            }
-          });
-        });
-      }
-      if (node[':items']) Object.values(node[':items']).forEach(traverse);
-      if (node.items && Array.isArray(node.items)) node.items.forEach(traverse);
-    };
-    traverse(formJson);
-    return changes;
-  }
-
-  /**
-   * Analyze JavaScript for setProperty / direct assignment that change enabled
-   */
-  analyzeJSForEnabledChanges(jsFiles) {
-    const changes = {};
-    jsFiles.forEach((file) => {
-      const { filename, content } = file;
-      const setPropertyPattern =
-        /globals\.functions\.setProperty\s*\(\s*globals\.form(?:\?\.)?([a-zA-Z0-9_.?]+)\s*,\s*\{[^}]*enabled\s*:\s*(true|false)[^}]*\}/g;
-      let match;
-      while ((match = setPropertyPattern.exec(content)) !== null) {
-        const fieldPath = match[1];
-        const enabledValue = match[2] === 'true';
-        const pathSegments = fieldPath.split(/[.?]/).filter(Boolean);
-        const fieldName = pathSegments[pathSegments.length - 1];
-        const fullPath = pathSegments.join('.');
-        [fieldName, fullPath].forEach((key) => {
-          if (!key) return;
-          if (!changes[key]) {
-            changes[key] = { files: [], madeEnabled: false, madeDisabled: false };
-          }
-          changes[key].files.push({
-            filename,
-            enabled: enabledValue,
-            line: this.getLineNumber(content, match.index),
-          });
-          if (enabledValue) changes[key].madeEnabled = true;
-          else changes[key].madeDisabled = true;
-        });
-      }
-      const directPattern = /globals\.form(?:\?\.)?([a-zA-Z0-9_.?]+)\.enabled\s*=\s*(true|false)/g;
-      while ((match = directPattern.exec(content)) !== null) {
-        const fieldPath = match[1];
-        const enabledValue = match[2] === 'true';
-        const pathSegments = fieldPath.split(/[.?]/).filter(Boolean);
-        const fieldName = pathSegments[pathSegments.length - 1];
-        const fullPath = pathSegments.join('.');
-        [fieldName, fullPath].forEach((key) => {
-          if (!key) return;
-          if (!changes[key]) {
-            changes[key] = { files: [], madeEnabled: false, madeDisabled: false };
-          }
-          changes[key].files.push({
-            filename,
-            enabled: enabledValue,
-            line: this.getLineNumber(content, match.index),
-          });
-          if (enabledValue) changes[key].madeEnabled = true;
-          else changes[key].madeDisabled = true;
-        });
-      }
-    });
-    return changes;
-  }
-
-  getLineNumber(content, index) {
-    return content.substring(0, index).split('\n').length;
-  }
-
-  normalizeEventPath(path) {
-    return path.replace(/^\$form\.?/, '').replace(/\?\./g, '.');
-  }
-
-  /**
-   * Merge disabled fields from JSON, rules, and optionally from JS/events (fields only disabled in script/rule)
-   */
-  mergeDisabledSources(disabledInJson, enabledChangesInJS, enabledChangesInEvents, disabledViaRules) {
-    const byPath = new Map();
-    disabledInJson.forEach((f) => {
-      byPath.set(f.path, { ...f, source: 'json', sources: ['json'] });
-    });
-    disabledViaRules.forEach((f) => {
-      const existing = byPath.get(f.path);
-      if (existing) {
-        if (!existing.sources.includes('rules')) existing.sources.push('rules');
-      } else {
-        byPath.set(f.path, { ...f, sources: ['rules'] });
-      }
-    });
-    const onlyInScriptOrEvents = new Set();
-    [...Object.entries(enabledChangesInJS), ...Object.entries(enabledChangesInEvents)].forEach(
-      ([key, data]) => {
-        if (data.madeDisabled && !byPath.has(key)) {
-          const pathSegments = key.split('.');
-          const name = pathSegments[pathSegments.length - 1];
-          if (!byPath.has(name)) onlyInScriptOrEvents.add(key);
-        }
-      }
-    );
-    onlyInScriptOrEvents.forEach((path) => {
-      const pathSegments = path.split('.');
-      const name = pathSegments[pathSegments.length - 1];
-      if (!byPath.has(path) && !byPath.has(name)) {
-        byPath.set(path, {
-          name,
-          path,
-          fieldType: 'unknown',
-          source: 'rules_or_script',
-          sources: ['rules_or_script'],
-        });
-      }
-    });
-    return Array.from(byPath.values());
-  }
-
-  compare(beforeData, afterData) {
-    return {
-      before: beforeData,
-      after: afterData,
-      delta: {
-        disabledFields: (afterData.totalDisabledFields || 0) - (beforeData.totalDisabledFields || 0),
-      },
-      newIssues: [],
-      resolvedIssues: [],
-    };
-  }
-}
-
-// EXTERNAL MODULE: ./node_modules/@aemforms/af-core/lib/index.js
-var af_core_lib = __nccwpck_require__(39866);
-// EXTERNAL MODULE: external "crypto"
-var external_crypto_ = __nccwpck_require__(76982);
-;// CONCATENATED MODULE: external "vm"
-const external_vm_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("vm");
-;// CONCATENATED MODULE: ./src/analyzers/rule-performance-analyzer.js
-
-
-
-
-
-
-
-/**
- * Analyzes form rules for performance issues:
- * 1. Circular dependencies (cycles) - causes infinite loops
- * 2. Slow rule execution (runtime profiling) - blocks rendering
- * 
- * Uses @aemforms/af-core to leverage the built-in dependency tracking
- * and hooks into RuleEngine.execute() to measure actual execution times
- */
-class RulePerformanceAnalyzer {
-  constructor(config = null) {
-    this.config = config;
-    this.slowRuleThreshold = config?.thresholds?.form?.slowRuleThreshold || 50; // ms
-  }
-
-  /**
-   * Analyze form JSON for rule cycles and slow rules
-   * @param {Object} formJson - Form JSON object
-   * @returns {Promise<Object>} Analysis results with cycles and slow rules
-   */
-  async analyze(formJson) {
-    if (!formJson) {
-      return { error: 'No form JSON provided' };
-    }
-
-    // Validate form JSON
-    if (typeof formJson === 'string') {
-      try {
-        formJson = JSON.parse(formJson);
-      } catch (e) {
-        return { error: 'Invalid form JSON: Unable to parse' };
-      }
-    }
-
-    if (typeof formJson !== 'object' || Array.isArray(formJson)) {
-      return { error: 'Form JSON must be an object' };
-    }
-
-    // Check if this is a valid AEM form JSON
-    // AEM forms use :items (with colon) or items
-    const hasItems = (formJson[':items'] && typeof formJson[':items'] === 'object') || 
-                     (formJson.items && Array.isArray(formJson.items));
-    const hasFormProperties = formJson.fieldType === 'form' || formJson[':type'] === 'fd/franklin/components/form/v1/form';
-    
-    if (!hasItems && !hasFormProperties) {
-      lib_core.info('Form validation: No :items or items found, no form properties');
-      return {
-        totalRules: 0,
-        fieldsWithRules: 0,
-        dependencies: {},
-        cycles: 0,
-        cycleDetails: [],
-        issues: [],
-        circularDependencies: [],
-        skipped: true,
-        skipReason: 'Form JSON structure not recognized - missing :items or items',
-      };
-    }
-    
-    // If form has form properties but no items, skip (empty form)
-    if (!hasItems) {
-      lib_core.info('Form has no :items or items to analyze (empty form)');
-      return {
-        totalRules: 0,
-        fieldsWithRules: 0,
-        dependencies: {},
-        cycles: 0,
-        cycleDetails: [],
-        issues: [],
-        circularDependencies: [],
-        skipped: true,
-        skipReason: 'Form has no items to analyze',
-      };
-    }
-
-    try {
-      // Register custom functions for form initialization
-      // Try to load real custom function implementations from the checked-out repository
-      const customFunctionsPath = formJson.properties?.customFunctionsPath;
-      
-      let realFunctions = {};
-      let loadedCount = 0;
-      let functionFailures = null;
-      let customFunctionsFilePath = null; // Track the actual file path for runtime errors
-      
-      if (customFunctionsPath) {
-        const result = await this.loadCustomFunctions(customFunctionsPath);
-        if (result) {
-          realFunctions = result.functions;
-          loadedCount = result.count;
-          functionFailures = result.failureTracker;
-          customFunctionsFilePath = result.filePath; // Store actual file path
-        }
-      }
-      
-      // Extract ALL function names used in the form
-      const functionNames = this.extractAllFunctionNames(formJson);
-      lib_core.info(`Detected ${functionNames.length} function(s) in form, loaded ${loadedCount} real implementation(s)`);
-      
-      // Register real functions first (if any)
-      if (loadedCount > 0) {
-        af_core_lib.FunctionRuntime.registerFunctions(realFunctions);
-      }
-      
-      // Create mocks for remaining functions
-      const mockFunctions = {};
-      functionNames.forEach(fnName => {
-        if (!realFunctions[fnName]) {
-          mockFunctions[fnName] = (...args) => Promise.resolve(null);
-        }
-      });
-      
-      if (Object.keys(mockFunctions).length > 0) {
-        af_core_lib.FunctionRuntime.registerFunctions(mockFunctions);
-      }
-      
-      lib_core.info(`Registered ${loadedCount} real + ${Object.keys(mockFunctions).length} mock function(s)`);
-      
-      // RUNTIME PROFILING: Hook into RuleEngine.execute() to measure actual rule execution times
-      const slowRules = [];
-      const ruleExecutionCounts = new Map(); // Track how many times each rule executes
-      let originalExecute = null;
-      const that = this; // Capture 'this' for use in callback
-      
-      // Helper: Find the ancestor with dataRef: null
-      const findNullDataRefAncestor = (ancestors) => {
-        // Walk from closest to farthest ancestor
-        for (let i = ancestors.length - 1; i >= 0; i--) {
-          if (ancestors[i].dataRef === null) {
-            return {
-              ancestor: ancestors[i],
-              depth: ancestors.length - i, // How many levels up
-              path: ancestors.slice(i).map(a => a.name || a.id).join(' > ')
-            };
-          }
-        }
-        return null;
-      };
-
-      // CAPTURE FORM VALIDATION ERRORS: Intercept console.error to capture af-core validation warnings
-      const validationErrors = {
-        dataRefErrors: [],
-        typeConflicts: []
-      };
-      
-      // Collect raw errors during instantiation (defer processing until form is ready)
-      const rawDataRefErrors = [];
-      const rawTypeConflicts = [];
-      
-      const originalConsoleError = console.error;
-      console.error = (...args) => {
-        const message = args[0];
-        if (typeof message === 'string') {
-          // Capture dataRef parsing errors (don't process - fields not yet instantiated)
-          if (message.includes('Error parsing dataRef')) {
-            const match = message.match(/Error parsing dataRef "([^"]+)" for field "([^"]+)"/);
-            if (match) {
-              rawDataRefErrors.push({ dataRef: match[1], fieldId: match[2], message });
-              return; // Process after form instantiation
-            }
-          }
-          // Capture type conflict errors (don't process - collect for later)
-          else if (message.includes('Type conflict detected')) {
-            rawTypeConflicts.push({ message });
-            return; // Process after form instantiation
-          }
-        }
-        // Still call original console.error for logging
-        originalConsoleError(...args);
-      };
-      
-      // Use createFormInstanceSync with callback to hook into RuleEngine BEFORE event queue runs
-      // This ensures ExecuteRule event completes and dependencies are tracked
-      // After this call returns, all rules have executed and _dependents arrays are populated
-      // Note: af-core internally calls sitesModelToFormModel() to handle :items/:itemsOrder transformation
-      let form;
-      try {
-        lib_core.info('Creating form instance with af-core (profiling rule execution)...');
-        
-        // Use callback to access form BEFORE event queue runs
-        form = await (0,af_core_lib.createFormInstanceSync)(formJson, (f) => {
-          // RuleEngine is not exported from af-core, so we get it from the form instance
-          // The callback runs BEFORE f.getEventQueue().runPendingQueue() is called
-          const RuleEngine = f.ruleEngine.constructor;
-          originalExecute = RuleEngine.prototype.execute;
-          
-          // Hook into RuleEngine.prototype.execute to measure rule execution times
-          RuleEngine.prototype.execute = function(node, data, globals, useValueOf, eString) {
-            const start = performance.now();
-            const result = originalExecute.call(this, node, data, globals, useValueOf, eString);
-            const duration = performance.now() - start;
-            
-            // Track execution
-            const fieldName = globals?.field?.name || 'unknown';
-            const eventType = globals?.$event?.type || 'unknown';
-            const ruleKey = `${fieldName}:${eString}`;
-            
-            // Count executions
-            ruleExecutionCounts.set(ruleKey, (ruleExecutionCounts.get(ruleKey) || 0) + 1);
-            
-            // Flag slow rules (only if they take significant time)
-            if (duration > that.slowRuleThreshold) {
-              slowRules.push({
-                field: fieldName,
-                expression: eString.substring(0, 150), // Truncate long expressions
-                duration: Math.round(duration * 10) / 10, // Round to 1 decimal
-                event: eventType,
-              });
-            }
-            
-            return result;
-          };
-        }, 'off');
-        
-        lib_core.info('Form instance created successfully');
-      } catch (coreError) {
-        // If af-core fails to create the form instance, return gracefully
-        lib_core.error(`af-core failed to create form instance: ${coreError.message}`);
-        return {
-          totalRules: 0,
-          fieldsWithRules: 0,
-          dependencies: {},
-          cycles: 0,
-          cycleDetails: [],
-          issues: [],
-          circularDependencies: [],
-          skipped: true,
-          skipReason: `Unable to analyze form structure: ${coreError.message}`,
-        };
-      }
-      
-      // Log function execution failures if any occurred during rule execution
-      if (functionFailures && functionFailures.size > 0) {
-        lib_core.info(`[CustomFunctions] ${functionFailures.size} function(s) encountered errors during execution:`);
-        let loggedCount = 0;
-        for (const [fnName, failure] of functionFailures.entries()) {
-          if (loggedCount < 5) { // Only log first 5 to avoid noise
-            const errorMessages = Array.from(failure.errors).join(', ');
-            lib_core.info(`[CustomFunctions]   - ${fnName}(): ${failure.count} error(s) - ${errorMessages}`);
-            loggedCount++;
-          }
-        }
-        if (functionFailures.size > 5) {
-          lib_core.info(`[CustomFunctions]   ... and ${functionFailures.size - 5} more function(s) with errors`);
-        }
-        lib_core.info(`[CustomFunctions] Note: Errors are expected for functions accessing formData/globals in test context`);
-      }
-      
-      // Restore original RuleEngine.execute (if it was hooked)
-      if (originalExecute && form) {
-        const RuleEngine = form.ruleEngine.constructor;
-        RuleEngine.prototype.execute = originalExecute;
-      }
-      
-      // After createFormInstance returns, the event queue has run and dependencies are tracked
-      // Now build the dependency graph from the form instance's internal state
-      lib_core.info('Building dependency graph from form instance...');
-      const dependencyGraph = this.buildDependencyGraphFromForm(form);
-      lib_core.info(`Rule detection: Found ${dependencyGraph.totalRules} rules in ${dependencyGraph.fieldsWithRules} fields`);
-      
-      const cycles = this.detectCycles(dependencyGraph);
-      if (cycles.length > 0) {
-        lib_core.warning(`Detected ${cycles.length} circular dependenc${cycles.length > 1 ? 'ies' : 'y'} in rules`);
-      }
-      const issues = this.generateIssues(cycles);
-
-      // Process slow rules
-      const sortedSlowRules = slowRules
-        .sort((a, b) => b.duration - a.duration) // Sort by duration descending
-        .slice(0, 10); // Top 10 slowest
-      
-      if (sortedSlowRules.length > 0) {
-        lib_core.warning(`Detected ${slowRules.length} slow rule execution(s) (> ${this.slowRuleThreshold}ms)`);
-        lib_core.info(`Top ${Math.min(3, sortedSlowRules.length)} slowest rules:`);
-        sortedSlowRules.slice(0, 3).forEach(rule => {
-          lib_core.info(`  - Field "${rule.field}" took ${rule.duration}ms during ${rule.event}`);
-        });
-      }
-
-      // Convert functionFailures Map to array for reporting
-      const runtimeErrors = [];
-      if (functionFailures && functionFailures.size > 0) {
-        for (const [fnName, failure] of functionFailures.entries()) {
-          runtimeErrors.push({
-            functionName: fnName,
-            file: customFunctionsFilePath, // Add the actual file path (e.g., eds-li/blocks/form/functions.js)
-            errorCount: failure.count,
-            errors: Array.from(failure.errors),
-            severity: 'error', // Critical in PR mode (must fix), warning in scheduled mode
-            type: 'runtime-error-in-custom-function',
-            recommendation: `Function "${fnName}" throws errors during execution. Review function logic to handle missing or null values gracefully.`
-          });
-        }
-      }
-
-      // Restore console.error
-      console.error = originalConsoleError;
-      
-      // NOW process the collected errors (form is fully instantiated, fields are available)
-      lib_core.info(`Processing ${rawDataRefErrors.length} dataRef error(s) and ${rawTypeConflicts.length} type conflict(s)...`);
-      
-      // Helper: Get parent chain from instantiated form model (uses .parent references)
-      // This matches exactly how af-core checks dataRef - walks up the .parent chain
-      const getModelParentChain = (field) => {
-        const ancestors = [];
-        let current = field.parent;
-        while (current && current.id !== formJson.id) { // Stop at form root
-          ancestors.push({
-            id: current.id,
-            name: current.name,
-            fieldType: current.fieldType,
-            dataRef: current.dataRef
-          });
-          current = current.parent;
-        }
-        return ancestors; // Closest to farthest
-      };
-      
-      // Process dataRef errors - ALWAYS use form model hierarchy (not JSON structure)
-      for (const raw of rawDataRefErrors) {
-        let fieldInfo = null;
-        
-        if (form) {
-          try {
-            const field = form.getElement(raw.fieldId);
-            if (field) {
-              // Get ancestor chain from MODEL's .parent references
-              // This is the ACTUAL hierarchy af-core uses for dataRef checking
-              const modelAncestors = getModelParentChain(field);
-              
-              fieldInfo = {
-                field: { id: field.id, name: field.name, fieldType: field.fieldType },
-                ancestors: modelAncestors
-              };
-            }
-          } catch (e) {
-            // Field doesn't exist in form
-          }
-        }
-        
-        if (!fieldInfo) {
-          // Field not found in instantiated form
-          validationErrors.dataRefErrors.push({
-            fieldId: raw.fieldId,
-            dataRef: raw.dataRef,
-            rootCause: 'field_not_found',
-            message: raw.message,
-            ancestorChain: [],
-            nullAncestor: null
-          });
-          continue;
-        }
-        
-        // Build ancestor chain
-        const ancestorChain = fieldInfo.ancestors.map(a => ({
-          id: a.id,
-          name: a.name || a.id,
-          dataRef: a.dataRef
-        }));
-        
-        // Find null ancestor
-        const nullAncestor = findNullDataRefAncestor(fieldInfo.ancestors);
-        
-        validationErrors.dataRefErrors.push({
-          dataRef: raw.dataRef,
-          fieldId: raw.fieldId,
-          fieldName: fieldInfo.field.name || 'unknown',
-          message: raw.message,
-          nullAncestor: nullAncestor ? {
-            id: nullAncestor.ancestor.id || 'unknown',
-            name: nullAncestor.ancestor.name || 'unknown',
-            depth: nullAncestor.depth,
-            path: nullAncestor.path
-          } : null,
-          ancestorChain,
-          rootCause: nullAncestor ? 'ancestor_null_dataref' : 'no_null_ancestor_found'
-        });
-      }
-      
-      // Process type conflicts
-      for (const raw of rawTypeConflicts) {
-        const dataRefMatch = raw.message.match(/DataRef:\s*(\S+)/);
-        const newFieldMatch = raw.message.match(/New field '([^']+)'\s*\(([^)]+)\)/);
-        const conflictsMatch = raw.message.match(/conflicts with:\s*(.+?)(?:\.\s*DataRef|$)/);
-        
-        if (newFieldMatch) {
-          validationErrors.typeConflicts.push({
-            dataRef: dataRefMatch ? dataRefMatch[1] : 'unknown',
-            newField: newFieldMatch[1],
-            newFieldType: newFieldMatch[2],
-            conflictingFields: conflictsMatch ? conflictsMatch[1] : '',
-            message: raw.message
-          });
-        }
-      }
-      
-      // Log summary (not individual fields - too verbose)
-      if (validationErrors.dataRefErrors.length > 0) {
-        lib_core.info(` Found ${validationErrors.dataRefErrors.length} dataRef parsing error(s)`);
-        
-        const notFound = validationErrors.dataRefErrors.filter(e => e.rootCause === 'field_not_found').length;
-        const noNullAncestor = validationErrors.dataRefErrors.filter(e => e.rootCause === 'no_null_ancestor_found').length;
-        const withNullAncestor = validationErrors.dataRefErrors.filter(e => e.rootCause === 'ancestor_null_dataref').length;
-        
-        if (notFound > 0) {
-          lib_core.info(`   ${notFound} field(s) not found (may be in fragments/conditional panels)`);
-        }
-        if (withNullAncestor > 0) {
-          lib_core.info(`   ${withNullAncestor} field(s) have ancestor with dataRef: null`);
-        }
-        if (noNullAncestor > 0) {
-          lib_core.warning(`   ${noNullAncestor} field(s) fail dataRef parsing but NO ancestor has dataRef: null (unexpected)`);
-          lib_core.warning(`   Detailed ancestor chains for investigation:`);
-          
-          validationErrors.dataRefErrors
-            .filter(e => e.rootCause === 'no_null_ancestor_found')
-            .slice(0, 5) // Show first 5 to avoid log spam
-            .forEach(error => {
-              const ancestorPath = error.ancestorChain.length > 0
-                ? error.ancestorChain.map(a => `${a.name}(dataRef: ${a.dataRef === null ? 'NULL' : a.dataRef || 'undefined'})`).join(' > ')
-                : 'No ancestors';
-              lib_core.warning(`     Field "${error.fieldName}" (dataRef: "${error.dataRef}")`);
-              lib_core.warning(`       Ancestor chain: ${ancestorPath}`);
-            });
-          
-          if (noNullAncestor > 5) {
-            lib_core.warning(`     ... and ${noNullAncestor - 5} more field(s) - see HTML report for full details`);
-          }
-        }
-      }
-      if (validationErrors.typeConflicts.length > 0) {
-        lib_core.info(` Found ${validationErrors.typeConflicts.length} type conflict(s)`);
-      }
-
-      return {
-        totalRules: dependencyGraph.totalRules,
-        fieldsWithRules: dependencyGraph.fieldsWithRules,
-        dependencies: dependencyGraph.dependencies,
-        cycles: cycles.length,
-        cycleDetails: cycles,
-        slowRules: sortedSlowRules, // Add slow rules to results
-        slowRuleCount: slowRules.length,
-        issues,
-        circularDependencies: cycles.map(cycle => ({
-          cycle: cycle.fields || cycle.path,
-          fields: cycle.fields,
-        })),
-        runtimeErrors, // NEW: Runtime errors for AI to fix
-        runtimeErrorCount: runtimeErrors.length,
-        validationErrors, // NEW: Form validation errors from af-core
-        validationErrorCount: validationErrors.dataRefErrors.length + validationErrors.typeConflicts.length,
-      };
-    } catch (error) {
-      // Restore console.error in catch block too
-      console.error = originalConsoleError;
-      
-      console.error('Error analyzing rule cycles:', error);
-      return {
-        totalRules: 0,
-        fieldsWithRules: 0,
-        dependencies: {},
-        cycles: 0,
-        cycleDetails: [],
-        issues: [],
-        circularDependencies: [],
-        skipped: true,
-        skipReason: `Analysis error: ${error.message}`,
-      };
-    }
-  }
-
-
-  /**
-   * Load custom function implementations from the checked-out repository
-   * Removes export statements and evaluates in a sandboxed vm context
-   * @param {string} customFunctionsPath - Path like "/blocks/form/functions.js"
-   * @returns {Promise<Object|null>} {functions: {...}, count: number} or null
-   */
-  /**
-   * Recursively search for a file matching the given path suffix
-   * @param {string} dir - Directory to search in
-   * @param {string} targetPath - Path suffix to match (e.g., "liabilities/insta_savings_journey/functions.js")
-   * @param {number} maxDepth - Maximum recursion depth
-   * @returns {string|null} Absolute path to the file or null
-   */
-  findFileByPathSuffix(dir, targetPath, maxDepth = 5) {
-    if (maxDepth <= 0) return null;
-    
-    try {
-      const entries = (0,external_fs_.readdirSync)(dir, { withFileTypes: true });
-      
-      for (const entry of entries) {
-        // Skip common directories we don't want to search
-        if (entry.name === 'node_modules' || entry.name === 'dist' || entry.name === '.git') {
-          continue;
-        }
-        
-        const fullPath = (0,external_path_.join)(dir, entry.name);
-        
-        if (entry.isDirectory()) {
-          // Recursively search all directories
-          const found = this.findFileByPathSuffix(fullPath, targetPath, maxDepth - 1);
-          if (found) return found;
-        } else if (entry.isFile()) {
-          // Check if the relative path from repo root ends with our target path
-          const relativePath = (0,external_path_.relative)(process.cwd(), fullPath);
-          if (relativePath.endsWith(targetPath)) {
-            return fullPath;
-          }
-        }
-      }
-    } catch (error) {
-      // Ignore permission errors, etc.
-      return null;
-    }
-    
-    return null;
-  }
-
-  async loadCustomFunctions(customFunctionsPath) {
-    if (!customFunctionsPath) {
-      return null;
-    }
-
-    try {
-      // Try specified path first
-      const normalizedPath = customFunctionsPath.replace(/^\/+/, '');
-      let absolutePath = (0,external_path_.resolve)(process.cwd(), normalizedPath);
-      
-      // If not found, search for the file in the repository
-      if (!(0,external_fs_.existsSync)(absolutePath)) {
-        lib_core.info(`Custom functions file not found at specified path: ${absolutePath}`);
-        lib_core.info(`Searching repository for file matching: ${normalizedPath}`);
-        
-        const foundPath = this.findFileByPathSuffix(process.cwd(), normalizedPath);
-        
-        if (foundPath) {
-          absolutePath = foundPath;
-          lib_core.info(`Found custom functions at: ${absolutePath}`);
-        } else {
-          lib_core.info(`Custom functions file not found: ${normalizedPath}`);
-          return null;
-        }
-      }
-      
-      lib_core.info(`Loading custom functions from: ${absolutePath}`);
-      
-      // Read the ESM module source code
-      let sourceCode = (0,external_fs_.readFileSync)(absolutePath, 'utf-8');
-      
-      // Extract function names from export block (export { fn1, fn2, ... })
-      const exportMatch = sourceCode.match(/export\s*\{([^}]+)\}/s);
-      let exportedNames = [];
-      if (exportMatch) {
-        exportedNames = exportMatch[1]
-          .split(',')
-          .map(name => name.trim())
-          .filter(name => name && !name.startsWith('//'));
-        lib_core.info(`Found ${exportedNames.length} exported names in export block`);
-      }
-      
-      // Remove ALL export statements to make it executable in non-ESM context
-      sourceCode = sourceCode
-        .replace(/export\s+async\s+function\s+/g, 'async function ')  // export async function
-        .replace(/export\s+function\s+/g, 'function ')                // export function
-        .replace(/export\s+const\s+/g, 'const ')                      // export const
-        .replace(/export\s+let\s+/g, 'let ')                          // export let
-        .replace(/export\s+var\s+/g, 'var ')                          // export var
-        .replace(/export\s+class\s+/g, 'class ')                      // export class
-        .replace(/export\s*\{[^}]+\}/gs, '')                           // remove export { ... }
-        .replace(/export\s+default\s+/g, '');                          // export default
-      
-      // Create sandbox with browser globals
-      const sandbox = {
-        console,
-        crypto: external_crypto_.webcrypto || external_crypto_,
-        window: {
-          msCrypto: undefined,
-          location: { href: '', protocol: 'https:' },
-          navigator: { userAgent: 'Node.js' },
-          document: {},
-          addEventListener: () => {},
-          removeEventListener: () => {},
-          getComputedStyle: () => ({}),
-          matchMedia: () => ({ matches: false }),
-        },
-        document: {
-          createElement: () => ({}),
-          querySelector: () => null,
-          querySelectorAll: () => [],
-          getElementById: () => null,
-          body: {},
-          head: {},
-          addEventListener: () => {},
-        },
-      };
-      
-      // Create context and run script
-      const context = external_vm_namespaceObject.createContext(sandbox);
-      external_vm_namespaceObject.runInContext(sourceCode, context, {
-        filename: 'functions.js',
-        timeout: 10000,
-      });
-      
-      // Collect exported functions from the context
-      const functions = {};
-      let loadedCount = 0;
-      
-      // Track function execution failures for debugging
-      const functionFailures = new Map(); // functionName -> { count, errors: Set }
-      
-      for (const name of exportedNames) {
-        if (typeof context[name] === 'function') {
-          // Wrap in try-catch for safe execution
-          // Custom functions may reference globals.form, formData, etc. that don't exist in test context
-          // Log failures but continue execution to prevent crashes
-          functions[name] = function safeFunctionWrapper(...args) {
-            try {
-              const result = context[name].apply(this, args);
-              
-              // If result is a promise, catch rejections
-              if (result && typeof result.then === 'function') {
-                return result.catch((err) => {
-                  // Log promise rejection with stack trace
-                  if (!functionFailures.has(name)) {
-                    functionFailures.set(name, { count: 0, errors: new Set() });
-                  }
-                  const failure = functionFailures.get(name);
-                  failure.count++;
-                  
-                  // Capture full error details including stack trace
-                  const errorDetails = {
-                    message: err?.message || 'Promise rejected',
-                    stack: err?.stack || '',
-                    name: err?.name || 'Error'
-                  };
-                  failure.errors.add(JSON.stringify(errorDetails));
-                  return null;
-                });
-              }
-              
-              return result;
-            } catch (e) {
-              // Log sync error with stack trace - functions expect different runtime context
-              if (!functionFailures.has(name)) {
-                functionFailures.set(name, { count: 0, errors: new Set() });
-              }
-              const failure = functionFailures.get(name);
-              failure.count++;
-              
-              // Capture full error details including stack trace
-              const errorDetails = {
-                message: e?.message || 'Unknown error',
-                stack: e?.stack || '',
-                name: e?.name || 'Error'
-              };
-              failure.errors.add(JSON.stringify(errorDetails));
-              return null;
-            }
-          };
-          loadedCount++;
-        }
-      }
-      
-      lib_core.info(`Successfully loaded ${loadedCount} real function(s)`);
-      
-      // Make path relative to workspace root for consistency
-      const workspaceRoot = process.cwd();
-      const relativePath = absolutePath.startsWith(workspaceRoot) 
-        ? absolutePath.substring(workspaceRoot.length + 1) 
-        : absolutePath;
-      
-      return { 
-        functions, 
-        count: loadedCount, 
-        failureTracker: functionFailures,
-        filePath: relativePath // Return workspace-relative path (e.g., eds-li/blocks/form/functions.js)
-      };
-      
-    } catch (error) {
-      lib_core.warning(`Could not load custom functions: ${error.message}`);
-      lib_core.warning(`Stack: ${error.stack}`);
-      return null;
-    }
-  }
-
-  /**
-   * Extract all function names from form JSON (rules, events, expressions)
-   * @param {Object} formJson - Form JSON object
-   * @returns {Array<string>} Array of unique function names
-   */
-  extractAllFunctionNames(formJson) {
-    const functionNames = new Set();
-    const functionPattern = /(\w+)\s*\(/g;
-    
-    // JavaScript keywords that should NOT be treated as custom functions
-    const jsKeywords = new Set([
-      'if', 'else', 'for', 'while', 'do', 'switch', 'case', 'break', 'continue',
-      'return', 'throw', 'try', 'catch', 'finally', 'typeof', 'instanceof',
-      'new', 'delete', 'void', 'yield', 'await', 'async', 'function',
-      'true', 'false', 'null', 'undefined', 'NaN', 'Infinity',
-      'var', 'let', 'const', 'class', 'extends', 'super', 'this',
-      'Array', 'Object', 'String', 'Number', 'Boolean', 'Date', 'Math',
-      'parseInt', 'parseFloat', 'isNaN', 'isFinite', 'encodeURI', 'decodeURI'
-    ]);
-
-    const extractFromString = (str) => {
-      if (typeof str !== 'string') return;
-      let match;
-      while ((match = functionPattern.exec(str)) !== null) {
-        const fnName = match[1];
-        // Only add if it's not a JavaScript keyword
-        if (!jsKeywords.has(fnName)) {
-          functionNames.add(fnName);
-        }
-      }
-    };
-
-    const traverse = (node) => {
-      if (!node || typeof node !== 'object') return;
-
-      // Check events
-      if (node.events && typeof node.events === 'object') {
-        Object.values(node.events).forEach(eventHandlers => {
-          if (Array.isArray(eventHandlers)) {
-            eventHandlers.forEach(handler => extractFromString(handler));
-          } else {
-            extractFromString(eventHandlers);
-          }
-        });
-      }
-
-      // Check rules
-      if (node.rules && typeof node.rules === 'object') {
-        Object.values(node.rules).forEach(rule => {
-          if (typeof rule === 'object' && rule.expression) {
-            extractFromString(rule.expression);
-          } else {
-            extractFromString(rule);
-          }
-        });
-      }
-
-      // Check validation/display expressions
-      if (node.validationExpression) extractFromString(node.validationExpression);
-      if (node.displayValueExpression) extractFromString(node.displayValueExpression);
-
-      // Traverse children
-      if (node[':items']) {
-        Object.values(node[':items']).forEach(child => traverse(child));
-      }
-      if (node.items && Array.isArray(node.items)) {
-        node.items.forEach(child => traverse(child));
-      }
-    };
-
-    traverse(formJson);
-    return Array.from(functionNames);
-  }
-
-  /**
-   * Build dependency graph from form instance
-   * After createFormInstanceSync returns, ExecuteRule has run and dependencies are tracked
-   * in each field's _dependents array by RuleEngine.trackDependency()
-   * @param {Object} form - Form instance from createFormInstanceSync
-   * @returns {Object} Dependency graph
-   */
-  buildDependencyGraphFromForm(form) {
-    const graph = {
-      totalRules: 0,
-      fieldsWithRules: 0,
-      dependencies: {},
-      fieldMap: {}, // Map field IDs to names for lookup
-    };
-
-    let visitedFieldCount = 0;
-
-    // Visit each field in the form using the built-in visitor
-    form.visit((field) => {
-      visitedFieldCount++;
-      const fieldName = field.name;
-      const fieldId = field.id;
-      
-      if (!fieldName) return; // Skip fields without names (transparent nodes)
-
-      // Store field mapping
-      graph.fieldMap[fieldId] = fieldName;
-
-      // Check if field has rules
-      const fieldJson = field._jsonModel || {};
-      
-      if (fieldJson.rules && typeof fieldJson.rules === 'object') {
-        const ruleProperties = Object.keys(fieldJson.rules);
-        
-        if (ruleProperties.length > 0) {
-          graph.fieldsWithRules++;
-          graph.totalRules += ruleProperties.length;
-        }
-      }
-
-      // Access the _dependents array populated by RuleEngine during rule execution
-      // After ExecuteRule event runs, each field's _dependents contains fields that depend on it
-      const dependents = field._dependents || [];
-      
-      if (dependents.length > 0) {
-        if (!graph.dependencies[fieldName]) {
-          graph.dependencies[fieldName] = {
-            id: fieldId,
-            dependents: [], // Fields that depend on this field
-            dependsOn: [],  // Will be populated in reverse pass
-          };
-        }
-
-        // Each dependent is a field that depends on this field
-        dependents.forEach(dep => {
-          const dependentField = dep.node;
-          const dependentName = dependentField.name;
-          
-          if (dependentName && dependentName !== fieldName) {
-            graph.dependencies[fieldName].dependents.push(dependentName);
-          }
-        });
-      }
-    });
-
-    // Build reverse dependencies (dependsOn)
-    Object.keys(graph.dependencies).forEach(fieldName => {
-      const field = graph.dependencies[fieldName];
-      
-      // For each field that this field affects (dependents)
-      field.dependents.forEach(dependentName => {
-        if (!graph.dependencies[dependentName]) {
-          graph.dependencies[dependentName] = {
-            dependents: [],
-            dependsOn: [],
-          };
-        }
-        
-        // The dependent field depends on this field
-        if (!graph.dependencies[dependentName].dependsOn.includes(fieldName)) {
-          graph.dependencies[dependentName].dependsOn.push(fieldName);
-        }
-      });
-    });
-
-    lib_core.info(`Visited ${visitedFieldCount} fields, ${graph.fieldsWithRules} have rules`);
-
-    return graph;
-  }
-
-  /**
-   * Detect cycles in dependency graph using DFS
-   * @param {Object} graph - Dependency graph
-   * @returns {Array} Array of cycles found
-   */
-  detectCycles(graph) {
-    const cycles = [];
-    const visited = new Set();
-    const recursionStack = new Set();
-
-    const dfs = (fieldName, path = []) => {
-      if (recursionStack.has(fieldName)) {
-        // Cycle detected
-        const cycleStart = path.indexOf(fieldName);
-        const cycle = path.slice(cycleStart);
-        cycle.push(fieldName); // Complete the cycle
-        
-        // Check if this cycle is already recorded (avoid duplicates)
-        // Create a sorted copy for the key (don't mutate the original cycle array)
-        const cycleKey = [...cycle].sort().join('->');
-        if (!cycles.some(c => c.key === cycleKey)) {
-          cycles.push({
-            key: cycleKey,
-            fields: cycle,  // Keep original order for display
-            path: [...path, fieldName],
-          });
-        }
-        return;
-      }
-
-      if (visited.has(fieldName)) {
-        return;
-      }
-
-      visited.add(fieldName);
-      recursionStack.add(fieldName);
-      path.push(fieldName);
-
-      const node = graph.dependencies[fieldName];
-      if (node && node.dependsOn) {
-        node.dependsOn.forEach(dependency => {
-          dfs(dependency, [...path]);
-        });
-      }
-
-      recursionStack.delete(fieldName);
-    };
-
-    // Run DFS from each field
-    Object.keys(graph.dependencies).forEach(fieldName => {
-      if (!visited.has(fieldName)) {
-        dfs(fieldName);
-      }
-    });
-
-    return cycles;
-  }
-
-  /**
-   * Generate issues from detected cycles
-   */
-  generateIssues(cycles) {
-    return cycles.map(cycle => ({
-      severity: 'error',
-      type: 'rule-cycle',
-      message: `Circular dependency detected: ${cycle.fields.join(' → ')}`,
-      fields: cycle.fields,
-      path: cycle.path,
-      recommendation: 'Break the circular dependency by removing or modifying one of the rules. Circular dependencies can cause infinite loops and performance issues. Consider using events or consolidating the logic.',
-    }));
-  }
-
-  /**
-   * Compare before and after analyses
-   */
-  compare(beforeData, afterData) {
-    const resolvedCycles = (beforeData.cycleDetails || []).filter(beforeCycle =>
-      !(afterData.cycleDetails || []).some(afterCycle => afterCycle.key === beforeCycle.key)
-    );
-
-    return {
-      before: beforeData,
-      after: afterData,
-      delta: {
-        cycles: (afterData.cycles || 0) - (beforeData.cycles || 0),
-        totalRules: (afterData.totalRules || 0) - (beforeData.totalRules || 0),
-        slowRules: (afterData.slowRuleCount || 0) - (beforeData.slowRuleCount || 0),
-      },
-      newCycles: afterData.cycleDetails || [], // Report ALL cycles in current state
-      resolvedCycles,
-      slowRules: afterData.slowRules || [], // Top 10 slowest rules
-      slowRuleCount: afterData.slowRuleCount || 0,
-    };
-  }
-}
-
-
-
-;// CONCATENATED MODULE: ./src/analyzers/form-html-analyzer.js
-
-
-// Properties that force layout / are non-composited when animated
-const NON_COMPOSITED_ANIM_PROPS = new Set([
-  'top', 'left', 'right', 'bottom',
-  'width', 'height',
-  'margin', 'margin-top', 'margin-right', 'margin-bottom', 'margin-left',
-  'padding', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left',
-  'font-size',
-]);
-
-// CSS selectors / tag names considered "above the fold"
-const ABOVE_FOLD_SELECTORS = (/* unused pure expression or super */ null && ([
-  'header',
-  '.header',
-  '[class*="header"]',
-  '.banner',
-  '[class*="banner"]',
-]));
-
-/**
- * Analyzes rendered form HTML for performance issues
- * Focus: Client-side rendered form content
- */
-class FormHTMLAnalyzer {
-  constructor(config = null) {
-    this.config = config;
-    
-    // Hero image detection configuration (with defaults)
-    this.heroConfig = {
-      enabled: true,
-      keywords: ['hero', 'banner', 'masthead', 'jumbotron', 'splash', 'featured'],
-      treatFirstImageAsHero: true,
-      minimumHeroSize: { width: 300, height: 200 },
-      checkParentContainer: true,
-      ...(config?.heroImageDetection || {})
-    };
-  }
-
-  /**
-   * Detect if an image is a hero/banner image that should NOT be lazy-loaded
-   * Multi-factor heuristic approach
-   */
-  isHeroImage(img, index, allImages) {
-    if (!this.heroConfig.enabled) {
-      return false; // If disabled, all images should be lazy-loaded
-    }
-    
-    // 1. Check image class/id for hero keywords
-    const imgClasses = (img.class || '').toLowerCase();
-    const imgId = (img.id || '').toLowerCase();
-    const keywords = this.heroConfig.keywords.join('|');
-    const heroRegex = new RegExp(keywords, 'i');
-    
-    if (heroRegex.test(imgClasses + imgId)) {
-      return true; // Explicit hero indicator in class/id
-    }
-    
-    // 2. Check if image has explicit eager loading attributes
-    //    (Next.js priority, fetchpriority, or loading="eager")
-    if (img.loading === 'eager' || img.fetchpriority === 'high' || img.priority === 'true') {
-      return true; // Developer explicitly marked as high priority
-    }
-    
-    // 3. First image in form heuristic
-    if (this.heroConfig.treatFirstImageAsHero && index === 0) {
-      // First image is often hero, but check if it's large enough
-      const width = parseInt(img.width) || 0;
-      const height = parseInt(img.height) || 0;
-      const minWidth = this.heroConfig.minimumHeroSize.width;
-      const minHeight = this.heroConfig.minimumHeroSize.height;
-      
-      // If no dimensions, assume it might be hero (safer to not flag)
-      if (!width && !height) {
-        return true; // First image without dimensions - likely hero
-      }
-      
-      // If dimensions exist, check if they exceed minimum hero size
-      if (width >= minWidth || height >= minHeight) {
-        return true; // First large image is likely hero
-      }
-    }
-    
-    // 4. Check parent container for hero-related classes
-    //    (e.g., <section class="hero-section"><img></section>)
-    if (this.heroConfig.checkParentContainer && img.parentClasses) {
-      const parentClasses = img.parentClasses.toLowerCase();
-      if (heroRegex.test(parentClasses)) {
-        return true; // Inside a hero container
-      }
-    }
-    
-    // Not a hero image - should be lazy-loaded
-    return false;
-  }
-
-  /**
-   * Analyze form HTML for performance issues
-   * @param {string} html - HTML content
-   * @returns {Object} Analysis results
-   */
-  analyze(html) {
-    if (!html) {
-      return { error: 'No HTML provided' };
-    }
-
-    const $ = load_parse_load(html);
-    
-    // Find the form container (adaptive forms typically render in main or specific container)
-    const formContainer = $('main, [class*="form"], form').first();
-    
-    if (!formContainer.length) {
-      return { error: 'No form container found in HTML' };
-    }
-
-    return {
-      images: this.analyzeFormImages($, formContainer),
-      scripts: this.analyzePageScripts($), // Analyze ALL scripts on page (not just in form)
-      resources: this.analyzeFormResources($, formContainer),
-      rendering: this.analyzeRenderingPerformance($, formContainer),
-      aboveFoldLazyIssues: this.detectAboveFoldLazyImages($),
-      imageUrls: this.collectImageUrls($),
-      issues: [],
-    };
-  }
-
-  /**
-   * Analyze images within the form
-   */
-  analyzeFormImages($, container) {
-    const images = container.find('img').map((i, img) => {
-      const $img = $(img);
-      const $parent = $img.parent();
-      
-      return {
-        src: $img.attr('src'),
-        alt: $img.attr('alt'),
-        loading: $img.attr('loading'),
-        fetchpriority: $img.attr('fetchpriority'),
-        priority: $img.attr('priority'),
-        width: $img.attr('width'),
-        height: $img.attr('height'),
-        class: $img.attr('class'),
-        id: $img.attr('id'),
-        parentClasses: $parent.attr('class') || '',
-        hasLazyLoading: $img.attr('loading') === 'lazy',
-        hasDimensions: !!($img.attr('width') && $img.attr('height')),
-      };
-    }).get();
-
-    const nonLazyImages = images.filter(img => !img.hasLazyLoading);
-    const imagesWithoutDimensions = images.filter(img => !img.hasDimensions);
-
-    return {
-      total: images.length,
-      lazyLoaded: images.filter(img => img.hasLazyLoading).length,
-      nonLazyLoaded: nonLazyImages.length,
-      withoutDimensions: imagesWithoutDimensions.length,
-      images,
-      nonLazyImages,
-      imagesWithoutDimensions,
-    };
-  }
-
-  /**
-   * Analyze ALL scripts on the page (not just within form)
-   * Scripts anywhere on the page can block form rendering
-   */
-  analyzePageScripts($) {
-    // Analyze ALL scripts on the entire page
-    const inlineScripts = $('script:not([src])').map((i, script) => {
-      const content = $(script).html();
-      const $script = $(script);
-      return {
-        size: content.length,
-        hasContent: content.length > 0,
-        location: this.getScriptLocation($, $script),
-      };
-    }).get();
-
-    const externalScripts = $('script[src]').map((i, script) => {
-      const $script = $(script);
-      return {
-        src: $script.attr('src'),
-        async: $script.attr('async') !== undefined,
-        defer: $script.attr('defer') !== undefined,
-        location: this.getScriptLocation($, $script),
-      };
-    }).get();
-
-    return {
-      inline: inlineScripts.length,
-      inlineSize: inlineScripts.reduce((sum, s) => sum + s.size, 0),
-      external: externalScripts.length,
-      blocking: externalScripts.filter(s => !s.async && !s.defer).length,
-      scripts: {
-        inline: inlineScripts,
-        external: externalScripts,
-      },
-    };
-  }
-
-  /**
-   * Determine script location on page (head, body, etc.)
-   */
-  getScriptLocation($, $script) {
-    if ($script.closest('head').length) return 'head';
-    if ($script.closest('body').length) return 'body';
-    return 'unknown';
-  }
-
-  /**
-   * Analyze resources loaded within form
-   */
-  analyzeFormResources($, container) {
-    // Check for iframes (can block rendering)
-    const iframes = container.find('iframe').map((i, iframe) => {
-      const $iframe = $(iframe);
-      return {
-        src: $iframe.attr('src'),
-        loading: $iframe.attr('loading'),
-      };
-    }).get();
-
-    // Check for videos
-    const videos = container.find('video').map((i, video) => {
-      const $video = $(video);
-      return {
-        src: $video.attr('src'),
-        preload: $video.attr('preload'),
-        autoplay: $video.attr('autoplay') !== undefined,
-      };
-    }).get();
-
-    // Check for large data attributes (can bloat HTML)
-    // Note: [data-*] is not valid CSS, so we check all elements
-    const elementsWithLargeData = container.find('*').filter((i, elem) => {
-      const attrs = elem.attribs || {};
-      let totalDataSize = 0;
-      
-      // Sum up all data-* attribute sizes
-      Object.keys(attrs).forEach(attr => {
-        if (attr.startsWith('data-')) {
-          totalDataSize += (attrs[attr] || '').length;
-        }
-      });
-      
-      return totalDataSize > 5000; // 5KB threshold
-    }).length;
-
-    return {
-      iframes: iframes.length,
-      videos: videos.length,
-      autoplayVideos: videos.filter(v => v.autoplay).length,
-      elementsWithLargeData,
-      iframeList: iframes,
-      videoList: videos,
-    };
-  }
-
-  /**
-   * Analyze rendering performance factors
-   */
-  analyzeRenderingPerformance($, container) {
-    // Count DOM elements in form
-    const totalElements = container.find('*').length;
-    
-    // Count elements with inline styles (can slow down rendering)
-    const inlineStyleElements = container.find('[style]').length;
-    
-    // Count deeply nested elements
-    const maxDepth = this.calculateMaxDepth($, container);
-    
-    // Count form fields (inputs, selects, textareas)
-    const formFields = container.find('input, select, textarea, button').length;
-    
-    // Check for visibility: hidden elements (DOM bloat)
-    const hiddenElements = container.find('[style*="display:none"], [style*="display: none"], [hidden]').length;
-
-    return {
-      totalElements,
-      maxDepth,
-      formFields,
-      inlineStyleElements,
-      hiddenElements,
-    };
-  }
-
-  /**
-   * Calculate maximum DOM depth
-   */
-  calculateMaxDepth($, element, currentDepth = 0) {
-    const children = $(element).children();
-    if (children.length === 0) {
-      return currentDepth;
-    }
-
-    let maxChildDepth = currentDepth;
-    children.each((i, child) => {
-      const depth = this.calculateMaxDepth($, child, currentDepth + 1);
-      maxChildDepth = Math.max(maxChildDepth, depth);
-    });
-
-    return maxChildDepth;
-  }
-
-  /**
-   * Classify image URLs (with known sizes) into issues.
-   * Called from analyzeWithIssues (sync) or tests directly.
-   * @param {Array<{url: string, fileSizeKb: number|null}>} imageSizes
-   * @returns {Array} issues
-   */
-  classifyImageIssues(imageSizes) {
-    const issues = [];
-
-    for (const { url, fileSizeKb } of imageSizes) {
-      const isGif = /\.gif(\?|$)/i.test(url);
-
-      if (isGif) {
-        if (fileSizeKb === null) {
-          // HEAD request failed — flag on URL alone
-          issues.push({
-            severity: 'warning',
-            type: 'animated-gif-detected',
-            url,
-            fileSizeKb: null,
-            message: `Animated GIF detected: "${url}". GIF format is inefficient regardless of size.`,
-            recommendation: 'Replace GIFs with video (<video autoplay loop muted playsinline>) or WebP animations for smaller file size and better performance.',
-          });
-        } else if (fileSizeKb > 200) {
-          issues.push({
-            severity: 'error',
-            type: 'animated-gif-detected',
-            url,
-            fileSizeKb,
-            message: `Large animated GIF (${fileSizeKb.toFixed(1)} KB): "${url}". Severely impacts page weight.`,
-            recommendation: 'Replace GIFs with video (<video autoplay loop muted playsinline>) or WebP animations for smaller file size and better performance.',
-          });
-        } else if (fileSizeKb > 50) {
-          issues.push({
-            severity: 'warning',
-            type: 'animated-gif-detected',
-            url,
-            fileSizeKb,
-            message: `Animated GIF (${fileSizeKb.toFixed(1)} KB): "${url}". GIF format is inefficient.`,
-            recommendation: 'Replace GIFs with video (<video autoplay loop muted playsinline>) or WebP animations for smaller file size and better performance.',
-          });
-        }
-      }
-
-      // Oversized image check — applies to ALL formats (when size is known)
-      if (fileSizeKb !== null) {
-        if (fileSizeKb > 500) {
-          issues.push({
-            severity: 'error',
-            type: 'oversized-image',
-            url,
-            fileSizeKb,
-            message: `Oversized image (${fileSizeKb.toFixed(1)} KB): "${url}". Exceeds 500 KB threshold.`,
-            recommendation: 'Compress and resize images. Use modern formats (WebP/AVIF). Target < 150 KB for most images.',
-          });
-        } else if (fileSizeKb > 150) {
-          issues.push({
-            severity: 'warning',
-            type: 'oversized-image',
-            url,
-            fileSizeKb,
-            message: `Large image (${fileSizeKb.toFixed(1)} KB): "${url}". Exceeds 150 KB warning threshold.`,
-            recommendation: 'Compress and resize images. Use modern formats (WebP/AVIF). Target < 150 KB for most images.',
-          });
-        }
-      }
-    }
-
-    return issues;
-  }
-
-  /**
-   * Collect image URLs from HTML (img src + source type=image/gif).
-   * @param {CheerioAPI} $ - Cheerio instance
-   * @returns {string[]} array of absolute-or-relative URLs
-   */
-  collectImageUrls($) {
-    const urls = new Set();
-
-    $('img[src]').each((_, el) => {
-      const src = $(el).attr('src');
-      if (src && !src.startsWith('data:')) {
-        urls.add(src);
-      }
-    });
-
-    // <picture><source type="image/gif" srcset="...">
-    $('source[type="image/gif"]').each((_, el) => {
-      const srcset = $(el).attr('srcset') || $(el).attr('src');
-      if (srcset && !srcset.startsWith('data:')) {
-        // srcset may have multiple values; take the first URL part
-        const firstUrl = srcset.split(',')[0].trim().split(/\s+/)[0];
-        if (firstUrl) urls.add(firstUrl);
-      }
-    });
-
-    return Array.from(urls);
-  }
-
-  /**
-   * Fetch Content-Length for a list of URLs using HEAD requests.
-   * Max 10 concurrent, 3s timeout per request. Never throws.
-   * @param {string[]} urls
-   * @returns {Promise<Map<string, number|null>>} url → fileSizeKb (or null on failure)
-   */
-  async fetchImageSizes(urls) {
-    const result = new Map();
-    const CONCURRENCY = 10;
-    const TIMEOUT_MS = 3000;
-
-    async function fetchOne(url) {
-      try {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
-        const resp = await fetch(url, { method: 'HEAD', signal: controller.signal });
-        clearTimeout(timer);
-        const contentLength = resp.headers.get('content-length');
-        return contentLength ? parseInt(contentLength, 10) / 1024 : null;
-      } catch {
-        return null;
-      }
-    }
-
-    // Process in batches of CONCURRENCY
-    for (let i = 0; i < urls.length; i += CONCURRENCY) {
-      const batch = urls.slice(i, i + CONCURRENCY);
-      const sizes = await Promise.all(batch.map(fetchOne));
-      batch.forEach((url, idx) => result.set(url, sizes[idx]));
-    }
-
-    return result;
-  }
-
-  /**
-   * Detect above-fold images with loading="lazy".
-   * Checks:
-   *  1. Any <img loading="lazy"> inside header/.header/[class*="header"]/.banner/[class*="banner"]
-   *  2. The first <img> on the page that is lazy but has no fetchpriority="high"
-   * @param {CheerioAPI} $
-   * @returns {Array} issues
-   */
-  detectAboveFoldLazyImages($) {
-    const issues = [];
-    const seen = new Set();
-
-    // Check 1 — images in above-fold containers
-    const aboveFoldContainerSelectors = [
-      'header',
-      '.header',
-      '[class*="header"]',
-      '.banner',
-      '[class*="banner"]',
-    ];
-
-    for (const containerSel of aboveFoldContainerSelectors) {
-      $(`${containerSel} img[loading="lazy"]`).each((_, el) => {
-        const $img = $(el);
-        const src = $img.attr('src') || '';
-        if (seen.has(src)) return;
-        seen.add(src);
-
-        issues.push({
-          severity: 'warning',
-          type: 'above-fold-image-lazy-loaded',
-          url: src,
-          alt: $img.attr('alt') || '',
-          container: containerSel,
-          message: `Above-fold image "${src}" inside "${containerSel}" has loading="lazy". This delays LCP.`,
-          recommendation: 'Use loading="eager" (or omit the loading attribute) for images inside header/banner containers. Reserve lazy loading for below-fold images.',
-        });
-      });
-    }
-
-    // Check 2 — first <img> on the entire page that is lazy without fetchpriority="high"
-    const allImgs = $('img').toArray();
-    if (allImgs.length > 0) {
-      const firstImg = $(allImgs[0]);
-      const isLazy = firstImg.attr('loading') === 'lazy';
-      const hasFetchPriority = firstImg.attr('fetchpriority') === 'high';
-      const src = firstImg.attr('src') || '';
-
-      if (isLazy && !hasFetchPriority && !seen.has(src)) {
-        seen.add(src);
-        issues.push({
-          severity: 'warning',
-          type: 'above-fold-image-lazy-loaded',
-          url: src,
-          alt: firstImg.attr('alt') || '',
-          container: 'first-image-on-page',
-          message: `First image on page "${src}" has loading="lazy" without fetchpriority="high". This delays LCP.`,
-          recommendation: 'The first visible image should use loading="eager" or fetchpriority="high" to ensure fast LCP.',
-        });
-      }
-    }
-
-    return issues;
-  }
-
-  /**
-   * Static analysis of JS files for loadFragment() calls without eager override.
-   * @param {Array<{filename: string, content: string}>} jsFiles
-   * @returns {Array} issues
-   */
-  detectFragmentIssues(jsFiles) {
-    const issues = [];
-
-    if (!jsFiles || jsFiles.length === 0) {
-      return issues;
-    }
-
-    for (const { filename, content } of jsFiles) {
-      // Find all loadFragment( calls and their line numbers
-      const lines = content.split('\n');
-      const loadFragmentLines = [];
-
-      lines.forEach((line, idx) => {
-        if (line.includes('loadFragment(')) {
-          loadFragmentLines.push(idx + 1); // 1-based line number
-        }
-      });
-
-      if (loadFragmentLines.length === 0) continue;
-
-      // Check if the file contains an eager override anywhere
-      // Patterns: img.loading = 'eager' / img.loading='eager' / loading = 'eager' / setAttribute('loading', 'eager')
-      const hasEagerOverride = /img\.loading\s*=\s*['"]eager['"]/.test(content)
-        || /loading\s*=\s*['"]eager['"]/.test(content)
-        || /setAttribute\s*\(\s*['"]loading['"]\s*,\s*['"]eager['"]/.test(content);
-
-      if (!hasEagerOverride) {
-        issues.push({
-          severity: 'warning',
-          type: 'fragment-images-not-eagerly-loaded',
-          file: filename,
-          line: loadFragmentLines[0],
-          message: `loadFragment() called in "${filename}" but no img.loading = 'eager' override found. Fragment images will default to lazy loading.`,
-          recommendation: "After loadFragment(), set eager loading on images: fragment.querySelectorAll('img').forEach(img => { img.loading = 'eager'; })",
-        });
-      }
-    }
-
-    return issues;
-  }
-
-  /**
-   * Detect form HTML performance issues
-   */
-  detectIssues(analysis) {
-    const issues = [];
-
-    // Images without lazy loading (EXCLUDE hero/banner images)
-    if (analysis.images.nonLazyLoaded > 0) {
-      // Filter out hero/banner images (which should be eager-loaded for LCP)
-      const nonHeroImages = analysis.images.nonLazyImages.filter((img, index) => {
-        return !this.isHeroImage(img, index, analysis.images.nonLazyImages);
-      });
-      
-      if (nonHeroImages.length > 0) {
-        const heroCount = analysis.images.nonLazyLoaded - nonHeroImages.length;
-        issues.push({
-          severity: 'error', // CRITICAL: All non-hero images must be lazy loaded
-          type: 'images-not-lazy-loaded',
-          message: `${nonHeroImages.length} image(s) in form without lazy loading. This blocks form rendering and impacts LCP.${heroCount > 0 ? ` (${heroCount} hero image(s) excluded)` : ''}`,
-          count: nonHeroImages.length,
-          images: nonHeroImages.map(img => img.src),
-          recommendation: 'Add loading="lazy" attribute to all images EXCEPT hero/banner images (first visible image above the fold). Hero images should be eager-loaded for LCP optimization.',
-        });
-      }
-    }
-
-    // Images without dimensions (causes layout shift)
-    if (analysis.images.withoutDimensions > 0) {
-      issues.push({
-        severity: 'info',
-        type: 'images-without-dimensions',
-        message: `${analysis.images.withoutDimensions} image(s) without width/height attributes. This can cause layout shifts.`,
-        count: analysis.images.withoutDimensions,
-        recommendation: 'Add width and height attributes to prevent Cumulative Layout Shift (CLS).',
-      });
-    }
-
-    // Inline scripts on page (ALWAYS blocking - they execute synchronously)
-    if (analysis.scripts.inline > 0) {
-      const inHead = analysis.scripts.scripts.inline.filter(s => s.location === 'head').length;
-      const inBody = analysis.scripts.scripts.inline.filter(s => s.location === 'body').length;
-      
-      issues.push({
-        severity: 'error',
-        type: 'inline-scripts-on-page',
-        message: `${analysis.scripts.inline} inline script(s) on page (${(analysis.scripts.inlineSize / 1024).toFixed(2)} KB) - ${inHead} in HEAD, ${inBody} in BODY. Inline scripts ALWAYS block form rendering.`,
-        size: analysis.scripts.inlineSize,
-        count: analysis.scripts.inline,
-        breakdown: { head: inHead, body: inBody },
-        recommendation: 'All JavaScript should be in external files with defer attribute. Move inline scripts to external files loaded with defer. Scripts in HEAD especially delay form rendering.',
-      });
-    }
-
-    // Blocking external scripts (without async/defer)
-    if (analysis.scripts.blocking > 0) {
-      const blockingScripts = analysis.scripts.scripts.external.filter(s => !s.async && !s.defer);
-      const inHead = blockingScripts.filter(s => s.location === 'head').length;
-      const inBody = blockingScripts.filter(s => s.location === 'body').length;
-      
-      // Build script list for message
-      const scriptNames = blockingScripts.map(s => s.src).join(', ');
-      
-      issues.push({
-        severity: 'error',
-        type: 'blocking-scripts-on-page',
-        message: `${analysis.scripts.blocking} synchronous script(s) on page without async/defer - ${inHead} in HEAD, ${inBody} in BODY. Scripts: ${scriptNames}`,
-        count: analysis.scripts.blocking,
-        breakdown: { head: inHead, body: inBody },
-        scripts: blockingScripts,
-        recommendation: 'Add defer attribute to all script tags above. Use defer (not async) for forms to maintain execution order. Scripts in HEAD are especially critical.',
-      });
-    }
-
-    // Iframes (blocking)
-    if (analysis.resources.iframes > 0) {
-      issues.push({
-        severity: 'warning',
-        type: 'iframes-in-form',
-        message: `${analysis.resources.iframes} iframe(s) in form. Iframes block rendering and add overhead.`,
-        count: analysis.resources.iframes,
-        recommendation: 'Consider lazy loading iframes or using alternative approaches.',
-      });
-    }
-
-    // Autoplay videos
-    if (analysis.resources.autoplayVideos > 0) {
-      issues.push({
-        severity: 'warning',
-        type: 'autoplay-videos',
-        message: `${analysis.resources.autoplayVideos} autoplaying video(s) in form. This impacts performance and user experience.`,
-        count: analysis.resources.autoplayVideos,
-        recommendation: 'Remove autoplay or use lazy loading for videos.',
-      });
-    }
-
-    // Large data attributes
-    if (analysis.resources.elementsWithLargeData > 0) {
-      issues.push({
-        severity: 'info',
-        type: 'large-data-attributes',
-        message: `${analysis.resources.elementsWithLargeData} element(s) with large data attributes (>5KB). This bloats HTML size.`,
-        count: analysis.resources.elementsWithLargeData,
-        recommendation: 'Consider storing large data in JavaScript variables instead of data attributes.',
-      });
-    }
-
-    // Too many hidden elements (DOM bloat)
-    if (analysis.rendering.hiddenElements > 10) {
-      issues.push({
-        severity: 'info',
-        type: 'excessive-hidden-elements',
-        message: `${analysis.rendering.hiddenElements} hidden elements in form. This increases DOM size unnecessarily.`,
-        count: analysis.rendering.hiddenElements,
-        recommendation: 'Remove hidden elements from DOM and add them dynamically when needed.',
-      });
-    }
-
-    // Excessive inline styles
-    if (analysis.rendering.inlineStyleElements > 20) {
-      issues.push({
-        severity: 'info',
-        type: 'excessive-inline-styles',
-        message: `${analysis.rendering.inlineStyleElements} elements with inline styles. This prevents style reuse and increases HTML size.`,
-        count: analysis.rendering.inlineStyleElements,
-        recommendation: 'Use CSS classes instead of inline styles.',
-      });
-    }
-
-    // Large DOM size (impacts INP, TBT, and overall responsiveness)
-    // Google recommendation: < 1,500 nodes, warn at 800, error at 1,500
-    const domThresholds = this.config?.thresholds?.html?.maxDomNodes || { warning: 800, critical: 1500 };
-    
-    if (analysis.rendering.totalElements > domThresholds.critical) {
-      issues.push({
-        severity: 'error',
-        type: 'excessive-dom-size',
-        message: `${analysis.rendering.totalElements} DOM nodes in rendered form (threshold: ${domThresholds.critical}). Large DOM severely impacts INP (Interaction to Next Paint) and form responsiveness.`,
-        count: analysis.rendering.totalElements,
-        threshold: domThresholds.critical,
-        recommendation: 'Reduce DOM complexity: Remove unnecessary hidden fields, simplify nested structures, use lazy rendering for large lists, consolidate panels. Each interaction must traverse all ${analysis.rendering.totalElements} nodes, causing slow responses.',
-      });
-    } else if (analysis.rendering.totalElements > domThresholds.warning) {
-      issues.push({
-        severity: 'warning',
-        type: 'large-dom-size',
-        message: `${analysis.rendering.totalElements} DOM nodes in rendered form (warning threshold: ${domThresholds.warning}). This impacts INP and can slow down interactions.`,
-        count: analysis.rendering.totalElements,
-        threshold: domThresholds.warning,
-        recommendation: 'Consider reducing DOM size. Target < 800 nodes for optimal INP. Focus on: removing unnecessary hidden fields (see Hidden Fields section), simplifying component structure, lazy loading content.',
-      });
-    }
-
-    // Above-fold images with lazy loading (Gap 2)
-    if (analysis.aboveFoldLazyIssues && analysis.aboveFoldLazyIssues.length > 0) {
-      issues.push(...analysis.aboveFoldLazyIssues);
-    }
-
-    return issues;
-  }
-
-  /**
-   * Perform full analysis with issue detection.
-   * Optionally accepts jsFiles for Gap 5 (fragment eager-load check).
-   */
-  analyzeWithIssues(html, jsFiles = []) {
-    const analysis = this.analyze(html);
-    if (analysis.error) {
-      return analysis;
-    }
-
-    analysis.issues = this.detectIssues(analysis);
-
-    // Gap 5 — fragment eager-load check (static JS analysis)
-    if (jsFiles && jsFiles.length > 0) {
-      analysis.issues.push(...this.detectFragmentIssues(jsFiles));
-    }
-
-    return analysis;
-  }
-
-  /**
-   * Compare before and after HTML analyses
-   */
-  compare(beforeHtml, afterHtml) {
-    const beforeAnalysis = this.analyzeWithIssues(beforeHtml);
-    const afterAnalysis = this.analyzeWithIssues(afterHtml);
-
-    if (beforeAnalysis.error || afterAnalysis.error) {
-      return { 
-        error: beforeAnalysis.error || afterAnalysis.error,
-        before: beforeAnalysis,
-        after: afterAnalysis,
-      };
-    }
-
-    return {
-      before: beforeAnalysis,
-      after: afterAnalysis,
-      delta: {
-        images: afterAnalysis.images.total - beforeAnalysis.images.total,
-        nonLazyImages: afterAnalysis.images.nonLazyLoaded - beforeAnalysis.images.nonLazyLoaded,
-        totalElements: afterAnalysis.rendering.totalElements - beforeAnalysis.rendering.totalElements,
-        hiddenElements: afterAnalysis.rendering.hiddenElements - beforeAnalysis.rendering.hiddenElements,
-        blockingScripts: afterAnalysis.scripts.blocking - beforeAnalysis.scripts.blocking,
-      },
-      newIssues: afterAnalysis.issues.filter(afterIssue =>
-        !beforeAnalysis.issues.some(beforeIssue => beforeIssue.type === afterIssue.type)
-      ),
-      resolvedIssues: beforeAnalysis.issues.filter(beforeIssue =>
-        !afterAnalysis.issues.some(afterIssue => afterIssue.type === beforeIssue.type)
-      ),
-    };
-  }
-}
-
-
-;// CONCATENATED MODULE: ./src/analyzers/form-css-analyzer.js
-/**
- * Analyzes CSS for form-specific performance and architectural issues
- * Focus: Issues that linters cannot detect (architectural, not syntax)
- */
-class FormCSSAnalyzer {
-  constructor(config = null) {
-    this.config = config;
-  }
-
-  /**
-   * Analyze CSS files for form-specific issues
-   * @param {Array} cssFiles - Array of {filename, content} objects
-   * @returns {Object} Analysis results
-   */
-  analyze(cssFiles) {
-    if (!cssFiles || cssFiles.length === 0) {
-      return { 
-        filesAnalyzed: 0,
-        issues: [],
-        summary: {},
-      };
-    }
-
-    const allIssues = [];
-    const summary = {
-      totalFiles: cssFiles.length,
-      backgroundImages: 0,
-      importantRules: 0,
-      inlineDataURIs: 0,
-      deepSelectors: 0,
-      duplicateSelectors: 0,
-    };
-
-    cssFiles.forEach(file => {
-      const fileIssues = this.analyzeFile(file.filename, file.content);
-      allIssues.push(...fileIssues);
-
-      // Update summary
-      fileIssues.forEach(issue => {
-        if (issue.type === 'css-background-image') summary.backgroundImages++;
-        if (issue.type === 'excessive-important') summary.importantRules += issue.count || 0;
-        if (issue.type === 'inline-data-uri') summary.inlineDataURIs++;
-        if (issue.type === 'deep-selector') summary.deepSelectors++;
-        if (issue.type === 'duplicate-selector') summary.duplicateSelectors++;
-      });
-    });
-
-    return {
-      filesAnalyzed: cssFiles.length,
-      issues: allIssues,
-      summary,
-    };
-  }
-
-  /**
-   * Strip CSS comments from content
-   * This ensures we don't flag commented-out code
-   * Handles both standard CSS and preprocessor (//) comments and HTML comments <!-- -->
-   */
-  stripComments(content) {
-    // Remove /* ... */ style comments (standard CSS)
-    let cleaned = content.replace(/\/\*[\s\S]*?\*\//g, '');
-    
-    // Remove // style comments (SCSS/LESS/SASS)
-    // Match // to end of line, but preserve the newline for accurate line numbers
-    cleaned = cleaned.replace(/\/\/.*$/gm, '');
-    
-    return cleaned;
-  }
-
-  /**
-   * Analyze a single CSS file
-   */
-  analyzeFile(filename, content) {
-    const issues = [];
-
-    // Strip comments to avoid flagging commented-out code
-    const activeContent = this.stripComments(content);
-
-    // Check for background-image usage (should use Image component)
-    issues.push(...this.detectBackgroundImages(filename, activeContent, content));
-
-    // Check for inline data URIs (bloat CSS)
-    issues.push(...this.detectInlineDataURIs(filename, activeContent, content));
-
-    // Check for excessive !important usage
-    issues.push(...this.detectExcessiveImportant(filename, activeContent, content));
-
-    // Check for overly specific selectors (performance)
-    issues.push(...this.detectDeepSelectors(filename, activeContent, content));
-
-    // Check for duplicate selectors (maintainability)
-    issues.push(...this.detectDuplicateSelectors(filename, activeContent, content));
-
-    // Check for render-blocking CSS patterns
-    issues.push(...this.detectRenderBlockingPatterns(filename, activeContent, content));
-
-    // Check for missing CSS custom properties for theming
-    issues.push(...this.detectHardcodedColors(filename, activeContent, content));
-
-    // Check for large CSS files (use original content for size)
-    issues.push(...this.detectLargeFiles(filename, content));
-
-    // Check for non-composited animations
-    issues.push(...this.detectNonCompositedAnimations(filename, activeContent));
-
-    // Check for missing will-change on transform transitions/animations
-    issues.push(...this.detectMissingWillChange(filename, activeContent));
-
-    return issues;
-  }
-
-  /**
-   * Detect CSS background-image usage
-   * Issue: Should use Image component for lazy loading and optimization
-   * @param {string} filename - The CSS filename
-   * @param {string} activeContent - Content with comments stripped
-   * @param {string} originalContent - Original content with comments (for line numbers)
-   */
-  detectBackgroundImages(filename, activeContent, originalContent) {
-    const issues = [];
-    const backgroundImagePattern = /background(-image)?:\s*url\(['"]?([^'"()]+)['"]?\)/gi;
-    
-    let match;
-    while ((match = backgroundImagePattern.exec(activeContent)) !== null) {
-      const imageUrl = match[2];
-      
-      // Skip data URIs (handled separately)
-      if (imageUrl.startsWith('data:')) continue;
-      
-      // Skip SVG patterns/gradients
-      if (imageUrl.includes('.svg') && activeContent.includes('background-repeat')) continue;
-      
-      const lineNumber = this.getLineNumber(activeContent, match.index);
-      
-      // Extract the CSS selector that contains this background-image
-      const selector = this.extractSelectorAtPosition(activeContent, match.index);
-
-      issues.push({
-        severity: 'error',
-        type: 'css-background-image',
-        file: filename,
-        line: lineNumber,
-        message: `CSS background-image detected: "${imageUrl}". Must use Image component instead.`,
-        imageUrl,
-        selector,  // Add selector for AI fix to extract dimensions
-        recommendation: 'Replace with <Image> component for better lazy loading, responsive images, and automatic optimization. Background images cannot be lazy loaded and block form rendering.',
-      });
-    }
-
-    return issues;
-  }
-  
-  /**
-   * Extract CSS selector at a given position in the content
-   * Works backwards from position to find the selector before the opening {
-   */
-  extractSelectorAtPosition(content, position) {
-    // Find the opening brace before this position
-    let bracePos = content.lastIndexOf('{', position);
-    if (bracePos === -1) return null;
-    
-    // Find the closing brace of the previous rule (or start of file)
-    let prevCloseBrace = content.lastIndexOf('}', bracePos);
-    let startPos = prevCloseBrace === -1 ? 0 : prevCloseBrace + 1;
-    
-    // Extract the selector (text between previous } and current {)
-    const selectorText = content.substring(startPos, bracePos).trim();
-    
-    // Clean up: remove comments, @import statements, newlines, etc.
-    const cleanSelector = selectorText
-      .replace(/\/\*[\s\S]*?\*\//g, '') // Remove comments
-      .replace(/@import\s+url\([^)]+\);?/g, '') // Remove @import statements
-      .replace(/@import\s+['"][^'"]+['"];?/g, '') // Remove @import with quotes
-      .replace(/\s+/g, ' ')              // Normalize whitespace
-      .trim();
-    
-    return cleanSelector || 'this CSS rule';
-  }
-
-  /**
-   * Detect inline data URIs in CSS
-   * Issue: Bloats CSS file size and blocks rendering
-   */
-  detectInlineDataURIs(filename, activeContent, originalContent) {
-    const issues = [];
-    const dataUriPattern = /url\(['"]?(data:[^'"()]+)['"]?\)/gi;
-    
-    let match;
-    while ((match = dataUriPattern.exec(activeContent)) !== null) {
-      const dataUri = match[1];
-      const size = dataUri.length;
-      
-      // Flag data URIs larger than 5KB (they bloat CSS and block rendering)
-      if (size > 5120) { // 5KB threshold
-        const lineNumber = this.getLineNumber(activeContent, match.index);
-        
-        // All large data URIs are critical (>5KB) - they block rendering
-        const dataSize = size; // Use actual data URI size, not match[0]
-        
-        issues.push({
-          severity: 'error', // Always critical if >5KB
-          type: 'inline-data-uri',
-          file: filename,
-          line: lineNumber,
-          dataSize,
-          message: `Large inline data URI (${(size / 1024).toFixed(2)} KB) bloats CSS file and blocks rendering.`,
-          size,
-          recommendation: 'Extract to separate image file for better caching and lazy loading. Inline data URIs >5KB significantly impact performance.',
-        });
-      }
-    }
-
-    return issues;
-  }
-
-  /**
-   * Detect excessive !important usage
-   * Issue: Makes CSS hard to maintain and override
-   */
-  detectExcessiveImportant(filename, activeContent, originalContent) {
-    const issues = [];
-    const importantPattern = /!important/gi;
-    const matches = activeContent.match(importantPattern);
-    
-    if (matches && matches.length > 10) {
-      issues.push({
-        severity: 'info',
-        type: 'excessive-important',
-        file: filename,
-        message: `Excessive !important usage (${matches.length} times). This indicates specificity issues.`,
-        count: matches.length,
-        recommendation: 'Refactor CSS to reduce !important usage. Use proper specificity and BEM naming. Excessive !important makes forms hard to customize and theme.',
-      });
-    }
-
-    return issues;
-  }
-
-  /**
-   * Detect overly specific selectors
-   * Issue: Slow selector matching, hard to maintain
-   */
-  detectDeepSelectors(filename, activeContent, originalContent) {
-    const content = activeContent;
-    const issues = [];
-    
-    // Match selectors (simplified - captures most cases)
-    const selectorPattern = /([^{]+)\{/g;
-    
-    let match;
-    while ((match = selectorPattern.exec(content)) !== null) {
-      const selector = match[1].trim();
-      
-      // Skip @-rules
-      if (selector.startsWith('@')) continue;
-      
-      // Count selector depth (number of spaces/combinators)
-      const depth = (selector.match(/[\s>+~]/g) || []).length;
-      
-      // Flag selectors deeper than 4 levels
-      if (depth > 4) {
-        const lineNumber = this.getLineNumber(content, match.index);
-
-        issues.push({
-          severity: 'info',
-          type: 'deep-selector',
-          file: filename,
-          line: lineNumber,
-          message: `Overly specific selector (depth: ${depth}): "${selector.substring(0, 80)}..."`,
-          selector: selector,
-          depth,
-          recommendation: 'Use BEM or utility classes to reduce selector depth. Deep selectors slow down CSS matching in forms with many elements.',
-        });
-      }
-    }
-
-    return issues;
-  }
-
-  /**
-   * Detect duplicate selectors
-   * Issue: Maintainability and file size
-   */
-  detectDuplicateSelectors(filename, activeContent, originalContent) {
-    const content = activeContent;
-    const issues = [];
-    const selectorMap = new Map();
-    const selectorPattern = /([^{]+)\{/g;
-    
-    let match;
-    while ((match = selectorPattern.exec(content)) !== null) {
-      const selector = match[1].trim();
-      
-      if (selector.startsWith('@')) continue;
-      
-      if (selectorMap.has(selector)) {
-        selectorMap.get(selector).count++;
-        selectorMap.get(selector).positions.push(match.index);
-      } else {
-        selectorMap.set(selector, { count: 1, positions: [match.index] });
-      }
-    }
-
-    // Find duplicates
-    selectorMap.forEach((data, selector) => {
-      if (data.count > 2) {
-        const lineNumber = this.getLineNumber(content, data.positions[0]);
-
-        issues.push({
-          severity: 'info',
-          type: 'duplicate-selector',
-          file: filename,
-          line: lineNumber,
-          message: `Selector "${selector.substring(0, 60)}..." appears ${data.count} times.`,
-          selector,
-          count: data.count,
-          recommendation: 'Consolidate duplicate selectors to reduce CSS size and improve maintainability.',
-        });
-      }
-    });
-
-    return issues;
-  }
-
-  /**
-   * Detect render-blocking CSS patterns
-   * Issue: Delays form interactivity
-   */
-  detectRenderBlockingPatterns(filename, activeContent, originalContent) {
-    const issues = [];
-
-    // Check for @import (blocks rendering)
-    const importPattern = /@import\s+(?:url\()?['"]([^'"]+)['"](?:\))?/gi;
-    let match;
-    
-    while ((match = importPattern.exec(activeContent)) !== null) {
-      const importUrl = match[1];
-      const lineNumber = this.getLineNumber(activeContent, match.index);
-
-      issues.push({
-        severity: 'error',
-        type: 'css-import-blocking',
-        file: filename,
-        line: lineNumber,
-        message: `@import detected: "${importUrl}"`,
-        importUrl,
-        recommendation: 'Note: @import statements are bundled into a single CSS file during the build process, so this does not impact production performance. This warning is for development awareness only.',
-      });
-    }
-
-    // Check for large font files inline
-    const fontFacePattern = /@font-face\s*\{[^}]+url\(['"]?(data:[^'"()]+)['"]?\)/gi;
-    while ((match = fontFacePattern.exec(activeContent)) !== null) {
-      const dataUri = match[1];
-      if (dataUri.length > 10000) {
-        const lineNumber = this.getLineNumber(activeContent, match.index);
-
-        issues.push({
-          severity: 'warning',
-          type: 'inline-font-blocking',
-          file: filename,
-          line: lineNumber,
-          message: `Large inline font (${(dataUri.length / 1024).toFixed(2)} KB) blocks CSS parsing.`,
-          size: dataUri.length,
-          recommendation: 'Use external font files with font-display: swap. Inline fonts block form rendering.',
-        });
-      }
-    }
-
-    return issues;
-  }
-
-  /**
-   * Detect hardcoded colors (should use CSS variables for theming)
-   * Issue: Forms cannot be easily themed/customized
-   */
-  detectHardcodedColors(filename, activeContent, originalContent) {
-    const content = activeContent;
-    const issues = [];
-    
-    // Count color declarations
-    const hexColorPattern = /#[0-9a-fA-F]{3,6}/g;
-    const rgbColorPattern = /rgba?\([^)]+\)/g;
-    const hslColorPattern = /hsla?\([^)]+\)/g;
-    
-    const hexColors = (content.match(hexColorPattern) || []).length;
-    const rgbColors = (content.match(rgbColorPattern) || []).length;
-    const hslColors = (content.match(hslColorPattern) || []).length;
-    const totalColors = hexColors + rgbColors + hslColors;
-
-    // Check if using CSS custom properties
-    const cssVarPattern = /var\(--[^)]+\)/g;
-    const cssVars = (content.match(cssVarPattern) || []).length;
-
-    // If lots of hardcoded colors but few CSS variables, flag it
-    if (totalColors > 20 && cssVars < totalColors * 0.3) {
-      issues.push({
-        severity: 'info',
-        type: 'hardcoded-colors',
-        file: filename,
-        message: `${totalColors} hardcoded color values with only ${cssVars} CSS variables. Forms should use design tokens.`,
-        totalColors,
-        cssVars,
-        recommendation: 'Use CSS custom properties (--color-primary, --color-text, etc.) for better theming and consistency across forms. Hardcoded colors make forms hard to customize.',
-      });
-    }
-
-    return issues;
-  }
-
-  /**
-   * Detect large CSS files
-   * Issue: Slow to parse, blocks rendering
-   */
-  detectLargeFiles(filename, content) {
-    const issues = [];
-    const size = content.length;
-
-    // Flag files over 100KB
-    if (size > 100000) {
-      issues.push({
-        severity: 'warning',
-        type: 'large-css-file',
-        file: filename,
-        message: `Large CSS file (${(size / 1024).toFixed(2)} KB). Consider code splitting.`,
-        size,
-        recommendation: 'Split into critical and non-critical CSS. Load critical CSS inline and defer non-critical styles. Large CSS files delay form rendering.',
-      });
-    }
-
-    return issues;
-  }
-
-  /**
-   * Detect @keyframes that animate non-composited CSS properties.
-   * Non-composited properties force layout/paint and are expensive to animate.
-   * @param {string} filename
-   * @param {string} content - comment-stripped CSS
-   * @returns {Array} issues
-   */
-  detectNonCompositedAnimations(filename, content) {
-    const issues = [];
-
-    // Properties that are non-composited when animated
-    const nonCompositedProps = [
-      'top', 'left', 'right', 'bottom',
-      'width', 'height',
-      'margin', 'margin-top', 'margin-right', 'margin-bottom', 'margin-left',
-      'padding', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left',
-      'font-size',
-    ];
-
-    // Match @keyframes blocks: @keyframes name { ... }
-    // Use a manual scan to correctly handle nested braces
-    const keyframePattern = /@keyframes\s+([\w-]+)\s*\{/g;
-    let match;
-
-    while ((match = keyframePattern.exec(content)) !== null) {
-      const keyframeName = match[1];
-      const blockStart = match.index + match[0].length;
-
-      // Find the matching closing brace, tracking nesting
-      let depth = 1;
-      let i = blockStart;
-      while (i < content.length && depth > 0) {
-        if (content[i] === '{') depth++;
-        else if (content[i] === '}') depth--;
-        i++;
-      }
-      const blockContent = content.substring(blockStart, i - 1);
-
-      // Check if any non-composited property appears in this keyframe block
-      for (const prop of nonCompositedProps) {
-        // Match the property as a CSS property name (preceded by whitespace or { or ;)
-        const propPattern = new RegExp(`(?:^|[{;,\\s])${prop.replace('-', '\\-')}\\s*:`, 'm');
-        if (propPattern.test(blockContent)) {
-          const lineNumber = this.getLineNumber(content, match.index);
-          issues.push({
-            severity: 'warning',
-            type: 'non-composited-animation',
-            file: filename,
-            line: lineNumber,
-            property: prop,
-            keyframeName,
-            message: `@keyframes "${keyframeName}" animates non-composited property "${prop}". This forces layout/paint on every frame.`,
-            recommendation: `Replace "${prop}" animation with "transform" equivalent (e.g. translateX/Y for left/top, scaleX/Y for width/height). Non-composited animations cause jank.`,
-          });
-          break; // One issue per keyframe block — report the first offending property
-        }
-      }
-    }
-
-    return issues;
-  }
-
-  /**
-   * Detect transition/animation declarations referencing "transform" without will-change: transform.
-   * Covers:
-   *   - transition: ... transform ... (transform mentioned in transition value)
-   *   - animation: ... (rule block or global CSS has @keyframes using transform)
-   *   - rule block directly contains both animation: and transform:
-   * @param {string} filename
-   * @param {string} content - comment-stripped CSS
-   * @returns {Array} issues
-   */
-  detectMissingWillChange(filename, content) {
-    const issues = [];
-
-    // Pre-check: does this CSS file have any @keyframes that use transform?
-    const keyframesUseTransform = /@keyframes[\s\S]*?transform\s*:/i.test(content);
-
-    // Match rule blocks: selector { ... }
-    const ruleBlockPattern = /([^{}@][^{}]*?)\{([^{}]*)\}/g;
-    let match;
-
-    while ((match = ruleBlockPattern.exec(content)) !== null) {
-      const selector = match[1].trim();
-      const block = match[2];
-
-      // Skip @-rules (keyframes, media, etc.) and empty selectors
-      if (selector.startsWith('@') || selector === '') continue;
-
-      const hasTransformTransition = /transition\s*:[^;]*transform/i.test(block);
-      // animation: in rule block AND (transform in same block, or any keyframe uses transform)
-      const hasAnimation = /animation\s*:/i.test(block);
-      const hasAnimationWithTransform = hasAnimation && (/transform/i.test(block) || keyframesUseTransform);
-
-      if (hasTransformTransition || hasAnimationWithTransform) {
-        const hasWillChange = /will-change\s*:\s*transform/i.test(block);
-        if (!hasWillChange) {
-          const lineNumber = this.getLineNumber(content, match.index);
-          issues.push({
-            severity: 'info',
-            type: 'missing-will-change',
-            file: filename,
-            line: lineNumber,
-            selector: selector.substring(0, 80),
-            message: `Rule "${selector.substring(0, 60)}" uses transform transition/animation without will-change: transform.`,
-            recommendation: 'Add "will-change: transform" to hint the browser to promote this element to its own compositor layer, improving animation smoothness.',
-          });
-        }
-      }
-    }
-
-    return issues;
-  }
-
-  /**
-   * Get line number from content and index
-   */
-  getLineNumber(content, index) {
-    return content.substring(0, index).split('\n').length;
-  }
-
-  /**
-   * Compare before and after analyses
-   */
-  compare(beforeData, afterData) {
-    return {
-      before: beforeData,
-      after: afterData,
-      delta: {
-        backgroundImages: afterData.summary.backgroundImages - beforeData.summary.backgroundImages,
-        importantRules: afterData.summary.importantRules - beforeData.summary.importantRules,
-        inlineDataURIs: afterData.summary.inlineDataURIs - beforeData.summary.inlineDataURIs,
-      },
-      newIssues: afterData.issues.filter(afterIssue =>
-        !beforeData.issues.some(beforeIssue =>
-          beforeIssue.file === afterIssue.file &&
-          beforeIssue.type === afterIssue.type &&
-          beforeIssue.line === afterIssue.line
-        )
-      ),
-      resolvedIssues: beforeData.issues.filter(beforeIssue =>
-        !afterData.issues.some(afterIssue =>
-          afterIssue.file === beforeIssue.file &&
-          afterIssue.type === beforeIssue.type &&
-          afterIssue.line === beforeIssue.line
-        )
-      ),
-    };
-  }
-}
-
-
 ;// CONCATENATED MODULE: ./node_modules/acorn/dist/acorn.mjs
 // This file was generated. Do not modify manually!
 var astralIdentifierCodes = [509, 0, 227, 0, 150, 4, 294, 9, 1368, 2, 2, 1, 6, 3, 41, 2, 5, 0, 166, 1, 574, 3, 9, 9, 7, 9, 32, 4, 318, 1, 80, 3, 71, 10, 50, 3, 123, 2, 54, 14, 32, 10, 3, 1, 11, 3, 46, 10, 8, 0, 46, 9, 7, 2, 37, 13, 2, 9, 6, 1, 45, 0, 13, 2, 49, 13, 9, 3, 2, 11, 83, 11, 7, 0, 3, 0, 158, 11, 6, 9, 7, 3, 56, 1, 2, 6, 3, 1, 3, 2, 10, 0, 11, 1, 3, 6, 4, 4, 68, 8, 2, 0, 3, 0, 2, 3, 2, 4, 2, 0, 15, 1, 83, 17, 10, 9, 5, 0, 82, 19, 13, 9, 214, 6, 3, 8, 28, 1, 83, 16, 16, 9, 82, 12, 9, 9, 7, 19, 58, 14, 5, 9, 243, 14, 166, 9, 71, 5, 2, 1, 3, 3, 2, 0, 2, 1, 13, 9, 120, 6, 3, 6, 4, 0, 29, 9, 41, 6, 2, 3, 9, 0, 10, 10, 47, 15, 343, 9, 54, 7, 2, 7, 17, 9, 57, 21, 2, 13, 123, 5, 4, 0, 2, 1, 2, 6, 2, 0, 9, 9, 49, 4, 2, 1, 2, 4, 9, 9, 330, 3, 10, 1, 2, 0, 49, 6, 4, 4, 14, 10, 5350, 0, 7, 14, 11465, 27, 2343, 9, 87, 9, 39, 4, 60, 6, 26, 9, 535, 9, 470, 0, 2, 54, 8, 3, 82, 0, 12, 1, 19628, 1, 4178, 9, 519, 45, 3, 22, 543, 4, 4, 5, 9, 7, 3, 6, 31, 3, 149, 2, 1418, 49, 513, 54, 5, 49, 9, 0, 15, 0, 23, 4, 2, 14, 1361, 6, 2, 16, 3, 6, 2, 1, 2, 4, 101, 0, 161, 6, 10, 9, 357, 0, 62, 13, 499, 13, 245, 1, 2, 9, 726, 6, 110, 6, 6, 9, 4759, 9, 787719, 239];
@@ -183707,999 +180175,6 @@ class CustomFunctionAnalyzer {
 }
 
 
-;// CONCATENATED MODULE: ./src/analyzers/runtime-cls-analyzer.js
-
-
-
-
-/**
- * Analyzes JavaScript files for runtime CSS/style/class manipulations
- * that can cause CLS (Cumulative Layout Shift) during form load.
- * 
- * IMPORTANT: Only flags patterns that run during form initialization,
- * NOT patterns in event handlers or user-triggered callbacks.
- * 
- * Detects:
- * 1. Dynamic CSS loading (loadCSS, dynamic imports)
- * 2. Dynamic style injection (createElement('style'), createElement('link'))
- * 3. Dynamic class manipulation (classList.add/remove/toggle)
- * 4. Direct style manipulation (element.style.xxx)
- */
-class RuntimeCLSAnalyzer {
-  constructor(config = null) {
-    this.config = config;
-    
-    // Function names that indicate initialization context (FLAG these)
-    this.initializationFunctions = new Set([
-      'decorateForm',
-      'decorate',
-      'init',
-      'initialize',
-      'setup',
-      'loadBlock',
-      'loadEager',
-      'loadLazy',
-      'loadDelayed',
-    ]);
-    
-    // Event types that indicate user-triggered context (DON'T flag inside these)
-    this.userEventTypes = new Set([
-      'click',
-      'dblclick',
-      'mousedown',
-      'mouseup',
-      'mouseover',
-      'mouseout',
-      'mousemove',
-      'keydown',
-      'keyup',
-      'keypress',
-      'change',
-      'input',
-      'blur',
-      'focus',
-      'focusin',
-      'focusout',
-      'submit',
-      'reset',
-      'scroll',
-      'resize',
-      'touchstart',
-      'touchend',
-      'touchmove',
-      'drag',
-      'drop',
-      'dragstart',
-      'dragend',
-    ]);
-    
-    // Class names that are acceptable for state management (allowlist)
-    this.allowedStateClasses = new Set([
-      'valid',
-      'invalid',
-      'error',
-      'success',
-      'warning',
-      'focused',
-      'touched',
-      'dirty',
-      'pristine',
-      'disabled',
-      'readonly',
-      'loading',
-      'loaded',
-      'active',
-      'selected',
-      'checked',
-      'visible',
-      'hidden', // Note: hidden is ok as state class
-      'expanded',
-      'collapsed',
-      'open',
-      'closed',
-    ]);
-  }
-
-  /**
-   * Analyze JavaScript files for runtime CLS patterns
-   * @param {Array} jsFiles - Array of {filename, content} objects
-   * @returns {Object} Analysis results
-   */
-  analyze(jsFiles = []) {
-    if (!jsFiles || jsFiles.length === 0) {
-      return {
-        filesAnalyzed: 0,
-        issues: [],
-        summary: {
-          dynamicCSSLoading: 0,
-          dynamicStyleInjection: 0,
-          dynamicClassManipulation: 0,
-          directStyleManipulation: 0,
-        },
-      };
-    }
-
-    const allIssues = [];
-    const summary = {
-      dynamicCSSLoading: 0,
-      dynamicStyleInjection: 0,
-      dynamicClassManipulation: 0,
-      directStyleManipulation: 0,
-    };
-
-    // Prioritize decorateForm.js files
-    const sortedFiles = [...jsFiles].sort((a, b) => {
-      const aIsDecorate = a.filename.includes('decorateForm');
-      const bIsDecorate = b.filename.includes('decorateForm');
-      if (aIsDecorate && !bIsDecorate) return -1;
-      if (!aIsDecorate && bIsDecorate) return 1;
-      return 0;
-    });
-
-    for (const file of sortedFiles) {
-      try {
-        const fileIssues = this.analyzeFile(file);
-        allIssues.push(...fileIssues);
-
-        // Update summary
-        fileIssues.forEach(issue => {
-          if (issue.type === 'dynamic-css-loading') summary.dynamicCSSLoading++;
-          if (issue.type === 'dynamic-style-injection') summary.dynamicStyleInjection++;
-          if (issue.type === 'dynamic-class-manipulation') summary.dynamicClassManipulation++;
-          if (issue.type === 'direct-style-manipulation') summary.directStyleManipulation++;
-        });
-      } catch (error) {
-        lib_core.warning(`[RuntimeCLS] Failed to parse ${file.filename}: ${error.message}`);
-      }
-    }
-
-    lib_core.info(`[RuntimeCLS] Analyzed ${jsFiles.length} file(s), found ${allIssues.length} issue(s)`);
-    
-    return {
-      filesAnalyzed: jsFiles.length,
-      issues: allIssues,
-      summary,
-    };
-  }
-
-  /**
-   * Analyze a single JavaScript file
-   * @param {Object} file - {filename, content}
-   * @returns {Array} Issues found
-   */
-  analyzeFile(file) {
-    const issues = [];
-    const { filename, content } = file;
-
-    // Skip test files
-    if (filename.includes('test') || filename.includes('spec')) {
-      return issues;
-    }
-
-    // Parse JavaScript
-    let ast;
-    try {
-      ast = acorn_parse(content, {
-        ecmaVersion: 'latest',
-        sourceType: 'module',
-        locations: true,
-      });
-    } catch (error) {
-      // Skip files that can't be parsed
-      return issues;
-    }
-
-    // Track context: are we inside an initialization function or event handler?
-    const context = {
-      currentFunction: null,
-      isInsideEventHandler: false,
-      isInsideInitialization: false,
-      filename,
-      // decorateForm.js is ALWAYS initialization context
-      isDecorateFormFile: filename.includes('decorateForm'),
-    };
-
-    // Walk the AST
-    this.walkAST(ast, content, context, issues);
-
-    return issues;
-  }
-
-  /**
-   * Walk AST and detect CLS-causing patterns
-   */
-  walkAST(ast, content, context, issues) {
-    const self = this;
-
-    // Custom walker to track function context
-    ancestor(ast, {
-      // Track function declarations
-      FunctionDeclaration(node, ancestors) {
-        const funcName = node.id?.name;
-        const prevFunction = context.currentFunction;
-        const prevIsInit = context.isInsideInitialization;
-        
-        context.currentFunction = funcName;
-        context.isInsideInitialization = self.isInitializationFunction(funcName) || context.isDecorateFormFile;
-        
-        // Walk function body
-        self.analyzeNode(node.body, content, context, issues, ancestors);
-        
-        // Restore context
-        context.currentFunction = prevFunction;
-        context.isInsideInitialization = prevIsInit;
-      },
-
-      // Track arrow functions and function expressions
-      ArrowFunctionExpression(node, ancestors) {
-        self.handleFunctionExpression(node, ancestors, content, context, issues);
-      },
-
-      FunctionExpression(node, ancestors) {
-        self.handleFunctionExpression(node, ancestors, content, context, issues);
-      },
-
-      // Detect patterns at call expression level
-      CallExpression(node, ancestors) {
-        self.detectCallExpression(node, ancestors, content, context, issues);
-      },
-
-      // Detect dynamic import() expressions (for CSS imports)
-      ImportExpression(node, ancestors) {
-        self.detectImportExpression(node, ancestors, content, context, issues);
-      },
-
-      // Detect class manipulation and style access
-      MemberExpression(node, ancestors) {
-        self.detectMemberExpression(node, ancestors, content, context, issues);
-      },
-
-      // Detect assignments (for className, style.cssText, etc.)
-      AssignmentExpression(node, ancestors) {
-        self.detectAssignment(node, ancestors, content, context, issues);
-      },
-    });
-  }
-
-  /**
-   * Handle function expressions (arrow functions, anonymous functions)
-   */
-  handleFunctionExpression(node, ancestors, content, context, issues) {
-    // Check if this function is an event handler callback
-    const parent = ancestors[ancestors.length - 2];
-    
-    if (this.isEventHandlerCallback(parent, node)) {
-      // This is an event handler - don't flag patterns inside
-      const prevEventHandler = context.isInsideEventHandler;
-      context.isInsideEventHandler = true;
-      
-      this.analyzeNode(node.body, content, context, issues, ancestors);
-      
-      context.isInsideEventHandler = prevEventHandler;
-    } else {
-      // Check if assigned to an initialization function
-      const funcName = this.getFunctionName(parent, node);
-      const prevFunction = context.currentFunction;
-      const prevIsInit = context.isInsideInitialization;
-      
-      if (funcName) {
-        context.currentFunction = funcName;
-        context.isInsideInitialization = this.isInitializationFunction(funcName) || context.isDecorateFormFile;
-      }
-      
-      this.analyzeNode(node.body, content, context, issues, ancestors);
-      
-      context.currentFunction = prevFunction;
-      context.isInsideInitialization = prevIsInit;
-    }
-  }
-
-  /**
-   * Analyze a node for patterns
-   */
-  analyzeNode(node, content, context, issues, ancestors) {
-    // This is called by the walker, patterns are detected in specific handlers
-  }
-
-  /**
-   * Check if we're inside an event handler callback by examining ancestors
-   */
-  isInsideEventHandlerCallback(ancestors) {
-    // Walk up the ancestors to find if we're inside an event handler callback
-    for (let i = ancestors.length - 1; i >= 0; i--) {
-      const ancestor = ancestors[i];
-      
-      // Check for addEventListener call with our function as callback
-      if (ancestor.type === 'CallExpression') {
-        const calleeName = this.getCalleeName(ancestor.callee);
-        if (calleeName === 'addEventListener' || calleeName.endsWith('.addEventListener')) {
-          const eventType = ancestor.arguments[0];
-          if (eventType && this.userEventTypes.has(this.getStringValue(eventType))) {
-            return true;
-          }
-        }
-      }
-      
-      // Check for onXxx property assignment
-      if (ancestor.type === 'AssignmentExpression') {
-        const left = ancestor.left;
-        if (left && left.type === 'MemberExpression') {
-          const propName = left.property?.name;
-          if (propName && propName.startsWith('on')) {
-            const eventType = propName.slice(2).toLowerCase();
-            if (this.userEventTypes.has(eventType)) {
-              return true;
-            }
-          }
-        }
-      }
-    }
-    return false;
-  }
-
-  /**
-   * Get the containing initialization function from ancestors
-   */
-  getInitializationContext(ancestors) {
-    for (let i = ancestors.length - 1; i >= 0; i--) {
-      const ancestor = ancestors[i];
-      
-      if (ancestor.type === 'FunctionDeclaration' && ancestor.id?.name) {
-        if (this.isInitializationFunction(ancestor.id.name)) {
-          return ancestor.id.name;
-        }
-      }
-      
-      if (ancestor.type === 'VariableDeclarator' && ancestor.id?.name) {
-        if (this.isInitializationFunction(ancestor.id.name)) {
-          return ancestor.id.name;
-        }
-      }
-    }
-    return null;
-  }
-
-  /**
-   * True if this node is inside a callback passed to subscribe(...).
-   * Class/style inside subscribe callbacks can cause CLS unless inside the 'change' branch.
-   */
-  isInsideSubscribeCallback(ancestors) {
-    for (let i = ancestors.length - 1; i >= 0; i--) {
-      const ancestor = ancestors[i];
-      if (ancestor.type === 'ArrowFunctionExpression' || ancestor.type === 'FunctionExpression') {
-        const parent = ancestors[i - 1];
-        if (parent?.type === 'CallExpression') {
-          const calleeName = this.getCalleeName(parent.callee);
-          if (calleeName === 'subscribe' || calleeName.endsWith('.subscribe')) {
-            return true;
-          }
-        }
-        break;
-      }
-    }
-    return false;
-  }
-
-  /**
-   * True if test expression is (variable) === value, e.g. eventType === 'register',
-   * a === 'change', etc. Variable name can be anything. Used to detect register vs
-   * change branches in subscribe callbacks.
-   */
-  isEventTypeEquals(testNode, value) {
-    if (!testNode || typeof value !== 'string') return false;
-    if (testNode.type === 'BinaryExpression' && (testNode.operator === '===' || testNode.operator === '==')) {
-      const leftIsIdentifier = testNode.left?.type === 'Identifier';
-      const rightVal = this.getStringValue(testNode.right);
-      if (leftIsIdentifier && rightVal === value) return true;
-    }
-    return false;
-  }
-
-  /**
-   * True if this node is inside a callback passed to x.subscribe (any name: fieldModel,
-   * model, a, etc.). That callback runs on model change events, after form load — no CLS.
-   * Loop is bounded: we walk the fixed ancestors array once (root → current).
-   */
-  isInsideModelSubscribeCallback(ancestors) {
-    for (let i = ancestors.length - 1; i >= 0; i -= 1) {
-      const ancestor = ancestors[i];
-      if (ancestor.type === 'ArrowFunctionExpression' || ancestor.type === 'FunctionExpression') {
-        const parent = ancestors[i - 1];
-        if (parent?.type === 'CallExpression') {
-          const callee = parent.callee;
-          if (callee?.type === 'MemberExpression' && callee.property?.name === 'subscribe') {
-            return true;
-          }
-          // Top-level subscribe(el, formId, cb): keep looking for inner model.subscribe
-        }
-      }
-    }
-    return false;
-  }
-
-  /**
-   * True if this node is inside the "change" branch of a subscribe callback
-   * (e.g. inside "if (eventType === 'change') { ... }" or "else if (eventType === 'change') { ... }").
-   * Class/style in the change branch runs after form load, so no CLS - do not flag.
-   */
-  isInsideSubscribeChangeBranch(ancestors) {
-    if (!this.isInsideSubscribeCallback(ancestors)) return false;
-    for (let i = 0; i < ancestors.length; i++) {
-      const ancestor = ancestors[i];
-      if (ancestor.type === 'IfStatement') {
-        const ifStmt = ancestor;
-        if (!this.isEventTypeEquals(ifStmt.test, 'change')) continue;
-        const childInPath = ancestors[i + 1];
-        if (!childInPath) continue;
-        if (childInPath === ifStmt.consequent) return true;
-        if (ifStmt.alternate && childInPath === ifStmt.alternate) {
-          if (ifStmt.alternate.type === 'IfStatement' && this.isEventTypeEquals(ifStmt.alternate.test, 'change')) return true;
-          return true;
-        }
-      }
-    }
-    return false;
-  }
-
-  /**
-   * True if this node is in the direct body of an init function (e.g. decorate),
-   * not inside a nested callback. Class/style in decorate's direct body is allowed (one-time setup).
-   */
-  isInDirectBodyOfInitFunction(ancestors) {
-    const initContext = this.getInitializationContext(ancestors);
-    if (!initContext) return false;
-
-    for (let i = ancestors.length - 1; i >= 0; i--) {
-      const ancestor = ancestors[i];
-      if (ancestor.type === 'FunctionDeclaration' && ancestor.id?.name === initContext) {
-        return true;
-      }
-      if (ancestor.type === 'ArrowFunctionExpression' || ancestor.type === 'FunctionExpression') {
-        return false;
-      }
-    }
-    return false;
-  }
-
-  /**
-   * Detect problematic call expressions
-   */
-  detectCallExpression(node, ancestors, content, context, issues) {
-    // Check if we're inside an event handler callback by examining ancestors
-    if (this.isInsideEventHandlerCallback(ancestors)) {
-      return; // Skip - this code runs after form load
-    }
-
-    const calleeName = this.getCalleeName(node.callee);
-    
-    // Determine if we should flag this call
-    // Only flag if:
-    // 1. In decorateForm file (always initialization context), OR
-    // 2. Inside an initialization function, OR
-    // 3. At top-level of module (no containing function)
-    const initContext = this.getInitializationContext(ancestors);
-    const hasContainingFunction = ancestors.some(a => 
-      a.type === 'FunctionDeclaration' || 
-      a.type === 'FunctionExpression' || 
-      a.type === 'ArrowFunctionExpression'
-    );
-    
-    const shouldFlag = context.isDecorateFormFile || initContext || !hasContainingFunction;
-    
-    if (!shouldFlag) {
-      return; // Not in initialization context
-    }
-
-    // 1. Detect loadCSS() calls
-    if (calleeName === 'loadCSS') {
-      issues.push({
-        severity: 'error',
-        type: 'dynamic-css-loading',
-        file: context.filename,
-        line: node.loc?.start.line,
-        functionContext: initContext || 'top-level',
-        message: `Dynamic CSS loading with loadCSS() during form initialization causes CLS.`,
-        pattern: this.extractCodeSnippet(content, node),
-        recommendation: 'Load CSS in <head> via head.html, or use @import in your main CSS file. Dynamic CSS loading at runtime causes layout shifts.',
-        cwvImpact: 'CLS, LCP',
-      });
-    }
-
-    // 2. Detect dynamic import() for CSS - handle ImportExpression type
-    if (node.type === 'ImportExpression' || node.callee?.type === 'Import') {
-      const arg = node.source || node.arguments?.[0];
-      if (arg && this.isCSSimport(arg, content)) {
-        issues.push({
-          severity: 'error',
-          type: 'dynamic-css-loading',
-          file: context.filename,
-          line: node.loc?.start.line,
-          functionContext: initContext || 'top-level',
-          message: `Dynamic CSS import during form initialization causes CLS.`,
-          pattern: this.extractCodeSnippet(content, node),
-          recommendation: 'Use static imports or load CSS in <head>. Dynamic imports of CSS cause layout shifts.',
-          cwvImpact: 'CLS, LCP',
-        });
-      }
-    }
-
-    // 3. Detect document.createElement('style') or createElement('link')
-    if (calleeName === 'createElement' || calleeName === 'document.createElement') {
-      const arg = node.arguments[0];
-      if (arg && (this.isStringValue(arg, 'style') || this.isStringValue(arg, 'link'))) {
-        const elementType = this.getStringValue(arg);
-        issues.push({
-          severity: 'error',
-          type: 'dynamic-style-injection',
-          file: context.filename,
-          line: node.loc?.start.line,
-          functionContext: initContext || 'top-level',
-          message: `Dynamic <${elementType}> element creation during form initialization causes CLS.`,
-          pattern: this.extractCodeSnippet(content, node),
-          recommendation: elementType === 'link' 
-            ? 'Add stylesheet links in head.html instead of creating them dynamically.'
-            : 'Define styles in CSS files instead of injecting <style> elements at runtime.',
-          cwvImpact: 'CLS, LCP',
-        });
-      }
-    }
-
-    // 4. Detect classList.add/remove/toggle calls
-    if (node.callee.type === 'MemberExpression') {
-      const method = node.callee.property?.name;
-      if (['add', 'remove', 'toggle'].includes(method)) {
-        // Check if it's classList
-        if (this.isClassListMethod(node.callee)) {
-          // Allow in direct body of decorate (one-time setup). Flag inside subscribe and other callbacks.
-          if (this.isInDirectBodyOfInitFunction(ancestors)) {
-            return;
-          }
-          // Allow in subscribe's change branch (runs after form load, no CLS). Flag in register branch.
-          if (this.isInsideSubscribeChangeBranch(ancestors)) {
-            return;
-          }
-          // Allow inside model.subscribe / fieldModel.subscribe callback (runs on model change, after load).
-          if (this.isInsideModelSubscribeCallback(ancestors)) {
-            return;
-          }
-          // Check if the class name is in the allowlist
-          const className = this.getClassNameArgument(node);
-          if (className && !this.isAllowedStateClass(className)) {
-            issues.push({
-              severity: 'warning',
-              type: 'dynamic-class-manipulation',
-              file: context.filename,
-              line: node.loc?.start.line,
-              functionContext: initContext || 'top-level',
-              message: `classList.${method}('${className}') during form initialization may cause CLS if the class affects layout.`,
-              pattern: this.extractCodeSnippet(content, node),
-              className,
-              recommendation: 'Pre-render classes in HTML or apply them server-side. Dynamic class changes during load cause layout shifts. If this is for state management, consider adding the class name to the allowlist.',
-              cwvImpact: 'CLS',
-            });
-          }
-        }
-      }
-    }
-  }
-
-  /**
-   * Detect dynamic import() expressions for CSS
-   */
-  detectImportExpression(node, ancestors, content, context, issues) {
-    // Check if we're inside an event handler callback
-    if (this.isInsideEventHandlerCallback(ancestors)) {
-      return; // Skip - this code runs after form load
-    }
-
-    // Determine if we should flag this import
-    const initContext = this.getInitializationContext(ancestors);
-    const hasContainingFunction = ancestors.some(a => 
-      a.type === 'FunctionDeclaration' || 
-      a.type === 'FunctionExpression' || 
-      a.type === 'ArrowFunctionExpression'
-    );
-    
-    const shouldFlag = context.isDecorateFormFile || initContext || !hasContainingFunction;
-    
-    if (!shouldFlag) {
-      return; // Not in initialization context
-    }
-
-    // Check if it's a CSS import
-    const source = node.source;
-    if (source && this.isCSSimport(source, content)) {
-      issues.push({
-        severity: 'error',
-        type: 'dynamic-css-loading',
-        file: context.filename,
-        line: node.loc?.start.line,
-        functionContext: initContext || 'top-level',
-        message: `Dynamic CSS import during form initialization causes CLS.`,
-        pattern: this.extractCodeSnippet(content, node),
-        recommendation: 'Use static imports or load CSS in <head>. Dynamic imports of CSS cause layout shifts.',
-        cwvImpact: 'CLS, LCP',
-      });
-    }
-  }
-
-  /**
-   * Detect problematic member expressions (style access)
-   */
-  detectMemberExpression(node, ancestors, content, context, issues) {
-    // Skip if inside event handler
-    if (context.isInsideEventHandler) {
-      return;
-    }
-
-    // Check for element.style.xxx access in assignment context
-    // This is handled in detectAssignment
-  }
-
-  /**
-   * Detect problematic assignments
-   */
-  detectAssignment(node, ancestors, content, context, issues) {
-    // Check if we're inside an event handler callback by examining ancestors
-    if (this.isInsideEventHandlerCallback(ancestors)) {
-      return; // Skip - this code runs after form load
-    }
-
-    // Determine if we should flag this assignment
-    const initContext = this.getInitializationContext(ancestors);
-    const hasContainingFunction = ancestors.some(a => 
-      a.type === 'FunctionDeclaration' || 
-      a.type === 'FunctionExpression' || 
-      a.type === 'ArrowFunctionExpression'
-    );
-    
-    const shouldFlag = context.isDecorateFormFile || initContext || !hasContainingFunction;
-    
-    if (!shouldFlag) {
-      return; // Not in initialization context
-    }
-
-    // Allow style/class in direct body of decorate (one-time setup). Flag inside subscribe and other callbacks.
-    if (this.isInDirectBodyOfInitFunction(ancestors)) {
-      return;
-    }
-    // Allow in subscribe's change branch (runs after form load, no CLS). Flag in register branch.
-    if (this.isInsideSubscribeChangeBranch(ancestors)) {
-      return;
-    }
-    // Allow inside model.subscribe / fieldModel.subscribe callback (runs on model change, after load).
-    if (this.isInsideModelSubscribeCallback(ancestors)) {
-      return;
-    }
-
-    const left = node.left;
-
-    // 1. Detect element.style.xxx = value
-    if (left.type === 'MemberExpression' && left.object?.type === 'MemberExpression') {
-      if (left.object.property?.name === 'style') {
-        const styleProperty = left.property?.name;
-        if (styleProperty && this.isLayoutAffectingStyle(styleProperty)) {
-          issues.push({
-            severity: 'warning',
-            type: 'direct-style-manipulation',
-            file: context.filename,
-            line: node.loc?.start.line,
-            functionContext: initContext || 'top-level',
-            message: `Direct style manipulation (style.${styleProperty}) during form initialization may cause CLS.`,
-            pattern: this.extractCodeSnippet(content, node),
-            styleProperty,
-            recommendation: 'Use CSS classes instead of direct style manipulation. Define styles in CSS files and toggle classes for state changes.',
-            cwvImpact: 'CLS',
-          });
-        }
-      }
-    }
-
-    // 2. Detect element.style.cssText = '...'
-    if (left.type === 'MemberExpression') {
-      if (left.property?.name === 'cssText' && left.object?.property?.name === 'style') {
-        issues.push({
-          severity: 'warning',
-          type: 'direct-style-manipulation',
-          file: context.filename,
-          line: node.loc?.start.line,
-          functionContext: initContext || 'top-level',
-          message: `style.cssText assignment during form initialization causes CLS.`,
-          pattern: this.extractCodeSnippet(content, node),
-          recommendation: 'Use CSS classes instead of inline styles. Define styles in CSS files.',
-          cwvImpact: 'CLS',
-        });
-      }
-    }
-
-    // 3. Detect element.className = '...'
-    if (left.type === 'MemberExpression' && left.property?.name === 'className') {
-      issues.push({
-        severity: 'warning',
-        type: 'dynamic-class-manipulation',
-        file: context.filename,
-        line: node.loc?.start.line,
-        functionContext: initContext || 'top-level',
-        message: `className assignment during form initialization may cause CLS.`,
-        pattern: this.extractCodeSnippet(content, node),
-        recommendation: 'Pre-render classes in HTML. Dynamic className changes during load cause layout shifts.',
-        cwvImpact: 'CLS',
-      });
-    }
-  }
-
-  /**
-   * Check if a function name indicates initialization
-   */
-  isInitializationFunction(funcName) {
-    if (!funcName) return false;
-    return this.initializationFunctions.has(funcName) ||
-           funcName.toLowerCase().includes('init') ||
-           funcName.toLowerCase().includes('setup') ||
-           funcName.toLowerCase().includes('decorate');
-  }
-
-  /**
-   * Check if a node is an event handler callback
-   */
-  isEventHandlerCallback(parent, node) {
-    if (!parent) return false;
-
-    // Check for addEventListener('click', callback)
-    if (parent.type === 'CallExpression') {
-      const calleeName = this.getCalleeName(parent.callee);
-      if (calleeName === 'addEventListener' || calleeName.endsWith('.addEventListener')) {
-        const eventType = parent.arguments[0];
-        if (eventType && this.userEventTypes.has(this.getStringValue(eventType))) {
-          return true;
-        }
-      }
-    }
-
-    // Check for element.onclick = function() {}
-    if (parent.type === 'AssignmentExpression') {
-      const left = parent.left;
-      if (left.type === 'MemberExpression') {
-        const propName = left.property?.name;
-        if (propName && propName.startsWith('on')) {
-          const eventType = propName.slice(2).toLowerCase();
-          if (this.userEventTypes.has(eventType)) {
-            return true;
-          }
-        }
-      }
-    }
-
-    return false;
-  }
-
-  /**
-   * Get function name from parent context
-   */
-  getFunctionName(parent, node) {
-    if (!parent) return null;
-
-    // const funcName = () => {}
-    if (parent.type === 'VariableDeclarator' && parent.id?.name) {
-      return parent.id.name;
-    }
-
-    // obj.funcName = () => {}
-    if (parent.type === 'AssignmentExpression' && parent.left?.property?.name) {
-      return parent.left.property.name;
-    }
-
-    // { funcName: () => {} }
-    if (parent.type === 'Property' && parent.key?.name) {
-      return parent.key.name;
-    }
-
-    return null;
-  }
-
-  /**
-   * Get callee name from various node types
-   */
-  getCalleeName(callee) {
-    if (!callee) return '';
-    
-    if (callee.type === 'Identifier') {
-      return callee.name;
-    }
-    
-    if (callee.type === 'MemberExpression') {
-      const obj = callee.object?.name || '';
-      const prop = callee.property?.name || '';
-      return obj ? `${obj}.${prop}` : prop;
-    }
-    
-    return '';
-  }
-
-  /**
-   * Check if an argument is a CSS import
-   */
-  isCSSimport(arg, content) {
-    if (arg.type === 'Literal' && typeof arg.value === 'string') {
-      return arg.value.endsWith('.css');
-    }
-    if (arg.type === 'TemplateLiteral') {
-      // Extract template literal content
-      const snippet = content.substring(arg.start, arg.end);
-      return snippet.includes('.css');
-    }
-    return false;
-  }
-
-  /**
-   * Check if a node is classList method
-   */
-  isClassListMethod(callee) {
-    if (callee.object?.type === 'MemberExpression') {
-      return callee.object.property?.name === 'classList';
-    }
-    if (callee.object?.type === 'Identifier' && callee.object.name === 'classList') {
-      return true;
-    }
-    return false;
-  }
-
-  /**
-   * Get class name from classList.add/remove/toggle call
-   */
-  getClassNameArgument(node) {
-    const arg = node.arguments[0];
-    if (!arg) return null;
-    return this.getStringValue(arg);
-  }
-
-  /**
-   * Check if a class name is in the allowed state classes
-   */
-  isAllowedStateClass(className) {
-    if (!className) return false;
-    
-    // Check exact match
-    if (this.allowedStateClasses.has(className)) {
-      return true;
-    }
-    
-    // Check if contains allowed patterns (e.g., 'field-valid', 'input-error')
-    for (const allowed of this.allowedStateClasses) {
-      if (className.includes(allowed)) {
-        return true;
-      }
-    }
-    
-    return false;
-  }
-
-  /**
-   * Check if a style property affects layout
-   */
-  isLayoutAffectingStyle(property) {
-    const layoutProperties = new Set([
-      'display',
-      'visibility',
-      'width',
-      'height',
-      'minWidth',
-      'minHeight',
-      'maxWidth',
-      'maxHeight',
-      'padding',
-      'paddingTop',
-      'paddingBottom',
-      'paddingLeft',
-      'paddingRight',
-      'margin',
-      'marginTop',
-      'marginBottom',
-      'marginLeft',
-      'marginRight',
-      'position',
-      'top',
-      'bottom',
-      'left',
-      'right',
-      'flex',
-      'flexDirection',
-      'flexWrap',
-      'flexGrow',
-      'flexShrink',
-      'flexBasis',
-      'grid',
-      'gridTemplate',
-      'gridTemplateColumns',
-      'gridTemplateRows',
-      'gap',
-      'fontSize',
-      'lineHeight',
-      'transform',
-      'float',
-      'clear',
-      'overflow',
-      'overflowX',
-      'overflowY',
-    ]);
-    
-    return layoutProperties.has(property);
-  }
-
-  /**
-   * Check if argument is a specific string value
-   */
-  isStringValue(arg, value) {
-    if (arg.type === 'Literal' && arg.value === value) {
-      return true;
-    }
-    return false;
-  }
-
-  /**
-   * Get string value from a node
-   */
-  getStringValue(node) {
-    if (!node) return null;
-    if (node.type === 'Literal' && typeof node.value === 'string') {
-      return node.value;
-    }
-    return null;
-  }
-
-  /**
-   * Extract code snippet from content
-   */
-  extractCodeSnippet(content, node) {
-    try {
-      const lines = content.split('\n');
-      const line = lines[node.loc.start.line - 1];
-      return line?.trim().substring(0, 100) || '';
-    } catch (e) {
-      return '';
-    }
-  }
-
-  /**
-   * Compare before and after analyses
-   */
-  compare(beforeAnalysis, afterAnalysis) {
-    const before = beforeAnalysis || { issues: [], summary: {} };
-    const after = afterAnalysis || { issues: [], summary: {} };
-
-    // Find new issues (in after but not in before)
-    const newIssues = (after.issues || []).filter(afterIssue =>
-      !(before.issues || []).some(beforeIssue =>
-        beforeIssue.file === afterIssue.file &&
-        beforeIssue.type === afterIssue.type &&
-        beforeIssue.line === afterIssue.line
-      )
-    );
-
-    // Find resolved issues (in before but not in after)
-    const resolvedIssues = (before.issues || []).filter(beforeIssue =>
-      !(after.issues || []).some(afterIssue =>
-        afterIssue.file === beforeIssue.file &&
-        afterIssue.type === beforeIssue.type &&
-        afterIssue.line === beforeIssue.line
-      )
-    );
-
-    return {
-      before,
-      after,
-      newIssues,
-      resolvedIssues,
-      delta: {
-        dynamicCSSLoading: (after.summary?.dynamicCSSLoading || 0) - (before.summary?.dynamicCSSLoading || 0),
-        dynamicStyleInjection: (after.summary?.dynamicStyleInjection || 0) - (before.summary?.dynamicStyleInjection || 0),
-        dynamicClassManipulation: (after.summary?.dynamicClassManipulation || 0) - (before.summary?.dynamicClassManipulation || 0),
-        directStyleManipulation: (after.summary?.directStyleManipulation || 0) - (before.summary?.directStyleManipulation || 0),
-      },
-    };
-  }
-}
-
 ;// CONCATENATED MODULE: ./src/analyzers/ai-autofix-analyzer.js
 
 
@@ -188314,6 +183789,4689 @@ Focus on performance impact and Core Web Vitals (FCP, LCP, TBT, INP).`;
   }
 }
 
+
+;// CONCATENATED MODULE: ./src/analyzers/form-analyzer.js
+/**
+ * Analyzes adaptive form JSON for performance issues
+ */
+class FormAnalyzer {
+  constructor(config = null) {
+    this.config = config;
+  }
+
+  /**
+   * Analyze a single form JSON
+   * @param {Object} formJson - Form JSON object
+   * @returns {Object} Analysis results
+   */
+  analyze(formJson) {
+    if (!formJson) {
+      return { error: 'No form JSON provided' };
+    }
+
+    return {
+      metadata: this.extractMetadata(formJson),
+      components: this.analyzeComponents(formJson),
+      events: this.analyzeEvents(formJson),
+      rules: this.analyzeRules(formJson),
+      fragments: this.analyzeFragments(formJson),
+      issues: this.detectIssues(formJson),
+    };
+  }
+
+  /**
+   * Extract basic form metadata
+   */
+  extractMetadata(formJson) {
+    return {
+      id: formJson.id,
+      title: formJson.title,
+      action: formJson.action,
+      version: formJson.adaptiveform,
+      theme: formJson.properties?.themeClientLibRef,
+      variant: formJson.properties?.variant,
+    };
+  }
+
+  /**
+   * Analyze form components structure
+   */
+  analyzeComponents(formJson, depth = 0) {
+    const stats = {
+      total: 0,
+      byType: {},
+      maxDepth: 0,
+      nestedPanels: 0,
+      repeatable: 0,
+      visible: 0,
+      hidden: 0,
+    };
+
+    const traverse = (node, currentDepth, isRoot = false) => {
+      if (!node) return;
+
+      // Update max depth
+      stats.maxDepth = Math.max(stats.maxDepth, currentDepth);
+
+      // Don't count the root form itself as a component
+      if (!isRoot) {
+        stats.total++;
+
+        // Count by type (exclude root form)
+        if (node.fieldType) {
+          stats.byType[node.fieldType] = (stats.byType[node.fieldType] || 0) + 1;
+        }
+
+        // Count special attributes (only for actual components, not root)
+        if (node.repeatable) stats.repeatable++;
+        
+        // Visibility check - only count if visible property exists
+        if (node.hasOwnProperty('visible')) {
+          if (node.visible === false) {
+            stats.hidden++;
+          } else {
+            stats.visible++;
+          }
+        } else {
+          // If no visible property, assume visible (default for AEM forms)
+          stats.visible++;
+        }
+        
+        if (node.fieldType === 'panel' && currentDepth > 0) stats.nestedPanels++;
+      }
+
+      // Traverse children
+      if (node[':items']) {
+        Object.values(node[':items']).forEach(child => {
+          traverse(child, currentDepth + 1, false);
+        });
+      }
+    };
+
+    // Start traversal, marking root as true
+    traverse(formJson, 0, true);
+    return stats;
+  }
+
+
+  /**
+   * Analyze event handlers in the form
+   */
+  analyzeEvents(formJson) {
+    const events = {
+      total: 0,
+      byType: {},
+      componentsWithEvents: 0,
+    };
+
+    const traverse = (node) => {
+      if (!node) return;
+
+      if (node.events) {
+        events.componentsWithEvents++;
+        Object.entries(node.events).forEach(([eventType, handlers]) => {
+          const handlerCount = Array.isArray(handlers) ? handlers.length : 1;
+          events.total += handlerCount;
+          events.byType[eventType] = (events.byType[eventType] || 0) + handlerCount;
+        });
+      }
+
+      if (node[':items']) {
+        Object.values(node[':items']).forEach(traverse);
+      }
+    };
+
+    traverse(formJson);
+    return events;
+  }
+
+  /**
+   * Analyze validation rules
+   */
+  analyzeRules(formJson) {
+    const rules = {
+      total: 0,
+      componentsWithRules: 0,
+      validationRules: 0,
+      customRules: 0,
+    };
+
+    const traverse = (node) => {
+      if (!node) return;
+
+      if (node.properties?.['fd:rules']) {
+        rules.componentsWithRules++;
+        rules.total++;
+      }
+
+      if (node.required) rules.validationRules++;
+      if (node.pattern) rules.validationRules++;
+      if (node.minimum !== undefined || node.maximum !== undefined) rules.validationRules++;
+
+      if (node[':items']) {
+        Object.values(node[':items']).forEach(traverse);
+      }
+    };
+
+    traverse(formJson);
+    return rules;
+  }
+
+  /**
+   * Analyze form fragments usage
+   */
+  analyzeFragments(formJson) {
+    const fragments = {
+      count: 0,
+      paths: [],
+    };
+
+    const traverse = (node) => {
+      if (!node) return;
+
+      if (node.fieldType === 'fragment' || node[':type']?.includes('fragment')) {
+        fragments.count++;
+        if (node.properties?.['fd:path']) {
+          fragments.paths.push(node.properties['fd:path']);
+        }
+      }
+
+      if (node[':items']) {
+        Object.values(node[':items']).forEach(traverse);
+      }
+    };
+
+    traverse(formJson);
+    return fragments;
+  }
+
+  /**
+   * Detect potential performance issues
+   */
+  detectIssues(formJson) {
+    const issues = [];
+    const components = this.analyzeComponents(formJson);
+    const events = this.analyzeEvents(formJson);
+
+    // Get thresholds from config or use defaults
+    const maxComponents = this.config?.thresholds?.form?.maxComponents || 75;
+    const maxDepth = this.config?.thresholds?.form?.maxDepth || 8;
+    const maxEventHandlers = this.config?.thresholds?.form?.maxEventHandlers || 30;
+    const maxNestedPanels = this.config?.thresholds?.form?.maxNestedPanels || 15;
+
+    // Too many components
+    if (components.total > maxComponents) {
+      issues.push({
+        severity: 'warning',
+        type: 'component-count',
+        message: `High component count (${components.total}). Consider breaking into multiple forms or using fragments.`,
+        value: components.total,
+        threshold: maxComponents,
+        cwvImpact: 'LCP, INP'
+      });
+    }
+
+    // Deep nesting
+    if (components.maxDepth > maxDepth) {
+      issues.push({
+        severity: 'warning',
+        type: 'nesting-depth',
+        message: `Deep nesting detected (${components.maxDepth} levels). This may impact rendering performance.`,
+        value: components.maxDepth,
+        threshold: maxDepth,
+        cwvImpact: 'INP'
+      });
+    }
+
+    // Too many nested panels
+    if (components.nestedPanels > maxNestedPanels) {
+      issues.push({
+        severity: 'info',
+        type: 'nested-panels',
+        message: `High number of nested panels (${components.nestedPanels}). Consider flattening the structure.`,
+        value: components.nestedPanels,
+        threshold: maxNestedPanels,
+        cwvImpact: 'LCP'
+      });
+    }
+
+    // Too many event handlers
+    if (events.total > maxEventHandlers) {
+      issues.push({
+        severity: 'warning',
+        type: 'event-handlers',
+        message: `High number of event handlers (${events.total}). Consider consolidating event logic.`,
+        value: events.total,
+        threshold: maxEventHandlers,
+        cwvImpact: 'INP, TBT'
+      });
+    }
+
+    return issues;
+  }
+
+  /**
+   * Compare two form JSONs
+   */
+  compare(beforeJson, afterJson) {
+    if (!beforeJson || !afterJson) {
+      return { error: 'Missing form JSON for comparison' };
+    }
+
+    const beforeAnalysis = this.analyze(beforeJson);
+    const afterAnalysis = this.analyze(afterJson);
+
+    return {
+      before: beforeAnalysis,
+      after: afterAnalysis,
+      delta: {
+        components: afterAnalysis.components.total - beforeAnalysis.components.total,
+        events: afterAnalysis.events.total - beforeAnalysis.events.total,
+        maxDepth: afterAnalysis.components.maxDepth - beforeAnalysis.components.maxDepth,
+      },
+      newIssues: this.findNewIssues(beforeAnalysis.issues, afterAnalysis.issues),
+      resolvedIssues: this.findResolvedIssues(beforeAnalysis.issues, afterAnalysis.issues),
+    };
+  }
+
+  /**
+   * Find new issues introduced
+   */
+  findNewIssues(beforeIssues, afterIssues) {
+    return afterIssues.filter(afterIssue => {
+      return !beforeIssues.some(beforeIssue => beforeIssue.type === afterIssue.type);
+    });
+  }
+
+  /**
+   * Find issues that were resolved
+   */
+  findResolvedIssues(beforeIssues, afterIssues) {
+    return beforeIssues.filter(beforeIssue => {
+      return !afterIssues.some(afterIssue => afterIssue.type === beforeIssue.type);
+    });
+  }
+}
+
+
+;// CONCATENATED MODULE: ./src/analyzers/form-events-analyzer.js
+/**
+ * Analyzes form events for performance anti-patterns
+ * Specific check: API calls in initialize events should be in render instead
+ */
+class FormEventsAnalyzer {
+  constructor(config = null) {
+    this.config = config;
+  }
+
+  /**
+   * Analyze form JSON for event-related issues
+   * @param {Object} formJson - Form JSON object
+   * @returns {Object} Analysis results
+   */
+  analyze(formJson) {
+    if (!formJson) {
+      return { error: 'No form JSON provided' };
+    }
+
+    const issues = [];
+    const apiCallPatterns = this.findAPICallsInInitialize(formJson, issues);
+
+    return {
+      apiCallsInInitialize: apiCallPatterns,
+      issues,
+    };
+  }
+
+  /**
+   * Find API calls in initialize events
+   * @param {Object} node - Form node
+   * @param {Array} issues - Issues array to populate
+   * @param {string} path - Current path in form
+   */
+  findAPICallsInInitialize(node, issues, path = '') {
+    const apiCalls = [];
+
+    if (!node) return apiCalls;
+
+    // Check if current node has initialize event with API call
+    if (node.events?.initialize) {
+      const initializeEvent = node.events.initialize;
+      
+      // Handle both string and array formats
+      const expressions = Array.isArray(initializeEvent) ? initializeEvent : [initializeEvent];
+      
+      expressions.forEach(expression => {
+        const hasAPICall = this.detectAPICall(expression);
+
+        if (hasAPICall) {
+          const fieldName = node.name || node.fieldType || path.split('.').pop() || 'form';
+          const fieldPath = path || fieldName;
+
+          apiCalls.push({
+            field: fieldName,
+            path: fieldPath,
+            expression: expression,
+            apiCallType: hasAPICall.type,
+          });
+
+          issues.push({
+            severity: 'error',
+            type: 'api-call-in-initialize',
+            field: fieldName,
+            path: fieldPath,
+            message: `API call found in initialize event for field "${fieldName}". This blocks form rendering.`,
+            expression: expression,
+            apiCallType: hasAPICall.type,
+            recommendation: 'Move API calls to custom events triggered after render, or use lazy loading patterns. Initialize events should only set up initial state, not fetch data.',
+          });
+        }
+      });
+    }
+
+    // Traverse children
+    if (node.items) {
+      if (Array.isArray(node.items)) {
+        node.items.forEach((child, index) => {
+          const childPath = path ? `${path}.items[${index}]` : `items[${index}]`;
+          apiCalls.push(...this.findAPICallsInInitialize(child, issues, childPath));
+        });
+      }
+    }
+
+    if (node[':items']) {
+      Object.entries(node[':items']).forEach(([key, child]) => {
+        const childPath = path ? `${path}.${key}` : key;
+        apiCalls.push(...this.findAPICallsInInitialize(child, issues, childPath));
+      });
+    }
+
+    return apiCalls;
+  }
+
+  /**
+   * Detect if an expression contains an API call
+   * @param {string} expression - Expression to check
+   * @returns {Object|null} API call info or null
+   */
+  detectAPICall(expression) {
+    if (typeof expression !== 'string') return null;
+
+    // Common API call patterns in adaptive forms
+    const patterns = [
+      { regex: /requestWithRetry\s*\([^)]+\)/gi, type: 'requestWithRetry' },
+      { regex: /request\s*\([^)]+\)/gi, type: 'request' },
+      { regex: /fetch\s*\([^)]+\)/gi, type: 'fetch' },
+      { regex: /\$\.(get|post|ajax|getJSON)\s*\(/gi, type: 'jquery-ajax' },
+      { regex: /XMLHttpRequest/gi, type: 'xhr' },
+      { regex: /axios\.(get|post|request)/gi, type: 'axios' },
+    ];
+
+    for (const pattern of patterns) {
+      if (pattern.regex.test(expression)) {
+        return { type: pattern.type };
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Compare before and after analyses
+   */
+  compare(beforeJson, afterJson) {
+    if (!beforeJson || !afterJson) {
+      return { error: 'Missing form JSON for comparison' };
+    }
+
+    const beforeAnalysis = this.analyze(beforeJson);
+    const afterAnalysis = this.analyze(afterJson);
+
+    const resolvedIssues = beforeAnalysis.issues.filter(beforeIssue =>
+      !afterAnalysis.issues.some(afterIssue =>
+        afterIssue.field === beforeIssue.field && afterIssue.type === beforeIssue.type
+      )
+    );
+
+    return {
+      before: beforeAnalysis,
+      after: afterAnalysis,
+      delta: {
+        apiCallsAdded: afterAnalysis.apiCallsInInitialize.length - beforeAnalysis.apiCallsInInitialize.length,
+      },
+      newIssues: afterAnalysis.issues, // Report ALL issues in current state
+      resolvedIssues,
+    };
+  }
+}
+
+
+;// CONCATENATED MODULE: ./src/analyzers/hidden-fields-analyzer.js
+/**
+ * Analyzes hidden fields to detect unnecessary DOM bloat
+ * Detects fields that are always hidden and only used for data storage
+ */
+
+
+class HiddenFieldsAnalyzer {
+  constructor(config = null) {
+    this.config = config;
+  }
+
+  /**
+   * Analyze form JSON and JavaScript for hidden field usage
+   * @param {Object} formJson - Form JSON object
+   * @param {Array} jsFiles - Array of {filename, content} objects
+   * @returns {Object} Analysis results
+   */
+  analyze(formJson, jsFiles = []) {
+    if (!formJson) {
+      return { error: 'No form JSON provided' };
+    }
+
+    lib_core.info(`[HiddenFields] Starting analysis with ${jsFiles.length} JS file(s)`);
+    
+    const hiddenFields = this.findHiddenFields(formJson);
+    lib_core.info(`[HiddenFields] Found ${hiddenFields.length} hidden field(s) in form JSON`);
+    
+    const fieldVisibilityChangesInJS = this.analyzeJSForVisibilityChanges(jsFiles);
+    const visibilityChangeCountInJS = Object.keys(fieldVisibilityChangesInJS).length;
+    lib_core.info(`[HiddenFields] Found visibility changes for ${visibilityChangeCountInJS} field identifier(s) in JS`);
+    
+    if (visibilityChangeCountInJS > 0) {
+      lib_core.info(`[HiddenFields] Visibility changes detected for: ${Object.keys(fieldVisibilityChangesInJS).slice(0, 5).join(', ')}${visibilityChangeCountInJS > 5 ? '...' : ''}`);
+    }
+    
+    const visibilityChangesInEvents = this.analyzeEventsForVisibilityChanges(formJson);
+    const visibilityChangeCountInEvents = Object.keys(visibilityChangesInEvents).length;
+    lib_core.info(`[HiddenFields] Found visibility changes for ${visibilityChangeCountInEvents} field identifier(s) in events`);
+    
+    if (visibilityChangeCountInEvents > 0) {
+      lib_core.info(`[HiddenFields] Visibility changes detected for: ${Object.keys(visibilityChangesInEvents).slice(0, 5).join(', ')}${visibilityChangeCountInEvents > 5 ? '...' : ''}`);
+    }
+    
+    const issues = this.detectUnnecessaryHiddenFields(hiddenFields, fieldVisibilityChangesInJS, visibilityChangesInEvents);
+    
+    return {
+      totalHiddenFields: hiddenFields.length,
+      hiddenFields,
+      fieldVisibilityChanges: fieldVisibilityChangesInJS,
+      fieldVisibilityChangesInEvents: visibilityChangesInEvents,
+      unnecessaryHiddenFields: issues.length,
+      issues,
+    };
+  }
+
+  /**
+   * Find all hidden fields in form JSON
+   * @param {Object} node - Form node
+   * @param {Array} fields - Array to populate
+   * @param {string} path - Current path
+   */
+  findHiddenFields(node, fields = [], path = '') {
+    if (!node) return fields;
+
+    // Check if this field is hidden
+    const isHidden = node.visible === false;
+    const hasVisibleRule = node.rules?.visible !== undefined;
+    const hasVisibleEvent = node.events && Object.keys(node.events).some(event =>
+      typeof node.events[event] === 'string' && node.events[event].includes('visible')
+    );
+
+    if (isHidden && node.name) {
+      const fieldName = node.name;
+      const fieldPath = path || fieldName;
+
+      fields.push({
+        name: fieldName,
+        path: fieldPath,
+        fieldType: node.fieldType,
+        hasVisibleRule,
+        hasVisibleEvent,
+        visibleRule: node.rules?.visible,
+        // Initially assume it's unnecessary unless proven otherwise
+        likelyUnnecessary: !hasVisibleRule && !hasVisibleEvent,
+      });
+    }
+
+    // Traverse children
+    if (node.items) {
+      if (Array.isArray(node.items)) {
+        node.items.forEach((child, index) => {
+          // Use child's name if available, otherwise fall back to index
+          const childPath = child?.name 
+            ? (path ? `${path}.${child.name}` : child.name)
+            : (path ? `${path}.items[${index}]` : `items[${index}]`);
+          this.findHiddenFields(child, fields, childPath);
+        });
+      }
+    }
+
+    if (node[':items']) {
+      Object.entries(node[':items']).forEach(([key, child]) => {
+        // Use child's name property, NOT the key (which is the node ID)
+        const childPath = child?.name 
+          ? (path ? `${path}.${child.name}` : child.name)
+          : (path ? `${path}.${key}` : key);
+        this.findHiddenFields(child, fields, childPath);
+      });
+    }
+
+    return fields;
+  }
+
+  /**
+   * Analyze events for visibility changes
+   * @param {object} formJson 
+   * @returns {object} Visibility changes found in events
+   * {
+   *   "node1": {
+   *     "madeVisible": true,
+   *     "files": [
+   *       {
+   *         "rules": ["rule1", "rule2"],
+   *       }
+   *     ]
+   *   }
+   * }
+   */
+  analyzeEventsForVisibilityChanges(formJson) {
+    const visibilityChanges = {};
+
+    // Pattern to check: does this handler set visibility?
+    const hasVisibilityChange = /visible\s*:\s*(true)\s*\(\)/;
+  
+    // Pattern to extract target path from dispatchEvent
+    // Handles: dispatchEvent(path, ...) or dispatchEvent('path', ...) or dispatchEvent("path", ...)
+    const targetPathPattern = /dispatchEvent\s*\(\s*['"]?([^'",\s][^'",]*?)['"]?\s*,/;
+
+
+    const traverse = (node) => {
+      if (!node) return;
+
+      if (node.events && typeof node.events === 'object' && Object.keys(node.events).length > 0) {
+        Object.entries(node.events).forEach(([eventType, handlers]) => {
+          if (Array.isArray(handlers)) {
+            handlers.forEach(handler => {
+              if (typeof handler !== 'string') return;
+
+              if (handler.includes('dispatchEvent') && hasVisibilityChange.test(handler)) {
+                const targetMatch = handler.match(targetPathPattern);
+                const visibleMatch = handler.match(hasVisibilityChange);
+                
+                if (targetMatch && visibleMatch) {
+                  // Normalize the path to remove $form. prefix for consistent matching
+                  const targetPath = this.normalizeEventPath(targetMatch[1].trim());
+                
+                  visibilityChanges[targetPath] = {
+                    madeVisible: true,
+                    rules: [handler],
+                  };
+                }
+              }
+            });
+          }
+        });
+      }
+
+      if (node[':items']) {
+        Object.values(node[':items']).forEach(traverse);
+      }
+
+      if (node.items && Array.isArray(node.items)) {
+        node.items.forEach(traverse);
+      }
+    };
+
+    traverse(formJson);
+    return visibilityChanges;
+  }
+
+  /**
+   * Analyze JavaScript files for setProperty calls that change visibility
+   * @param {Array} jsFiles - Array of {filename, content} objects
+   * @returns {Object} Field visibility changes found in JS
+   */
+  analyzeJSForVisibilityChanges(jsFiles) {
+    const visibilityChanges = {};
+    let totalMatches = 0;
+
+    lib_core.info(`[HiddenFields] Scanning ${jsFiles.length} JS file(s) for visibility changes...`);
+
+    jsFiles.forEach(file => {
+      const { filename, content } = file;
+      let fileMatches = 0;
+      
+      // Pattern 1: globals.functions.setProperty(globals.form.fieldName, { visible: true/false })
+      const setPropertyPattern = /globals\.functions\.setProperty\s*\(\s*globals\.form(?:\?\.)?([a-zA-Z0-9_.?]+)\s*,\s*\{[^}]*visible\s*:\s*(true|false)[^}]*\}/g;
+      
+      let match;
+      while ((match = setPropertyPattern.exec(content)) !== null) {
+        const fieldPath = match[1];
+        const visibleValue = match[2] === 'true';
+        fileMatches++;
+        totalMatches++;
+        
+        // Extract both field name AND full path for matching
+        // e.g., "?.panel?.subPanel?.email" → path: "panel.subPanel.email", name: "email"
+        const pathSegments = fieldPath.split(/[.?]/).filter(Boolean);
+        const fieldName = pathSegments[pathSegments.length - 1];
+        const fullPath = pathSegments.join('.');
+        
+        // Store by both name and full path
+        // This allows matching by name (for simple cases) and path (for duplicates)
+        const keys = [fieldName, fullPath];
+        
+        keys.forEach(key => {
+          if (!visibilityChanges[key]) {
+            visibilityChanges[key] = {
+              files: [],
+              madeVisible: false,
+              madeHidden: false,
+            };
+          }
+
+          visibilityChanges[key].files.push({
+            filename,
+            visible: visibleValue,
+            line: this.getLineNumber(content, match.index),
+          });
+
+          if (visibleValue) {
+            visibilityChanges[key].madeVisible = true;
+          } else {
+            visibilityChanges[key].madeHidden = true;
+          }
+        });
+      }
+
+      // Pattern 2: Direct property assignment like field.visible = true
+      const directAssignmentPattern = /globals\.form(?:\?\.)?([a-zA-Z0-9_.?]+)\.visible\s*=\s*(true|false)/g;
+      
+      while ((match = directAssignmentPattern.exec(content)) !== null) {
+        const fieldPath = match[1];
+        const visibleValue = match[2] === 'true';
+        
+        const pathSegments = fieldPath.split(/[.?]/).filter(Boolean);
+        const fieldName = pathSegments[pathSegments.length - 1];
+        const fullPath = pathSegments.join('.');
+        
+        const keys = [fieldName, fullPath];
+        
+        keys.forEach(key => {
+          if (!visibilityChanges[key]) {
+            visibilityChanges[key] = {
+              files: [],
+              madeVisible: false,
+              madeHidden: false,
+            };
+          }
+
+          visibilityChanges[key].files.push({
+            filename,
+            visible: visibleValue,
+            line: this.getLineNumber(content, match.index),
+          });
+
+          if (visibleValue) {
+            visibilityChanges[key].madeVisible = true;
+          }
+        });
+      }
+    });
+
+    return visibilityChanges;
+  }
+
+  /**
+   * Get line number from content and index
+   */
+  getLineNumber(content, index) {
+    return content.substring(0, index).split('\n').length;
+  }
+
+  /**
+   * Normalize event target path for matching
+   * Removes $form. prefix and optional chaining syntax
+   * @param {string} path - The path to normalize
+   * @returns {string} Normalized path
+   */
+  normalizeEventPath(path) {
+    return path
+      .replace(/^\$form\.?/, '')  // Remove $form. or $form prefix
+      .replace(/\?\./g, '.');      // Remove optional chaining
+  }
+
+  /**
+   * Detect unnecessary hidden fields
+   */
+  detectUnnecessaryHiddenFields(hiddenFields, visibilityChangesInJS, visibilityChangesInEvents) {
+    const issues = [];
+    let foundInJS = 0;
+    let foundInEvents = 0;
+
+    lib_core.info(`[HiddenFields] Analyzing ${hiddenFields.length} hidden field(s) for unnecessary usage...`);
+
+    hiddenFields.forEach((field, index) => {
+      const { name, path, hasVisibleRule, hasVisibleEvent, visibleRule } = field;
+      
+      // Check if field is ever made visible in JS or Events(Rules using dispatchEvent)
+      // Try multiple matching strategies for robustness:
+      // 1. Exact path match (most accurate)
+      // 2. Exact name match (fallback for simple cases)
+      // 3. Fuzzy match: any JS path ends with our path (handles parent path differences)
+      // 4. Fuzzy match: any Events path ends with our path (handles parent path differences)
+      
+      const jsVisibilityByPath = visibilityChangesInJS[path];
+      const jsVisibilityByName = visibilityChangesInJS[name];
+      const eventsVisibilityByPath = visibilityChangesInEvents[path];
+      const eventsVisibilityByName = visibilityChangesInEvents[name];
+      
+      let fuzzyMatchJS = null;
+      let fuzzyMatchJSPath = null;
+      let fuzzyMatchEvents = null;
+      let fuzzyMatchEventsPath = null;
+      if (!jsVisibilityByPath && !jsVisibilityByName) {
+        for (const [jsPath, jsVisibility] of Object.entries(visibilityChangesInJS)) {
+          // Check if JS path ends with our path (e.g., "parentPanel.panel.field" matches "panel.field")
+          if (jsPath.endsWith(path) || jsPath.endsWith(`.${name}`)) {
+            fuzzyMatchJS = jsVisibility;
+            fuzzyMatchJSPath = jsPath;
+            break;
+          }
+        }
+      }
+
+      if (!eventsVisibilityByPath && !eventsVisibilityByName) {
+        for (const [eventsPath, eventsVisibility] of Object.entries(visibilityChangesInEvents)) {
+          if (eventsPath.endsWith(path) || eventsPath.endsWith(`.${name}`)) {
+            fuzzyMatchEvents = eventsVisibility;
+            fuzzyMatchEventsPath = eventsPath;
+            break;
+          }
+        }
+      }
+      
+      const madeVisibleInJSOrEvents = 
+        (jsVisibilityByName?.madeVisible === true || jsVisibilityByPath?.madeVisible === true || fuzzyMatchJS?.madeVisible === true) || 
+        (eventsVisibilityByName?.madeVisible === true || eventsVisibilityByPath?.madeVisible === true || fuzzyMatchEvents?.madeVisible === true);
+
+      // Only log when we find a visibility change in JS (use debug mode to reduce noise)
+      if (jsVisibilityByPath) {
+        foundInJS++;
+        lib_core.debug(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by exact path match`);
+        lib_core.debug(`[HiddenFields]   → Made visible: ${jsVisibilityByPath.madeVisible}, Files: ${jsVisibilityByPath.files.map(f => f.filename).join(', ')}`);
+      } else if (jsVisibilityByName) {
+        foundInJS++;
+        lib_core.debug(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by name match`);
+        lib_core.debug(`[HiddenFields]   → Made visible: ${jsVisibilityByName.madeVisible}, Files: ${jsVisibilityByName.files.map(f => f.filename).join(', ')}`);
+      } else if (fuzzyMatchJS) {
+        foundInJS++;
+        lib_core.debug(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by fuzzy match (JS path: "${fuzzyMatchJSPath}")`);
+        lib_core.debug(`[HiddenFields]   → Made visible: ${fuzzyMatchJS.madeVisible}, Files: ${fuzzyMatchJS.files.map(f => f.filename).join(', ')}`);
+      } else if (fuzzyMatchEvents) {
+        foundInEvents++;
+        lib_core.debug(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by fuzzy match")`);
+        lib_core.debug(`[HiddenFields]   → Made visible: ${fuzzyMatchEvents.madeVisible}, Rules: ${fuzzyMatchEvents.rules.join(', ')}`);
+      } else if(eventsVisibilityByPath) {
+        foundInEvents++;
+        lib_core.debug(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by exact path match`);
+        lib_core.debug(`[HiddenFields]   → Made visible: ${eventsVisibilityByPath.madeVisible}, Rules: ${eventsVisibilityByPath.rules.join(', ')}`);
+      } else if(eventsVisibilityByName) {
+        foundInEvents++;
+        lib_core.debug(`[HiddenFields] ✓ Field "${name}" (path: "${path}") - FOUND by name match`);
+        lib_core.debug(`[HiddenFields]   → Made visible: ${eventsVisibilityByName.madeVisible}, Rules: ${eventsVisibilityByName.rules.join(', ')}`);
+      }
+      // Note: Fields not found in visibility rules will be flagged as unnecessary below if truly unused
+
+      // Field is potentially unnecessary if:
+      // 1. It has no visible rule in JSON
+      // 2. It has no event that sets visibility
+      // 3. It's never made visible in JavaScript
+      const isUnnecessary = !hasVisibleRule && !hasVisibleEvent && !madeVisibleInJSOrEvents;
+
+      if (isUnnecessary) {
+        issues.push({
+          severity: 'error', // Critical in PR mode (must fix), shown as warning in scheduled mode
+          type: 'unnecessary-hidden-field',
+          field: name,
+          path,
+          message: `Field "${name}" is always hidden and increases DOM size unnecessarily.`,
+          recommendation: 'Consider removing this field from the form and storing this as form variable. Hidden fields that are never shown bloat the DOM and impact performance.',
+        });
+      }
+
+      // Additional check: Field has visible rule but it evaluates to a static false
+      if (hasVisibleRule && this.isStaticFalse(visibleRule)) {
+        issues.push({
+          severity: 'error', // Critical in PR mode (must fix), shown as warning in scheduled mode
+          type: 'static-false-visibility',
+          field: name,
+          path,
+          message: `Field "${name}" has a visibility rule that always evaluates to false.`,
+          visibleRule,
+          recommendation: 'Remove this field or fix the visibility rule. A rule that always returns false serves no purpose.',
+        });
+      }
+    });
+
+    lib_core.info(`[HiddenFields] Summary: ${foundInJS}/${hiddenFields.length} hidden fields have visibility controls in JS, ${foundInEvents}/${hiddenFields.length} hidden fields have visibility controls in events`);
+    lib_core.info(`[HiddenFields] Found ${issues.length} unnecessary hidden field(s)`);
+
+    return issues;
+  }
+
+  /**
+   * Check if a visibility rule is statically false
+   */
+  isStaticFalse(rule) {
+    if (typeof rule !== 'string') return false;
+    
+    const staticFalsePatterns = [
+      /^false\(\)$/,
+      /^false$/,
+      /^0$/,
+      /^null$/,
+      /^undefined$/,
+    ];
+
+    return staticFalsePatterns.some(pattern => pattern.test(rule.trim()));
+  }
+
+  /**
+   * Compare before and after analyses
+   */
+  compare(beforeData, afterData) {
+    const resolvedIssues = beforeData.issues.filter(beforeIssue =>
+      !afterData.issues.some(afterIssue =>
+        afterIssue.field === beforeIssue.field && afterIssue.type === beforeIssue.type
+      )
+    );
+
+    return {
+      before: beforeData,
+      after: afterData,
+      delta: {
+        hiddenFields: afterData.totalHiddenFields - beforeData.totalHiddenFields,
+        unnecessaryFields: afterData.unnecessaryHiddenFields - beforeData.unnecessaryHiddenFields,
+      },
+      newIssues: afterData.issues, // Report ALL issues in current state
+      resolvedIssues,
+    };
+  }
+}
+
+
+;// CONCATENATED MODULE: ./src/analyzers/disabled-fields-analyzer.js
+/**
+ * Analyzes disabled fields in adaptive forms.
+ * Disabled fields do not submit their data; use readOnly when the value should be included in submission.
+ */
+
+
+class DisabledFieldsAnalyzer {
+  constructor(config = null) {
+    this.config = config;
+  }
+
+  /**
+   * Analyze form JSON and JavaScript for disabled field usage
+   * @param {Object} formJson - Form JSON object
+   * @param {Array} jsFiles - Array of {filename, content} objects
+   * @returns {Object} Analysis results
+   */
+  analyze(formJson, jsFiles = []) {
+    if (!formJson) {
+      return { error: 'No form JSON provided' };
+    }
+
+    lib_core.info(`[DisabledFields] Starting analysis with ${jsFiles.length} JS file(s)`);
+
+    const disabledInJson = this.findDisabledFieldsInJson(formJson);
+    lib_core.info(`[DisabledFields] Found ${disabledInJson.length} disabled field(s) in form JSON`);
+
+    const enabledChangesInJS = this.analyzeJSForEnabledChanges(jsFiles);
+    const jsCount = Object.keys(enabledChangesInJS).length;
+    lib_core.info(`[DisabledFields] Found enable/disable changes for ${jsCount} field identifier(s) in JS`);
+
+    const enabledChangesInEvents = this.analyzeEventsForEnabledChanges(formJson);
+    const eventsCount = Object.keys(enabledChangesInEvents).length;
+    lib_core.info(`[DisabledFields] Found enable/disable changes for ${eventsCount} field identifier(s) in events/rules`);
+
+    const disabledViaRules = this.findDisabledViaRules(formJson);
+
+    const allDisabled = this.mergeDisabledSources(
+      disabledInJson,
+      enabledChangesInJS,
+      enabledChangesInEvents,
+      disabledViaRules
+    );
+
+    return {
+      totalDisabledFields: allDisabled.length,
+      disabledFields: allDisabled,
+      disabledInJson: disabledInJson.length,
+      disabledViaRules: disabledViaRules.length,
+      enabledChangesInJS,
+      enabledChangesInEvents,
+    };
+  }
+
+  /**
+   * Find all fields with enabled === false in form JSON
+   */
+  findDisabledFieldsInJson(node, fields = [], path = '') {
+    if (!node) return fields;
+
+    const isDisabled = node.enabled === false || node.properties?.enabled === false;
+    const hasEnabledRule = node.rules?.enabled !== undefined;
+    const hasEnabledEvent =
+      node.events &&
+      Object.keys(node.events).some(
+        (event) =>
+          typeof node.events[event] === 'string' && node.events[event].includes('enabled')
+      );
+    const isReadOnly = node.readOnly === true || node.properties?.readOnly === true;
+
+    if (isDisabled && node.name) {
+      const fieldName = node.name;
+      const fieldPath = path || fieldName;
+      fields.push({
+        name: fieldName,
+        path: fieldPath,
+        fieldType: node.fieldType,
+        source: 'json',
+        hasEnabledRule,
+        hasEnabledEvent,
+        enabledRule: node.rules?.enabled,
+        isReadOnly,
+      });
+    }
+
+    if (node.items && Array.isArray(node.items)) {
+      node.items.forEach((child, index) => {
+        const childPath = child?.name
+          ? (path ? `${path}.${child.name}` : child.name)
+          : (path ? `${path}.items[${index}]` : `items[${index}]`);
+        this.findDisabledFieldsInJson(child, fields, childPath);
+      });
+    }
+    if (node[':items']) {
+      Object.entries(node[':items']).forEach(([key, child]) => {
+        const childPath = child?.name
+          ? (path ? `${path}.${child.name}` : child.name)
+          : (path ? `${path}.${key}` : key);
+        this.findDisabledFieldsInJson(child, fields, childPath);
+      });
+    }
+    return fields;
+  }
+
+  /**
+   * Find fields that are disabled via fd:rules (setProperty with enabled: false)
+   */
+  findDisabledViaRules(formJson) {
+    const disabledByRule = [];
+    const traverse = (node, path = '') => {
+      if (!node) return;
+      const rules = node.properties?.['fd:rules'] || node.rules;
+      if (rules && typeof rules === 'object') {
+        const ruleStr = JSON.stringify(rules);
+        if (/enabled\s*:\s*false\s*\(\)|enabled\s*:\s*false\b/i.test(ruleStr)) {
+          if (node.name) {
+            const fieldPath = path || node.name;
+            disabledByRule.push({
+              name: node.name,
+              path: fieldPath,
+              fieldType: node.fieldType,
+              source: 'rules',
+            });
+          }
+        }
+      }
+      if (node[':items']) {
+        Object.entries(node[':items']).forEach(([key, child]) => {
+          const childPath = child?.name
+            ? (path ? `${path}.${child.name}` : child.name)
+            : (path ? `${path}.${key}` : key);
+          traverse(child, childPath);
+        });
+      }
+      if (node.items && Array.isArray(node.items)) {
+        node.items.forEach((child, index) => {
+          const childPath = child?.name
+            ? (path ? `${path}.${child.name}` : child.name)
+            : (path ? `${path}.items[${index}]` : `items[${index}]`);
+          traverse(child, childPath);
+        });
+      }
+    };
+    traverse(formJson);
+    return disabledByRule;
+  }
+
+  /**
+   * Analyze events for setProperty / dispatchEvent that change enabled
+   */
+  analyzeEventsForEnabledChanges(formJson) {
+    const changes = {};
+    const hasEnabledChange = /enabled\s*:\s*(true|false)\s*\(\)/;
+    const targetPathPattern = /dispatchEvent\s*\(\s*['"]?([^'",\s][^'",]*?)['"]?\s*,/;
+
+    const traverse = (node) => {
+      if (!node) return;
+      if (node.events && typeof node.events === 'object') {
+        Object.entries(node.events).forEach(([eventType, handlers]) => {
+          if (!Array.isArray(handlers)) return;
+          handlers.forEach((handler) => {
+            if (typeof handler !== 'string') return;
+            if (handler.includes('dispatchEvent') && hasEnabledChange.test(handler)) {
+              const targetMatch = handler.match(targetPathPattern);
+              const enabledMatch = handler.match(/enabled\s*:\s*(true|false)\s*\(\)/);
+              if (targetMatch && enabledMatch) {
+                const targetPath = this.normalizeEventPath(targetMatch[1].trim());
+                const enabledValue = enabledMatch[1].toLowerCase() === 'true';
+                if (!changes[targetPath]) {
+                  changes[targetPath] = { madeEnabled: false, madeDisabled: false, rules: [] };
+                }
+                changes[targetPath].rules.push(handler);
+                if (enabledValue) changes[targetPath].madeEnabled = true;
+                else changes[targetPath].madeDisabled = true;
+              }
+            }
+          });
+        });
+      }
+      if (node[':items']) Object.values(node[':items']).forEach(traverse);
+      if (node.items && Array.isArray(node.items)) node.items.forEach(traverse);
+    };
+    traverse(formJson);
+    return changes;
+  }
+
+  /**
+   * Analyze JavaScript for setProperty / direct assignment that change enabled
+   */
+  analyzeJSForEnabledChanges(jsFiles) {
+    const changes = {};
+    jsFiles.forEach((file) => {
+      const { filename, content } = file;
+      const setPropertyPattern =
+        /globals\.functions\.setProperty\s*\(\s*globals\.form(?:\?\.)?([a-zA-Z0-9_.?]+)\s*,\s*\{[^}]*enabled\s*:\s*(true|false)[^}]*\}/g;
+      let match;
+      while ((match = setPropertyPattern.exec(content)) !== null) {
+        const fieldPath = match[1];
+        const enabledValue = match[2] === 'true';
+        const pathSegments = fieldPath.split(/[.?]/).filter(Boolean);
+        const fieldName = pathSegments[pathSegments.length - 1];
+        const fullPath = pathSegments.join('.');
+        [fieldName, fullPath].forEach((key) => {
+          if (!key) return;
+          if (!changes[key]) {
+            changes[key] = { files: [], madeEnabled: false, madeDisabled: false };
+          }
+          changes[key].files.push({
+            filename,
+            enabled: enabledValue,
+            line: this.getLineNumber(content, match.index),
+          });
+          if (enabledValue) changes[key].madeEnabled = true;
+          else changes[key].madeDisabled = true;
+        });
+      }
+      const directPattern = /globals\.form(?:\?\.)?([a-zA-Z0-9_.?]+)\.enabled\s*=\s*(true|false)/g;
+      while ((match = directPattern.exec(content)) !== null) {
+        const fieldPath = match[1];
+        const enabledValue = match[2] === 'true';
+        const pathSegments = fieldPath.split(/[.?]/).filter(Boolean);
+        const fieldName = pathSegments[pathSegments.length - 1];
+        const fullPath = pathSegments.join('.');
+        [fieldName, fullPath].forEach((key) => {
+          if (!key) return;
+          if (!changes[key]) {
+            changes[key] = { files: [], madeEnabled: false, madeDisabled: false };
+          }
+          changes[key].files.push({
+            filename,
+            enabled: enabledValue,
+            line: this.getLineNumber(content, match.index),
+          });
+          if (enabledValue) changes[key].madeEnabled = true;
+          else changes[key].madeDisabled = true;
+        });
+      }
+    });
+    return changes;
+  }
+
+  getLineNumber(content, index) {
+    return content.substring(0, index).split('\n').length;
+  }
+
+  normalizeEventPath(path) {
+    return path.replace(/^\$form\.?/, '').replace(/\?\./g, '.');
+  }
+
+  /**
+   * Merge disabled fields from JSON, rules, and optionally from JS/events (fields only disabled in script/rule)
+   */
+  mergeDisabledSources(disabledInJson, enabledChangesInJS, enabledChangesInEvents, disabledViaRules) {
+    const byPath = new Map();
+    disabledInJson.forEach((f) => {
+      byPath.set(f.path, { ...f, source: 'json', sources: ['json'] });
+    });
+    disabledViaRules.forEach((f) => {
+      const existing = byPath.get(f.path);
+      if (existing) {
+        if (!existing.sources.includes('rules')) existing.sources.push('rules');
+      } else {
+        byPath.set(f.path, { ...f, sources: ['rules'] });
+      }
+    });
+    const onlyInScriptOrEvents = new Set();
+    [...Object.entries(enabledChangesInJS), ...Object.entries(enabledChangesInEvents)].forEach(
+      ([key, data]) => {
+        if (data.madeDisabled && !byPath.has(key)) {
+          const pathSegments = key.split('.');
+          const name = pathSegments[pathSegments.length - 1];
+          if (!byPath.has(name)) onlyInScriptOrEvents.add(key);
+        }
+      }
+    );
+    onlyInScriptOrEvents.forEach((path) => {
+      const pathSegments = path.split('.');
+      const name = pathSegments[pathSegments.length - 1];
+      if (!byPath.has(path) && !byPath.has(name)) {
+        byPath.set(path, {
+          name,
+          path,
+          fieldType: 'unknown',
+          source: 'rules_or_script',
+          sources: ['rules_or_script'],
+        });
+      }
+    });
+    return Array.from(byPath.values());
+  }
+
+  compare(beforeData, afterData) {
+    return {
+      before: beforeData,
+      after: afterData,
+      delta: {
+        disabledFields: (afterData.totalDisabledFields || 0) - (beforeData.totalDisabledFields || 0),
+      },
+      newIssues: [],
+      resolvedIssues: [],
+    };
+  }
+}
+
+// EXTERNAL MODULE: ./node_modules/@aemforms/af-core/lib/index.js
+var af_core_lib = __nccwpck_require__(39866);
+// EXTERNAL MODULE: external "crypto"
+var external_crypto_ = __nccwpck_require__(76982);
+;// CONCATENATED MODULE: external "vm"
+const external_vm_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("vm");
+;// CONCATENATED MODULE: ./src/analyzers/rule-performance-analyzer.js
+
+
+
+
+
+
+
+/**
+ * Analyzes form rules for performance issues:
+ * 1. Circular dependencies (cycles) - causes infinite loops
+ * 2. Slow rule execution (runtime profiling) - blocks rendering
+ * 
+ * Uses @aemforms/af-core to leverage the built-in dependency tracking
+ * and hooks into RuleEngine.execute() to measure actual execution times
+ */
+class RulePerformanceAnalyzer {
+  constructor(config = null) {
+    this.config = config;
+    this.slowRuleThreshold = config?.thresholds?.form?.slowRuleThreshold || 50; // ms
+  }
+
+  /**
+   * Analyze form JSON for rule cycles and slow rules
+   * @param {Object} formJson - Form JSON object
+   * @returns {Promise<Object>} Analysis results with cycles and slow rules
+   */
+  async analyze(formJson) {
+    if (!formJson) {
+      return { error: 'No form JSON provided' };
+    }
+
+    // Validate form JSON
+    if (typeof formJson === 'string') {
+      try {
+        formJson = JSON.parse(formJson);
+      } catch (e) {
+        return { error: 'Invalid form JSON: Unable to parse' };
+      }
+    }
+
+    if (typeof formJson !== 'object' || Array.isArray(formJson)) {
+      return { error: 'Form JSON must be an object' };
+    }
+
+    // Check if this is a valid AEM form JSON
+    // AEM forms use :items (with colon) or items
+    const hasItems = (formJson[':items'] && typeof formJson[':items'] === 'object') || 
+                     (formJson.items && Array.isArray(formJson.items));
+    const hasFormProperties = formJson.fieldType === 'form' || formJson[':type'] === 'fd/franklin/components/form/v1/form';
+    
+    if (!hasItems && !hasFormProperties) {
+      lib_core.info('Form validation: No :items or items found, no form properties');
+      return {
+        totalRules: 0,
+        fieldsWithRules: 0,
+        dependencies: {},
+        cycles: 0,
+        cycleDetails: [],
+        issues: [],
+        circularDependencies: [],
+        skipped: true,
+        skipReason: 'Form JSON structure not recognized - missing :items or items',
+      };
+    }
+    
+    // If form has form properties but no items, skip (empty form)
+    if (!hasItems) {
+      lib_core.info('Form has no :items or items to analyze (empty form)');
+      return {
+        totalRules: 0,
+        fieldsWithRules: 0,
+        dependencies: {},
+        cycles: 0,
+        cycleDetails: [],
+        issues: [],
+        circularDependencies: [],
+        skipped: true,
+        skipReason: 'Form has no items to analyze',
+      };
+    }
+
+    try {
+      // Register custom functions for form initialization
+      // Try to load real custom function implementations from the checked-out repository
+      const customFunctionsPath = formJson.properties?.customFunctionsPath;
+      
+      let realFunctions = {};
+      let loadedCount = 0;
+      let functionFailures = null;
+      let customFunctionsFilePath = null; // Track the actual file path for runtime errors
+      
+      if (customFunctionsPath) {
+        const result = await this.loadCustomFunctions(customFunctionsPath);
+        if (result) {
+          realFunctions = result.functions;
+          loadedCount = result.count;
+          functionFailures = result.failureTracker;
+          customFunctionsFilePath = result.filePath; // Store actual file path
+        }
+      }
+      
+      // Extract ALL function names used in the form
+      const functionNames = this.extractAllFunctionNames(formJson);
+      lib_core.info(`Detected ${functionNames.length} function(s) in form, loaded ${loadedCount} real implementation(s)`);
+      
+      // Register real functions first (if any)
+      if (loadedCount > 0) {
+        af_core_lib.FunctionRuntime.registerFunctions(realFunctions);
+      }
+      
+      // Create mocks for remaining functions
+      const mockFunctions = {};
+      functionNames.forEach(fnName => {
+        if (!realFunctions[fnName]) {
+          mockFunctions[fnName] = (...args) => Promise.resolve(null);
+        }
+      });
+      
+      if (Object.keys(mockFunctions).length > 0) {
+        af_core_lib.FunctionRuntime.registerFunctions(mockFunctions);
+      }
+      
+      lib_core.info(`Registered ${loadedCount} real + ${Object.keys(mockFunctions).length} mock function(s)`);
+      
+      // RUNTIME PROFILING: Hook into RuleEngine.execute() to measure actual rule execution times
+      const slowRules = [];
+      const ruleExecutionCounts = new Map(); // Track how many times each rule executes
+      let originalExecute = null;
+      const that = this; // Capture 'this' for use in callback
+      
+      // Helper: Find the ancestor with dataRef: null
+      const findNullDataRefAncestor = (ancestors) => {
+        // Walk from closest to farthest ancestor
+        for (let i = ancestors.length - 1; i >= 0; i--) {
+          if (ancestors[i].dataRef === null) {
+            return {
+              ancestor: ancestors[i],
+              depth: ancestors.length - i, // How many levels up
+              path: ancestors.slice(i).map(a => a.name || a.id).join(' > ')
+            };
+          }
+        }
+        return null;
+      };
+
+      // CAPTURE FORM VALIDATION ERRORS: Intercept console.error to capture af-core validation warnings
+      const validationErrors = {
+        dataRefErrors: [],
+        typeConflicts: []
+      };
+      
+      // Collect raw errors during instantiation (defer processing until form is ready)
+      const rawDataRefErrors = [];
+      const rawTypeConflicts = [];
+      
+      const originalConsoleError = console.error;
+      console.error = (...args) => {
+        const message = args[0];
+        if (typeof message === 'string') {
+          // Capture dataRef parsing errors (don't process - fields not yet instantiated)
+          if (message.includes('Error parsing dataRef')) {
+            const match = message.match(/Error parsing dataRef "([^"]+)" for field "([^"]+)"/);
+            if (match) {
+              rawDataRefErrors.push({ dataRef: match[1], fieldId: match[2], message });
+              return; // Process after form instantiation
+            }
+          }
+          // Capture type conflict errors (don't process - collect for later)
+          else if (message.includes('Type conflict detected')) {
+            rawTypeConflicts.push({ message });
+            return; // Process after form instantiation
+          }
+        }
+        // Still call original console.error for logging
+        originalConsoleError(...args);
+      };
+      
+      // Use createFormInstanceSync with callback to hook into RuleEngine BEFORE event queue runs
+      // This ensures ExecuteRule event completes and dependencies are tracked
+      // After this call returns, all rules have executed and _dependents arrays are populated
+      // Note: af-core internally calls sitesModelToFormModel() to handle :items/:itemsOrder transformation
+      let form;
+      try {
+        lib_core.info('Creating form instance with af-core (profiling rule execution)...');
+        
+        // Use callback to access form BEFORE event queue runs
+        form = await (0,af_core_lib.createFormInstanceSync)(formJson, (f) => {
+          // RuleEngine is not exported from af-core, so we get it from the form instance
+          // The callback runs BEFORE f.getEventQueue().runPendingQueue() is called
+          const RuleEngine = f.ruleEngine.constructor;
+          originalExecute = RuleEngine.prototype.execute;
+          
+          // Hook into RuleEngine.prototype.execute to measure rule execution times
+          RuleEngine.prototype.execute = function(node, data, globals, useValueOf, eString) {
+            const start = performance.now();
+            const result = originalExecute.call(this, node, data, globals, useValueOf, eString);
+            const duration = performance.now() - start;
+            
+            // Track execution
+            const fieldName = globals?.field?.name || 'unknown';
+            const eventType = globals?.$event?.type || 'unknown';
+            const ruleKey = `${fieldName}:${eString}`;
+            
+            // Count executions
+            ruleExecutionCounts.set(ruleKey, (ruleExecutionCounts.get(ruleKey) || 0) + 1);
+            
+            // Flag slow rules (only if they take significant time)
+            if (duration > that.slowRuleThreshold) {
+              slowRules.push({
+                field: fieldName,
+                expression: eString.substring(0, 150), // Truncate long expressions
+                duration: Math.round(duration * 10) / 10, // Round to 1 decimal
+                event: eventType,
+              });
+            }
+            
+            return result;
+          };
+        }, 'off');
+        
+        lib_core.info('Form instance created successfully');
+      } catch (coreError) {
+        // If af-core fails to create the form instance, return gracefully
+        lib_core.error(`af-core failed to create form instance: ${coreError.message}`);
+        return {
+          totalRules: 0,
+          fieldsWithRules: 0,
+          dependencies: {},
+          cycles: 0,
+          cycleDetails: [],
+          issues: [],
+          circularDependencies: [],
+          skipped: true,
+          skipReason: `Unable to analyze form structure: ${coreError.message}`,
+        };
+      }
+      
+      // Log function execution failures if any occurred during rule execution
+      if (functionFailures && functionFailures.size > 0) {
+        lib_core.info(`[CustomFunctions] ${functionFailures.size} function(s) encountered errors during execution:`);
+        let loggedCount = 0;
+        for (const [fnName, failure] of functionFailures.entries()) {
+          if (loggedCount < 5) { // Only log first 5 to avoid noise
+            const errorMessages = Array.from(failure.errors).join(', ');
+            lib_core.info(`[CustomFunctions]   - ${fnName}(): ${failure.count} error(s) - ${errorMessages}`);
+            loggedCount++;
+          }
+        }
+        if (functionFailures.size > 5) {
+          lib_core.info(`[CustomFunctions]   ... and ${functionFailures.size - 5} more function(s) with errors`);
+        }
+        lib_core.info(`[CustomFunctions] Note: Errors are expected for functions accessing formData/globals in test context`);
+      }
+      
+      // Restore original RuleEngine.execute (if it was hooked)
+      if (originalExecute && form) {
+        const RuleEngine = form.ruleEngine.constructor;
+        RuleEngine.prototype.execute = originalExecute;
+      }
+      
+      // After createFormInstance returns, the event queue has run and dependencies are tracked
+      // Now build the dependency graph from the form instance's internal state
+      lib_core.info('Building dependency graph from form instance...');
+      const dependencyGraph = this.buildDependencyGraphFromForm(form);
+      lib_core.info(`Rule detection: Found ${dependencyGraph.totalRules} rules in ${dependencyGraph.fieldsWithRules} fields`);
+      
+      const cycles = this.detectCycles(dependencyGraph);
+      if (cycles.length > 0) {
+        lib_core.warning(`Detected ${cycles.length} circular dependenc${cycles.length > 1 ? 'ies' : 'y'} in rules`);
+      }
+      const issues = this.generateIssues(cycles);
+
+      // Process slow rules
+      const sortedSlowRules = slowRules
+        .sort((a, b) => b.duration - a.duration) // Sort by duration descending
+        .slice(0, 10); // Top 10 slowest
+      
+      if (sortedSlowRules.length > 0) {
+        lib_core.warning(`Detected ${slowRules.length} slow rule execution(s) (> ${this.slowRuleThreshold}ms)`);
+        lib_core.info(`Top ${Math.min(3, sortedSlowRules.length)} slowest rules:`);
+        sortedSlowRules.slice(0, 3).forEach(rule => {
+          lib_core.info(`  - Field "${rule.field}" took ${rule.duration}ms during ${rule.event}`);
+        });
+      }
+
+      // Convert functionFailures Map to array for reporting
+      const runtimeErrors = [];
+      if (functionFailures && functionFailures.size > 0) {
+        for (const [fnName, failure] of functionFailures.entries()) {
+          runtimeErrors.push({
+            functionName: fnName,
+            file: customFunctionsFilePath, // Add the actual file path (e.g., eds-li/blocks/form/functions.js)
+            errorCount: failure.count,
+            errors: Array.from(failure.errors),
+            severity: 'error', // Critical in PR mode (must fix), warning in scheduled mode
+            type: 'runtime-error-in-custom-function',
+            recommendation: `Function "${fnName}" throws errors during execution. Review function logic to handle missing or null values gracefully.`
+          });
+        }
+      }
+
+      // Restore console.error
+      console.error = originalConsoleError;
+      
+      // NOW process the collected errors (form is fully instantiated, fields are available)
+      lib_core.info(`Processing ${rawDataRefErrors.length} dataRef error(s) and ${rawTypeConflicts.length} type conflict(s)...`);
+      
+      // Helper: Get parent chain from instantiated form model (uses .parent references)
+      // This matches exactly how af-core checks dataRef - walks up the .parent chain
+      const getModelParentChain = (field) => {
+        const ancestors = [];
+        let current = field.parent;
+        while (current && current.id !== formJson.id) { // Stop at form root
+          ancestors.push({
+            id: current.id,
+            name: current.name,
+            fieldType: current.fieldType,
+            dataRef: current.dataRef
+          });
+          current = current.parent;
+        }
+        return ancestors; // Closest to farthest
+      };
+      
+      // Process dataRef errors - ALWAYS use form model hierarchy (not JSON structure)
+      for (const raw of rawDataRefErrors) {
+        let fieldInfo = null;
+        
+        if (form) {
+          try {
+            const field = form.getElement(raw.fieldId);
+            if (field) {
+              // Get ancestor chain from MODEL's .parent references
+              // This is the ACTUAL hierarchy af-core uses for dataRef checking
+              const modelAncestors = getModelParentChain(field);
+              
+              fieldInfo = {
+                field: { id: field.id, name: field.name, fieldType: field.fieldType },
+                ancestors: modelAncestors
+              };
+            }
+          } catch (e) {
+            // Field doesn't exist in form
+          }
+        }
+        
+        if (!fieldInfo) {
+          // Field not found in instantiated form
+          validationErrors.dataRefErrors.push({
+            fieldId: raw.fieldId,
+            dataRef: raw.dataRef,
+            rootCause: 'field_not_found',
+            message: raw.message,
+            ancestorChain: [],
+            nullAncestor: null
+          });
+          continue;
+        }
+        
+        // Build ancestor chain
+        const ancestorChain = fieldInfo.ancestors.map(a => ({
+          id: a.id,
+          name: a.name || a.id,
+          dataRef: a.dataRef
+        }));
+        
+        // Find null ancestor
+        const nullAncestor = findNullDataRefAncestor(fieldInfo.ancestors);
+        
+        validationErrors.dataRefErrors.push({
+          dataRef: raw.dataRef,
+          fieldId: raw.fieldId,
+          fieldName: fieldInfo.field.name || 'unknown',
+          message: raw.message,
+          nullAncestor: nullAncestor ? {
+            id: nullAncestor.ancestor.id || 'unknown',
+            name: nullAncestor.ancestor.name || 'unknown',
+            depth: nullAncestor.depth,
+            path: nullAncestor.path
+          } : null,
+          ancestorChain,
+          rootCause: nullAncestor ? 'ancestor_null_dataref' : 'no_null_ancestor_found'
+        });
+      }
+      
+      // Process type conflicts
+      for (const raw of rawTypeConflicts) {
+        const dataRefMatch = raw.message.match(/DataRef:\s*(\S+)/);
+        const newFieldMatch = raw.message.match(/New field '([^']+)'\s*\(([^)]+)\)/);
+        const conflictsMatch = raw.message.match(/conflicts with:\s*(.+?)(?:\.\s*DataRef|$)/);
+        
+        if (newFieldMatch) {
+          validationErrors.typeConflicts.push({
+            dataRef: dataRefMatch ? dataRefMatch[1] : 'unknown',
+            newField: newFieldMatch[1],
+            newFieldType: newFieldMatch[2],
+            conflictingFields: conflictsMatch ? conflictsMatch[1] : '',
+            message: raw.message
+          });
+        }
+      }
+      
+      // Log summary (not individual fields - too verbose)
+      if (validationErrors.dataRefErrors.length > 0) {
+        lib_core.info(` Found ${validationErrors.dataRefErrors.length} dataRef parsing error(s)`);
+        
+        const notFound = validationErrors.dataRefErrors.filter(e => e.rootCause === 'field_not_found').length;
+        const noNullAncestor = validationErrors.dataRefErrors.filter(e => e.rootCause === 'no_null_ancestor_found').length;
+        const withNullAncestor = validationErrors.dataRefErrors.filter(e => e.rootCause === 'ancestor_null_dataref').length;
+        
+        if (notFound > 0) {
+          lib_core.info(`   ${notFound} field(s) not found (may be in fragments/conditional panels)`);
+        }
+        if (withNullAncestor > 0) {
+          lib_core.info(`   ${withNullAncestor} field(s) have ancestor with dataRef: null`);
+        }
+        if (noNullAncestor > 0) {
+          lib_core.warning(`   ${noNullAncestor} field(s) fail dataRef parsing but NO ancestor has dataRef: null (unexpected)`);
+          lib_core.warning(`   Detailed ancestor chains for investigation:`);
+          
+          validationErrors.dataRefErrors
+            .filter(e => e.rootCause === 'no_null_ancestor_found')
+            .slice(0, 5) // Show first 5 to avoid log spam
+            .forEach(error => {
+              const ancestorPath = error.ancestorChain.length > 0
+                ? error.ancestorChain.map(a => `${a.name}(dataRef: ${a.dataRef === null ? 'NULL' : a.dataRef || 'undefined'})`).join(' > ')
+                : 'No ancestors';
+              lib_core.warning(`     Field "${error.fieldName}" (dataRef: "${error.dataRef}")`);
+              lib_core.warning(`       Ancestor chain: ${ancestorPath}`);
+            });
+          
+          if (noNullAncestor > 5) {
+            lib_core.warning(`     ... and ${noNullAncestor - 5} more field(s) - see HTML report for full details`);
+          }
+        }
+      }
+      if (validationErrors.typeConflicts.length > 0) {
+        lib_core.info(` Found ${validationErrors.typeConflicts.length} type conflict(s)`);
+      }
+
+      return {
+        totalRules: dependencyGraph.totalRules,
+        fieldsWithRules: dependencyGraph.fieldsWithRules,
+        dependencies: dependencyGraph.dependencies,
+        cycles: cycles.length,
+        cycleDetails: cycles,
+        slowRules: sortedSlowRules, // Add slow rules to results
+        slowRuleCount: slowRules.length,
+        issues,
+        circularDependencies: cycles.map(cycle => ({
+          cycle: cycle.fields || cycle.path,
+          fields: cycle.fields,
+        })),
+        runtimeErrors, // NEW: Runtime errors for AI to fix
+        runtimeErrorCount: runtimeErrors.length,
+        validationErrors, // NEW: Form validation errors from af-core
+        validationErrorCount: validationErrors.dataRefErrors.length + validationErrors.typeConflicts.length,
+      };
+    } catch (error) {
+      // Restore console.error in catch block too
+      console.error = originalConsoleError;
+      
+      console.error('Error analyzing rule cycles:', error);
+      return {
+        totalRules: 0,
+        fieldsWithRules: 0,
+        dependencies: {},
+        cycles: 0,
+        cycleDetails: [],
+        issues: [],
+        circularDependencies: [],
+        skipped: true,
+        skipReason: `Analysis error: ${error.message}`,
+      };
+    }
+  }
+
+
+  /**
+   * Load custom function implementations from the checked-out repository
+   * Removes export statements and evaluates in a sandboxed vm context
+   * @param {string} customFunctionsPath - Path like "/blocks/form/functions.js"
+   * @returns {Promise<Object|null>} {functions: {...}, count: number} or null
+   */
+  /**
+   * Recursively search for a file matching the given path suffix
+   * @param {string} dir - Directory to search in
+   * @param {string} targetPath - Path suffix to match (e.g., "liabilities/insta_savings_journey/functions.js")
+   * @param {number} maxDepth - Maximum recursion depth
+   * @returns {string|null} Absolute path to the file or null
+   */
+  findFileByPathSuffix(dir, targetPath, maxDepth = 5) {
+    if (maxDepth <= 0) return null;
+    
+    try {
+      const entries = (0,external_fs_.readdirSync)(dir, { withFileTypes: true });
+      
+      for (const entry of entries) {
+        // Skip common directories we don't want to search
+        if (entry.name === 'node_modules' || entry.name === 'dist' || entry.name === '.git') {
+          continue;
+        }
+        
+        const fullPath = (0,external_path_.join)(dir, entry.name);
+        
+        if (entry.isDirectory()) {
+          // Recursively search all directories
+          const found = this.findFileByPathSuffix(fullPath, targetPath, maxDepth - 1);
+          if (found) return found;
+        } else if (entry.isFile()) {
+          // Check if the relative path from repo root ends with our target path
+          const relativePath = (0,external_path_.relative)(process.cwd(), fullPath);
+          if (relativePath.endsWith(targetPath)) {
+            return fullPath;
+          }
+        }
+      }
+    } catch (error) {
+      // Ignore permission errors, etc.
+      return null;
+    }
+    
+    return null;
+  }
+
+  async loadCustomFunctions(customFunctionsPath) {
+    if (!customFunctionsPath) {
+      return null;
+    }
+
+    try {
+      // Try specified path first
+      const normalizedPath = customFunctionsPath.replace(/^\/+/, '');
+      let absolutePath = (0,external_path_.resolve)(process.cwd(), normalizedPath);
+      
+      // If not found, search for the file in the repository
+      if (!(0,external_fs_.existsSync)(absolutePath)) {
+        lib_core.info(`Custom functions file not found at specified path: ${absolutePath}`);
+        lib_core.info(`Searching repository for file matching: ${normalizedPath}`);
+        
+        const foundPath = this.findFileByPathSuffix(process.cwd(), normalizedPath);
+        
+        if (foundPath) {
+          absolutePath = foundPath;
+          lib_core.info(`Found custom functions at: ${absolutePath}`);
+        } else {
+          lib_core.info(`Custom functions file not found: ${normalizedPath}`);
+          return null;
+        }
+      }
+      
+      lib_core.info(`Loading custom functions from: ${absolutePath}`);
+      
+      // Read the ESM module source code
+      let sourceCode = (0,external_fs_.readFileSync)(absolutePath, 'utf-8');
+      
+      // Extract function names from export block (export { fn1, fn2, ... })
+      const exportMatch = sourceCode.match(/export\s*\{([^}]+)\}/s);
+      let exportedNames = [];
+      if (exportMatch) {
+        exportedNames = exportMatch[1]
+          .split(',')
+          .map(name => name.trim())
+          .filter(name => name && !name.startsWith('//'));
+        lib_core.info(`Found ${exportedNames.length} exported names in export block`);
+      }
+      
+      // Remove ALL export statements to make it executable in non-ESM context
+      sourceCode = sourceCode
+        .replace(/export\s+async\s+function\s+/g, 'async function ')  // export async function
+        .replace(/export\s+function\s+/g, 'function ')                // export function
+        .replace(/export\s+const\s+/g, 'const ')                      // export const
+        .replace(/export\s+let\s+/g, 'let ')                          // export let
+        .replace(/export\s+var\s+/g, 'var ')                          // export var
+        .replace(/export\s+class\s+/g, 'class ')                      // export class
+        .replace(/export\s*\{[^}]+\}/gs, '')                           // remove export { ... }
+        .replace(/export\s+default\s+/g, '');                          // export default
+      
+      // Create sandbox with browser globals
+      const sandbox = {
+        console,
+        crypto: external_crypto_.webcrypto || external_crypto_,
+        window: {
+          msCrypto: undefined,
+          location: { href: '', protocol: 'https:' },
+          navigator: { userAgent: 'Node.js' },
+          document: {},
+          addEventListener: () => {},
+          removeEventListener: () => {},
+          getComputedStyle: () => ({}),
+          matchMedia: () => ({ matches: false }),
+        },
+        document: {
+          createElement: () => ({}),
+          querySelector: () => null,
+          querySelectorAll: () => [],
+          getElementById: () => null,
+          body: {},
+          head: {},
+          addEventListener: () => {},
+        },
+      };
+      
+      // Create context and run script
+      const context = external_vm_namespaceObject.createContext(sandbox);
+      external_vm_namespaceObject.runInContext(sourceCode, context, {
+        filename: 'functions.js',
+        timeout: 10000,
+      });
+      
+      // Collect exported functions from the context
+      const functions = {};
+      let loadedCount = 0;
+      
+      // Track function execution failures for debugging
+      const functionFailures = new Map(); // functionName -> { count, errors: Set }
+      
+      for (const name of exportedNames) {
+        if (typeof context[name] === 'function') {
+          // Wrap in try-catch for safe execution
+          // Custom functions may reference globals.form, formData, etc. that don't exist in test context
+          // Log failures but continue execution to prevent crashes
+          functions[name] = function safeFunctionWrapper(...args) {
+            try {
+              const result = context[name].apply(this, args);
+              
+              // If result is a promise, catch rejections
+              if (result && typeof result.then === 'function') {
+                return result.catch((err) => {
+                  // Log promise rejection with stack trace
+                  if (!functionFailures.has(name)) {
+                    functionFailures.set(name, { count: 0, errors: new Set() });
+                  }
+                  const failure = functionFailures.get(name);
+                  failure.count++;
+                  
+                  // Capture full error details including stack trace
+                  const errorDetails = {
+                    message: err?.message || 'Promise rejected',
+                    stack: err?.stack || '',
+                    name: err?.name || 'Error'
+                  };
+                  failure.errors.add(JSON.stringify(errorDetails));
+                  return null;
+                });
+              }
+              
+              return result;
+            } catch (e) {
+              // Log sync error with stack trace - functions expect different runtime context
+              if (!functionFailures.has(name)) {
+                functionFailures.set(name, { count: 0, errors: new Set() });
+              }
+              const failure = functionFailures.get(name);
+              failure.count++;
+              
+              // Capture full error details including stack trace
+              const errorDetails = {
+                message: e?.message || 'Unknown error',
+                stack: e?.stack || '',
+                name: e?.name || 'Error'
+              };
+              failure.errors.add(JSON.stringify(errorDetails));
+              return null;
+            }
+          };
+          loadedCount++;
+        }
+      }
+      
+      lib_core.info(`Successfully loaded ${loadedCount} real function(s)`);
+      
+      // Make path relative to workspace root for consistency
+      const workspaceRoot = process.cwd();
+      const relativePath = absolutePath.startsWith(workspaceRoot) 
+        ? absolutePath.substring(workspaceRoot.length + 1) 
+        : absolutePath;
+      
+      return { 
+        functions, 
+        count: loadedCount, 
+        failureTracker: functionFailures,
+        filePath: relativePath // Return workspace-relative path (e.g., eds-li/blocks/form/functions.js)
+      };
+      
+    } catch (error) {
+      lib_core.warning(`Could not load custom functions: ${error.message}`);
+      lib_core.warning(`Stack: ${error.stack}`);
+      return null;
+    }
+  }
+
+  /**
+   * Extract all function names from form JSON (rules, events, expressions)
+   * @param {Object} formJson - Form JSON object
+   * @returns {Array<string>} Array of unique function names
+   */
+  extractAllFunctionNames(formJson) {
+    const functionNames = new Set();
+    const functionPattern = /(\w+)\s*\(/g;
+    
+    // JavaScript keywords that should NOT be treated as custom functions
+    const jsKeywords = new Set([
+      'if', 'else', 'for', 'while', 'do', 'switch', 'case', 'break', 'continue',
+      'return', 'throw', 'try', 'catch', 'finally', 'typeof', 'instanceof',
+      'new', 'delete', 'void', 'yield', 'await', 'async', 'function',
+      'true', 'false', 'null', 'undefined', 'NaN', 'Infinity',
+      'var', 'let', 'const', 'class', 'extends', 'super', 'this',
+      'Array', 'Object', 'String', 'Number', 'Boolean', 'Date', 'Math',
+      'parseInt', 'parseFloat', 'isNaN', 'isFinite', 'encodeURI', 'decodeURI'
+    ]);
+
+    const extractFromString = (str) => {
+      if (typeof str !== 'string') return;
+      let match;
+      while ((match = functionPattern.exec(str)) !== null) {
+        const fnName = match[1];
+        // Only add if it's not a JavaScript keyword
+        if (!jsKeywords.has(fnName)) {
+          functionNames.add(fnName);
+        }
+      }
+    };
+
+    const traverse = (node) => {
+      if (!node || typeof node !== 'object') return;
+
+      // Check events
+      if (node.events && typeof node.events === 'object') {
+        Object.values(node.events).forEach(eventHandlers => {
+          if (Array.isArray(eventHandlers)) {
+            eventHandlers.forEach(handler => extractFromString(handler));
+          } else {
+            extractFromString(eventHandlers);
+          }
+        });
+      }
+
+      // Check rules
+      if (node.rules && typeof node.rules === 'object') {
+        Object.values(node.rules).forEach(rule => {
+          if (typeof rule === 'object' && rule.expression) {
+            extractFromString(rule.expression);
+          } else {
+            extractFromString(rule);
+          }
+        });
+      }
+
+      // Check validation/display expressions
+      if (node.validationExpression) extractFromString(node.validationExpression);
+      if (node.displayValueExpression) extractFromString(node.displayValueExpression);
+
+      // Traverse children
+      if (node[':items']) {
+        Object.values(node[':items']).forEach(child => traverse(child));
+      }
+      if (node.items && Array.isArray(node.items)) {
+        node.items.forEach(child => traverse(child));
+      }
+    };
+
+    traverse(formJson);
+    return Array.from(functionNames);
+  }
+
+  /**
+   * Build dependency graph from form instance
+   * After createFormInstanceSync returns, ExecuteRule has run and dependencies are tracked
+   * in each field's _dependents array by RuleEngine.trackDependency()
+   * @param {Object} form - Form instance from createFormInstanceSync
+   * @returns {Object} Dependency graph
+   */
+  buildDependencyGraphFromForm(form) {
+    const graph = {
+      totalRules: 0,
+      fieldsWithRules: 0,
+      dependencies: {},
+      fieldMap: {}, // Map field IDs to names for lookup
+    };
+
+    let visitedFieldCount = 0;
+
+    // Visit each field in the form using the built-in visitor
+    form.visit((field) => {
+      visitedFieldCount++;
+      const fieldName = field.name;
+      const fieldId = field.id;
+      
+      if (!fieldName) return; // Skip fields without names (transparent nodes)
+
+      // Store field mapping
+      graph.fieldMap[fieldId] = fieldName;
+
+      // Check if field has rules
+      const fieldJson = field._jsonModel || {};
+      
+      if (fieldJson.rules && typeof fieldJson.rules === 'object') {
+        const ruleProperties = Object.keys(fieldJson.rules);
+        
+        if (ruleProperties.length > 0) {
+          graph.fieldsWithRules++;
+          graph.totalRules += ruleProperties.length;
+        }
+      }
+
+      // Access the _dependents array populated by RuleEngine during rule execution
+      // After ExecuteRule event runs, each field's _dependents contains fields that depend on it
+      const dependents = field._dependents || [];
+      
+      if (dependents.length > 0) {
+        if (!graph.dependencies[fieldName]) {
+          graph.dependencies[fieldName] = {
+            id: fieldId,
+            dependents: [], // Fields that depend on this field
+            dependsOn: [],  // Will be populated in reverse pass
+          };
+        }
+
+        // Each dependent is a field that depends on this field
+        dependents.forEach(dep => {
+          const dependentField = dep.node;
+          const dependentName = dependentField.name;
+          
+          if (dependentName && dependentName !== fieldName) {
+            graph.dependencies[fieldName].dependents.push(dependentName);
+          }
+        });
+      }
+    });
+
+    // Build reverse dependencies (dependsOn)
+    Object.keys(graph.dependencies).forEach(fieldName => {
+      const field = graph.dependencies[fieldName];
+      
+      // For each field that this field affects (dependents)
+      field.dependents.forEach(dependentName => {
+        if (!graph.dependencies[dependentName]) {
+          graph.dependencies[dependentName] = {
+            dependents: [],
+            dependsOn: [],
+          };
+        }
+        
+        // The dependent field depends on this field
+        if (!graph.dependencies[dependentName].dependsOn.includes(fieldName)) {
+          graph.dependencies[dependentName].dependsOn.push(fieldName);
+        }
+      });
+    });
+
+    lib_core.info(`Visited ${visitedFieldCount} fields, ${graph.fieldsWithRules} have rules`);
+
+    return graph;
+  }
+
+  /**
+   * Detect cycles in dependency graph using DFS
+   * @param {Object} graph - Dependency graph
+   * @returns {Array} Array of cycles found
+   */
+  detectCycles(graph) {
+    const cycles = [];
+    const visited = new Set();
+    const recursionStack = new Set();
+
+    const dfs = (fieldName, path = []) => {
+      if (recursionStack.has(fieldName)) {
+        // Cycle detected
+        const cycleStart = path.indexOf(fieldName);
+        const cycle = path.slice(cycleStart);
+        cycle.push(fieldName); // Complete the cycle
+        
+        // Check if this cycle is already recorded (avoid duplicates)
+        // Create a sorted copy for the key (don't mutate the original cycle array)
+        const cycleKey = [...cycle].sort().join('->');
+        if (!cycles.some(c => c.key === cycleKey)) {
+          cycles.push({
+            key: cycleKey,
+            fields: cycle,  // Keep original order for display
+            path: [...path, fieldName],
+          });
+        }
+        return;
+      }
+
+      if (visited.has(fieldName)) {
+        return;
+      }
+
+      visited.add(fieldName);
+      recursionStack.add(fieldName);
+      path.push(fieldName);
+
+      const node = graph.dependencies[fieldName];
+      if (node && node.dependsOn) {
+        node.dependsOn.forEach(dependency => {
+          dfs(dependency, [...path]);
+        });
+      }
+
+      recursionStack.delete(fieldName);
+    };
+
+    // Run DFS from each field
+    Object.keys(graph.dependencies).forEach(fieldName => {
+      if (!visited.has(fieldName)) {
+        dfs(fieldName);
+      }
+    });
+
+    return cycles;
+  }
+
+  /**
+   * Generate issues from detected cycles
+   */
+  generateIssues(cycles) {
+    return cycles.map(cycle => ({
+      severity: 'error',
+      type: 'rule-cycle',
+      message: `Circular dependency detected: ${cycle.fields.join(' → ')}`,
+      fields: cycle.fields,
+      path: cycle.path,
+      recommendation: 'Break the circular dependency by removing or modifying one of the rules. Circular dependencies can cause infinite loops and performance issues. Consider using events or consolidating the logic.',
+    }));
+  }
+
+  /**
+   * Compare before and after analyses
+   */
+  compare(beforeData, afterData) {
+    const resolvedCycles = (beforeData.cycleDetails || []).filter(beforeCycle =>
+      !(afterData.cycleDetails || []).some(afterCycle => afterCycle.key === beforeCycle.key)
+    );
+
+    return {
+      before: beforeData,
+      after: afterData,
+      delta: {
+        cycles: (afterData.cycles || 0) - (beforeData.cycles || 0),
+        totalRules: (afterData.totalRules || 0) - (beforeData.totalRules || 0),
+        slowRules: (afterData.slowRuleCount || 0) - (beforeData.slowRuleCount || 0),
+      },
+      newCycles: afterData.cycleDetails || [], // Report ALL cycles in current state
+      resolvedCycles,
+      slowRules: afterData.slowRules || [], // Top 10 slowest rules
+      slowRuleCount: afterData.slowRuleCount || 0,
+    };
+  }
+}
+
+
+
+;// CONCATENATED MODULE: ./src/analyzers/form-html-analyzer.js
+
+
+// Properties that force layout / are non-composited when animated
+const NON_COMPOSITED_ANIM_PROPS = new Set([
+  'top', 'left', 'right', 'bottom',
+  'width', 'height',
+  'margin', 'margin-top', 'margin-right', 'margin-bottom', 'margin-left',
+  'padding', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left',
+  'font-size',
+]);
+
+// CSS selectors / tag names considered "above the fold"
+const ABOVE_FOLD_SELECTORS = (/* unused pure expression or super */ null && ([
+  'header',
+  '.header',
+  '[class*="header"]',
+  '.banner',
+  '[class*="banner"]',
+]));
+
+/**
+ * Analyzes rendered form HTML for performance issues
+ * Focus: Client-side rendered form content
+ */
+class FormHTMLAnalyzer {
+  constructor(config = null) {
+    this.config = config;
+    
+    // Hero image detection configuration (with defaults)
+    this.heroConfig = {
+      enabled: true,
+      keywords: ['hero', 'banner', 'masthead', 'jumbotron', 'splash', 'featured'],
+      treatFirstImageAsHero: true,
+      minimumHeroSize: { width: 300, height: 200 },
+      checkParentContainer: true,
+      ...(config?.heroImageDetection || {})
+    };
+  }
+
+  /**
+   * Detect if an image is a hero/banner image that should NOT be lazy-loaded
+   * Multi-factor heuristic approach
+   */
+  isHeroImage(img, index, allImages) {
+    if (!this.heroConfig.enabled) {
+      return false; // If disabled, all images should be lazy-loaded
+    }
+    
+    // 1. Check image class/id for hero keywords
+    const imgClasses = (img.class || '').toLowerCase();
+    const imgId = (img.id || '').toLowerCase();
+    const keywords = this.heroConfig.keywords.join('|');
+    const heroRegex = new RegExp(keywords, 'i');
+    
+    if (heroRegex.test(imgClasses + imgId)) {
+      return true; // Explicit hero indicator in class/id
+    }
+    
+    // 2. Check if image has explicit eager loading attributes
+    //    (Next.js priority, fetchpriority, or loading="eager")
+    if (img.loading === 'eager' || img.fetchpriority === 'high' || img.priority === 'true') {
+      return true; // Developer explicitly marked as high priority
+    }
+    
+    // 3. First image in form heuristic
+    if (this.heroConfig.treatFirstImageAsHero && index === 0) {
+      // First image is often hero, but check if it's large enough
+      const width = parseInt(img.width) || 0;
+      const height = parseInt(img.height) || 0;
+      const minWidth = this.heroConfig.minimumHeroSize.width;
+      const minHeight = this.heroConfig.minimumHeroSize.height;
+      
+      // If no dimensions, assume it might be hero (safer to not flag)
+      if (!width && !height) {
+        return true; // First image without dimensions - likely hero
+      }
+      
+      // If dimensions exist, check if they exceed minimum hero size
+      if (width >= minWidth || height >= minHeight) {
+        return true; // First large image is likely hero
+      }
+    }
+    
+    // 4. Check parent container for hero-related classes
+    //    (e.g., <section class="hero-section"><img></section>)
+    if (this.heroConfig.checkParentContainer && img.parentClasses) {
+      const parentClasses = img.parentClasses.toLowerCase();
+      if (heroRegex.test(parentClasses)) {
+        return true; // Inside a hero container
+      }
+    }
+    
+    // Not a hero image - should be lazy-loaded
+    return false;
+  }
+
+  /**
+   * Analyze form HTML for performance issues
+   * @param {string} html - HTML content
+   * @returns {Object} Analysis results
+   */
+  analyze(html) {
+    if (!html) {
+      return { error: 'No HTML provided' };
+    }
+
+    const $ = load_parse_load(html);
+    
+    // Find the form container (adaptive forms typically render in main or specific container)
+    const formContainer = $('main, [class*="form"], form').first();
+    
+    if (!formContainer.length) {
+      return { error: 'No form container found in HTML' };
+    }
+
+    return {
+      images: this.analyzeFormImages($, formContainer),
+      scripts: this.analyzePageScripts($), // Analyze ALL scripts on page (not just in form)
+      resources: this.analyzeFormResources($, formContainer),
+      rendering: this.analyzeRenderingPerformance($, formContainer),
+      aboveFoldLazyIssues: this.detectAboveFoldLazyImages($),
+      imageUrls: this.collectImageUrls($),
+      issues: [],
+    };
+  }
+
+  /**
+   * Analyze images within the form
+   */
+  analyzeFormImages($, container) {
+    const images = container.find('img').map((i, img) => {
+      const $img = $(img);
+      const $parent = $img.parent();
+      
+      return {
+        src: $img.attr('src'),
+        alt: $img.attr('alt'),
+        loading: $img.attr('loading'),
+        fetchpriority: $img.attr('fetchpriority'),
+        priority: $img.attr('priority'),
+        width: $img.attr('width'),
+        height: $img.attr('height'),
+        class: $img.attr('class'),
+        id: $img.attr('id'),
+        parentClasses: $parent.attr('class') || '',
+        hasLazyLoading: $img.attr('loading') === 'lazy',
+        hasDimensions: !!($img.attr('width') && $img.attr('height')),
+      };
+    }).get();
+
+    const nonLazyImages = images.filter(img => !img.hasLazyLoading);
+    const imagesWithoutDimensions = images.filter(img => !img.hasDimensions);
+
+    return {
+      total: images.length,
+      lazyLoaded: images.filter(img => img.hasLazyLoading).length,
+      nonLazyLoaded: nonLazyImages.length,
+      withoutDimensions: imagesWithoutDimensions.length,
+      images,
+      nonLazyImages,
+      imagesWithoutDimensions,
+    };
+  }
+
+  /**
+   * Analyze ALL scripts on the page (not just within form)
+   * Scripts anywhere on the page can block form rendering
+   */
+  analyzePageScripts($) {
+    // Analyze ALL scripts on the entire page
+    const inlineScripts = $('script:not([src])').map((i, script) => {
+      const content = $(script).html();
+      const $script = $(script);
+      return {
+        size: content.length,
+        hasContent: content.length > 0,
+        location: this.getScriptLocation($, $script),
+      };
+    }).get();
+
+    const externalScripts = $('script[src]').map((i, script) => {
+      const $script = $(script);
+      return {
+        src: $script.attr('src'),
+        async: $script.attr('async') !== undefined,
+        defer: $script.attr('defer') !== undefined,
+        location: this.getScriptLocation($, $script),
+      };
+    }).get();
+
+    return {
+      inline: inlineScripts.length,
+      inlineSize: inlineScripts.reduce((sum, s) => sum + s.size, 0),
+      external: externalScripts.length,
+      blocking: externalScripts.filter(s => !s.async && !s.defer).length,
+      scripts: {
+        inline: inlineScripts,
+        external: externalScripts,
+      },
+    };
+  }
+
+  /**
+   * Determine script location on page (head, body, etc.)
+   */
+  getScriptLocation($, $script) {
+    if ($script.closest('head').length) return 'head';
+    if ($script.closest('body').length) return 'body';
+    return 'unknown';
+  }
+
+  /**
+   * Analyze resources loaded within form
+   */
+  analyzeFormResources($, container) {
+    // Check for iframes (can block rendering)
+    const iframes = container.find('iframe').map((i, iframe) => {
+      const $iframe = $(iframe);
+      return {
+        src: $iframe.attr('src'),
+        loading: $iframe.attr('loading'),
+      };
+    }).get();
+
+    // Check for videos
+    const videos = container.find('video').map((i, video) => {
+      const $video = $(video);
+      return {
+        src: $video.attr('src'),
+        preload: $video.attr('preload'),
+        autoplay: $video.attr('autoplay') !== undefined,
+      };
+    }).get();
+
+    // Check for large data attributes (can bloat HTML)
+    // Note: [data-*] is not valid CSS, so we check all elements
+    const elementsWithLargeData = container.find('*').filter((i, elem) => {
+      const attrs = elem.attribs || {};
+      let totalDataSize = 0;
+      
+      // Sum up all data-* attribute sizes
+      Object.keys(attrs).forEach(attr => {
+        if (attr.startsWith('data-')) {
+          totalDataSize += (attrs[attr] || '').length;
+        }
+      });
+      
+      return totalDataSize > 5000; // 5KB threshold
+    }).length;
+
+    return {
+      iframes: iframes.length,
+      videos: videos.length,
+      autoplayVideos: videos.filter(v => v.autoplay).length,
+      elementsWithLargeData,
+      iframeList: iframes,
+      videoList: videos,
+    };
+  }
+
+  /**
+   * Analyze rendering performance factors
+   */
+  analyzeRenderingPerformance($, container) {
+    // Count DOM elements in form
+    const totalElements = container.find('*').length;
+    
+    // Count elements with inline styles (can slow down rendering)
+    const inlineStyleElements = container.find('[style]').length;
+    
+    // Count deeply nested elements
+    const maxDepth = this.calculateMaxDepth($, container);
+    
+    // Count form fields (inputs, selects, textareas)
+    const formFields = container.find('input, select, textarea, button').length;
+    
+    // Check for visibility: hidden elements (DOM bloat)
+    const hiddenElements = container.find('[style*="display:none"], [style*="display: none"], [hidden]').length;
+
+    return {
+      totalElements,
+      maxDepth,
+      formFields,
+      inlineStyleElements,
+      hiddenElements,
+    };
+  }
+
+  /**
+   * Calculate maximum DOM depth
+   */
+  calculateMaxDepth($, element, currentDepth = 0) {
+    const children = $(element).children();
+    if (children.length === 0) {
+      return currentDepth;
+    }
+
+    let maxChildDepth = currentDepth;
+    children.each((i, child) => {
+      const depth = this.calculateMaxDepth($, child, currentDepth + 1);
+      maxChildDepth = Math.max(maxChildDepth, depth);
+    });
+
+    return maxChildDepth;
+  }
+
+  /**
+   * Classify image URLs (with known sizes) into issues.
+   * Called from analyzeWithIssues (sync) or tests directly.
+   * @param {Array<{url: string, fileSizeKb: number|null}>} imageSizes
+   * @returns {Array} issues
+   */
+  classifyImageIssues(imageSizes) {
+    const issues = [];
+
+    for (const { url, fileSizeKb } of imageSizes) {
+      const isGif = /\.gif(\?|$)/i.test(url);
+
+      if (isGif) {
+        if (fileSizeKb === null) {
+          // HEAD request failed — flag on URL alone
+          issues.push({
+            severity: 'warning',
+            type: 'animated-gif-detected',
+            url,
+            fileSizeKb: null,
+            message: `Animated GIF detected: "${url}". GIF format is inefficient regardless of size.`,
+            recommendation: 'Replace GIFs with video (<video autoplay loop muted playsinline>) or WebP animations for smaller file size and better performance.',
+          });
+        } else if (fileSizeKb > 200) {
+          issues.push({
+            severity: 'error',
+            type: 'animated-gif-detected',
+            url,
+            fileSizeKb,
+            message: `Large animated GIF (${fileSizeKb.toFixed(1)} KB): "${url}". Severely impacts page weight.`,
+            recommendation: 'Replace GIFs with video (<video autoplay loop muted playsinline>) or WebP animations for smaller file size and better performance.',
+          });
+        } else if (fileSizeKb > 50) {
+          issues.push({
+            severity: 'warning',
+            type: 'animated-gif-detected',
+            url,
+            fileSizeKb,
+            message: `Animated GIF (${fileSizeKb.toFixed(1)} KB): "${url}". GIF format is inefficient.`,
+            recommendation: 'Replace GIFs with video (<video autoplay loop muted playsinline>) or WebP animations for smaller file size and better performance.',
+          });
+        }
+      }
+
+      // Oversized image check — applies to ALL formats (when size is known)
+      if (fileSizeKb !== null) {
+        if (fileSizeKb > 500) {
+          issues.push({
+            severity: 'error',
+            type: 'oversized-image',
+            url,
+            fileSizeKb,
+            message: `Oversized image (${fileSizeKb.toFixed(1)} KB): "${url}". Exceeds 500 KB threshold.`,
+            recommendation: 'Compress and resize images. Use modern formats (WebP/AVIF). Target < 150 KB for most images.',
+          });
+        } else if (fileSizeKb > 150) {
+          issues.push({
+            severity: 'warning',
+            type: 'oversized-image',
+            url,
+            fileSizeKb,
+            message: `Large image (${fileSizeKb.toFixed(1)} KB): "${url}". Exceeds 150 KB warning threshold.`,
+            recommendation: 'Compress and resize images. Use modern formats (WebP/AVIF). Target < 150 KB for most images.',
+          });
+        }
+      }
+    }
+
+    return issues;
+  }
+
+  /**
+   * Collect image URLs from HTML (img src + source type=image/gif).
+   * @param {CheerioAPI} $ - Cheerio instance
+   * @returns {string[]} array of absolute-or-relative URLs
+   */
+  collectImageUrls($) {
+    const urls = new Set();
+
+    $('img[src]').each((_, el) => {
+      const src = $(el).attr('src');
+      if (src && !src.startsWith('data:')) {
+        urls.add(src);
+      }
+    });
+
+    // <picture><source type="image/gif" srcset="...">
+    $('source[type="image/gif"]').each((_, el) => {
+      const srcset = $(el).attr('srcset') || $(el).attr('src');
+      if (srcset && !srcset.startsWith('data:')) {
+        // srcset may have multiple values; take the first URL part
+        const firstUrl = srcset.split(',')[0].trim().split(/\s+/)[0];
+        if (firstUrl) urls.add(firstUrl);
+      }
+    });
+
+    return Array.from(urls);
+  }
+
+  /**
+   * Fetch Content-Length for a list of URLs using HEAD requests.
+   * Max 10 concurrent, 3s timeout per request. Never throws.
+   * @param {string[]} urls
+   * @returns {Promise<Map<string, number|null>>} url → fileSizeKb (or null on failure)
+   */
+  async fetchImageSizes(urls) {
+    const result = new Map();
+    const CONCURRENCY = 10;
+    const TIMEOUT_MS = 3000;
+
+    async function fetchOne(url) {
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+        const resp = await fetch(url, { method: 'HEAD', signal: controller.signal });
+        clearTimeout(timer);
+        const contentLength = resp.headers.get('content-length');
+        return contentLength ? parseInt(contentLength, 10) / 1024 : null;
+      } catch {
+        return null;
+      }
+    }
+
+    // Process in batches of CONCURRENCY
+    for (let i = 0; i < urls.length; i += CONCURRENCY) {
+      const batch = urls.slice(i, i + CONCURRENCY);
+      const sizes = await Promise.all(batch.map(fetchOne));
+      batch.forEach((url, idx) => result.set(url, sizes[idx]));
+    }
+
+    return result;
+  }
+
+  /**
+   * Detect above-fold images with loading="lazy".
+   * Checks:
+   *  1. Any <img loading="lazy"> inside header/.header/[class*="header"]/.banner/[class*="banner"]
+   *  2. The first <img> on the page that is lazy but has no fetchpriority="high"
+   * @param {CheerioAPI} $
+   * @returns {Array} issues
+   */
+  detectAboveFoldLazyImages($) {
+    const issues = [];
+    const seen = new Set();
+
+    // Check 1 — images in above-fold containers
+    const aboveFoldContainerSelectors = [
+      'header',
+      '.header',
+      '[class*="header"]',
+      '.banner',
+      '[class*="banner"]',
+    ];
+
+    for (const containerSel of aboveFoldContainerSelectors) {
+      $(`${containerSel} img[loading="lazy"]`).each((_, el) => {
+        const $img = $(el);
+        const src = $img.attr('src') || '';
+        if (seen.has(src)) return;
+        seen.add(src);
+
+        issues.push({
+          severity: 'warning',
+          type: 'above-fold-image-lazy-loaded',
+          url: src,
+          alt: $img.attr('alt') || '',
+          container: containerSel,
+          message: `Above-fold image "${src}" inside "${containerSel}" has loading="lazy". This delays LCP.`,
+          recommendation: 'Use loading="eager" (or omit the loading attribute) for images inside header/banner containers. Reserve lazy loading for below-fold images.',
+        });
+      });
+    }
+
+    // Check 2 — first <img> on the entire page that is lazy without fetchpriority="high"
+    const allImgs = $('img').toArray();
+    if (allImgs.length > 0) {
+      const firstImg = $(allImgs[0]);
+      const isLazy = firstImg.attr('loading') === 'lazy';
+      const hasFetchPriority = firstImg.attr('fetchpriority') === 'high';
+      const src = firstImg.attr('src') || '';
+
+      if (isLazy && !hasFetchPriority && !seen.has(src)) {
+        seen.add(src);
+        issues.push({
+          severity: 'warning',
+          type: 'above-fold-image-lazy-loaded',
+          url: src,
+          alt: firstImg.attr('alt') || '',
+          container: 'first-image-on-page',
+          message: `First image on page "${src}" has loading="lazy" without fetchpriority="high". This delays LCP.`,
+          recommendation: 'The first visible image should use loading="eager" or fetchpriority="high" to ensure fast LCP.',
+        });
+      }
+    }
+
+    return issues;
+  }
+
+  /**
+   * Static analysis of JS files for loadFragment() calls without eager override.
+   * @param {Array<{filename: string, content: string}>} jsFiles
+   * @returns {Array} issues
+   */
+  detectFragmentIssues(jsFiles) {
+    const issues = [];
+
+    if (!jsFiles || jsFiles.length === 0) {
+      return issues;
+    }
+
+    for (const { filename, content } of jsFiles) {
+      // Find all loadFragment( calls and their line numbers
+      const lines = content.split('\n');
+      const loadFragmentLines = [];
+
+      lines.forEach((line, idx) => {
+        if (line.includes('loadFragment(')) {
+          loadFragmentLines.push(idx + 1); // 1-based line number
+        }
+      });
+
+      if (loadFragmentLines.length === 0) continue;
+
+      // Check if the file contains an eager override anywhere
+      // Patterns: img.loading = 'eager' / img.loading='eager' / loading = 'eager' / setAttribute('loading', 'eager')
+      const hasEagerOverride = /img\.loading\s*=\s*['"]eager['"]/.test(content)
+        || /loading\s*=\s*['"]eager['"]/.test(content)
+        || /setAttribute\s*\(\s*['"]loading['"]\s*,\s*['"]eager['"]/.test(content);
+
+      if (!hasEagerOverride) {
+        issues.push({
+          severity: 'warning',
+          type: 'fragment-images-not-eagerly-loaded',
+          file: filename,
+          line: loadFragmentLines[0],
+          message: `loadFragment() called in "${filename}" but no img.loading = 'eager' override found. Fragment images will default to lazy loading.`,
+          recommendation: "After loadFragment(), set eager loading on images: fragment.querySelectorAll('img').forEach(img => { img.loading = 'eager'; })",
+        });
+      }
+    }
+
+    return issues;
+  }
+
+  /**
+   * Detect form HTML performance issues
+   */
+  detectIssues(analysis) {
+    const issues = [];
+
+    // Images without lazy loading (EXCLUDE hero/banner images)
+    if (analysis.images.nonLazyLoaded > 0) {
+      // Filter out hero/banner images (which should be eager-loaded for LCP)
+      const nonHeroImages = analysis.images.nonLazyImages.filter((img, index) => {
+        return !this.isHeroImage(img, index, analysis.images.nonLazyImages);
+      });
+      
+      if (nonHeroImages.length > 0) {
+        const heroCount = analysis.images.nonLazyLoaded - nonHeroImages.length;
+        issues.push({
+          severity: 'error', // CRITICAL: All non-hero images must be lazy loaded
+          type: 'images-not-lazy-loaded',
+          message: `${nonHeroImages.length} image(s) in form without lazy loading. This blocks form rendering and impacts LCP.${heroCount > 0 ? ` (${heroCount} hero image(s) excluded)` : ''}`,
+          count: nonHeroImages.length,
+          images: nonHeroImages.map(img => img.src),
+          recommendation: 'Add loading="lazy" attribute to all images EXCEPT hero/banner images (first visible image above the fold). Hero images should be eager-loaded for LCP optimization.',
+        });
+      }
+    }
+
+    // Images without dimensions (causes layout shift)
+    if (analysis.images.withoutDimensions > 0) {
+      issues.push({
+        severity: 'info',
+        type: 'images-without-dimensions',
+        message: `${analysis.images.withoutDimensions} image(s) without width/height attributes. This can cause layout shifts.`,
+        count: analysis.images.withoutDimensions,
+        recommendation: 'Add width and height attributes to prevent Cumulative Layout Shift (CLS).',
+      });
+    }
+
+    // Inline scripts on page (ALWAYS blocking - they execute synchronously)
+    if (analysis.scripts.inline > 0) {
+      const inHead = analysis.scripts.scripts.inline.filter(s => s.location === 'head').length;
+      const inBody = analysis.scripts.scripts.inline.filter(s => s.location === 'body').length;
+      
+      issues.push({
+        severity: 'error',
+        type: 'inline-scripts-on-page',
+        message: `${analysis.scripts.inline} inline script(s) on page (${(analysis.scripts.inlineSize / 1024).toFixed(2)} KB) - ${inHead} in HEAD, ${inBody} in BODY. Inline scripts ALWAYS block form rendering.`,
+        size: analysis.scripts.inlineSize,
+        count: analysis.scripts.inline,
+        breakdown: { head: inHead, body: inBody },
+        recommendation: 'All JavaScript should be in external files with defer attribute. Move inline scripts to external files loaded with defer. Scripts in HEAD especially delay form rendering.',
+      });
+    }
+
+    // Blocking external scripts (without async/defer)
+    if (analysis.scripts.blocking > 0) {
+      const blockingScripts = analysis.scripts.scripts.external.filter(s => !s.async && !s.defer);
+      const inHead = blockingScripts.filter(s => s.location === 'head').length;
+      const inBody = blockingScripts.filter(s => s.location === 'body').length;
+      
+      // Build script list for message
+      const scriptNames = blockingScripts.map(s => s.src).join(', ');
+      
+      issues.push({
+        severity: 'error',
+        type: 'blocking-scripts-on-page',
+        message: `${analysis.scripts.blocking} synchronous script(s) on page without async/defer - ${inHead} in HEAD, ${inBody} in BODY. Scripts: ${scriptNames}`,
+        count: analysis.scripts.blocking,
+        breakdown: { head: inHead, body: inBody },
+        scripts: blockingScripts,
+        recommendation: 'Add defer attribute to all script tags above. Use defer (not async) for forms to maintain execution order. Scripts in HEAD are especially critical.',
+      });
+    }
+
+    // Iframes (blocking)
+    if (analysis.resources.iframes > 0) {
+      issues.push({
+        severity: 'warning',
+        type: 'iframes-in-form',
+        message: `${analysis.resources.iframes} iframe(s) in form. Iframes block rendering and add overhead.`,
+        count: analysis.resources.iframes,
+        recommendation: 'Consider lazy loading iframes or using alternative approaches.',
+      });
+    }
+
+    // Autoplay videos
+    if (analysis.resources.autoplayVideos > 0) {
+      issues.push({
+        severity: 'warning',
+        type: 'autoplay-videos',
+        message: `${analysis.resources.autoplayVideos} autoplaying video(s) in form. This impacts performance and user experience.`,
+        count: analysis.resources.autoplayVideos,
+        recommendation: 'Remove autoplay or use lazy loading for videos.',
+      });
+    }
+
+    // Large data attributes
+    if (analysis.resources.elementsWithLargeData > 0) {
+      issues.push({
+        severity: 'info',
+        type: 'large-data-attributes',
+        message: `${analysis.resources.elementsWithLargeData} element(s) with large data attributes (>5KB). This bloats HTML size.`,
+        count: analysis.resources.elementsWithLargeData,
+        recommendation: 'Consider storing large data in JavaScript variables instead of data attributes.',
+      });
+    }
+
+    // Too many hidden elements (DOM bloat)
+    if (analysis.rendering.hiddenElements > 10) {
+      issues.push({
+        severity: 'info',
+        type: 'excessive-hidden-elements',
+        message: `${analysis.rendering.hiddenElements} hidden elements in form. This increases DOM size unnecessarily.`,
+        count: analysis.rendering.hiddenElements,
+        recommendation: 'Remove hidden elements from DOM and add them dynamically when needed.',
+      });
+    }
+
+    // Excessive inline styles
+    if (analysis.rendering.inlineStyleElements > 20) {
+      issues.push({
+        severity: 'info',
+        type: 'excessive-inline-styles',
+        message: `${analysis.rendering.inlineStyleElements} elements with inline styles. This prevents style reuse and increases HTML size.`,
+        count: analysis.rendering.inlineStyleElements,
+        recommendation: 'Use CSS classes instead of inline styles.',
+      });
+    }
+
+    // Large DOM size (impacts INP, TBT, and overall responsiveness)
+    // Google recommendation: < 1,500 nodes, warn at 800, error at 1,500
+    const domThresholds = this.config?.thresholds?.html?.maxDomNodes || { warning: 800, critical: 1500 };
+    
+    if (analysis.rendering.totalElements > domThresholds.critical) {
+      issues.push({
+        severity: 'error',
+        type: 'excessive-dom-size',
+        message: `${analysis.rendering.totalElements} DOM nodes in rendered form (threshold: ${domThresholds.critical}). Large DOM severely impacts INP (Interaction to Next Paint) and form responsiveness.`,
+        count: analysis.rendering.totalElements,
+        threshold: domThresholds.critical,
+        recommendation: 'Reduce DOM complexity: Remove unnecessary hidden fields, simplify nested structures, use lazy rendering for large lists, consolidate panels. Each interaction must traverse all ${analysis.rendering.totalElements} nodes, causing slow responses.',
+      });
+    } else if (analysis.rendering.totalElements > domThresholds.warning) {
+      issues.push({
+        severity: 'warning',
+        type: 'large-dom-size',
+        message: `${analysis.rendering.totalElements} DOM nodes in rendered form (warning threshold: ${domThresholds.warning}). This impacts INP and can slow down interactions.`,
+        count: analysis.rendering.totalElements,
+        threshold: domThresholds.warning,
+        recommendation: 'Consider reducing DOM size. Target < 800 nodes for optimal INP. Focus on: removing unnecessary hidden fields (see Hidden Fields section), simplifying component structure, lazy loading content.',
+      });
+    }
+
+    // Above-fold images with lazy loading (Gap 2)
+    if (analysis.aboveFoldLazyIssues && analysis.aboveFoldLazyIssues.length > 0) {
+      issues.push(...analysis.aboveFoldLazyIssues);
+    }
+
+    return issues;
+  }
+
+  /**
+   * Perform full analysis with issue detection.
+   * Optionally accepts jsFiles for Gap 5 (fragment eager-load check).
+   */
+  analyzeWithIssues(html, jsFiles = []) {
+    const analysis = this.analyze(html);
+    if (analysis.error) {
+      return analysis;
+    }
+
+    analysis.issues = this.detectIssues(analysis);
+
+    // Gap 5 — fragment eager-load check (static JS analysis)
+    if (jsFiles && jsFiles.length > 0) {
+      analysis.issues.push(...this.detectFragmentIssues(jsFiles));
+    }
+
+    return analysis;
+  }
+
+  /**
+   * Compare before and after HTML analyses
+   */
+  compare(beforeHtml, afterHtml) {
+    const beforeAnalysis = this.analyzeWithIssues(beforeHtml);
+    const afterAnalysis = this.analyzeWithIssues(afterHtml);
+
+    if (beforeAnalysis.error || afterAnalysis.error) {
+      return { 
+        error: beforeAnalysis.error || afterAnalysis.error,
+        before: beforeAnalysis,
+        after: afterAnalysis,
+      };
+    }
+
+    return {
+      before: beforeAnalysis,
+      after: afterAnalysis,
+      delta: {
+        images: afterAnalysis.images.total - beforeAnalysis.images.total,
+        nonLazyImages: afterAnalysis.images.nonLazyLoaded - beforeAnalysis.images.nonLazyLoaded,
+        totalElements: afterAnalysis.rendering.totalElements - beforeAnalysis.rendering.totalElements,
+        hiddenElements: afterAnalysis.rendering.hiddenElements - beforeAnalysis.rendering.hiddenElements,
+        blockingScripts: afterAnalysis.scripts.blocking - beforeAnalysis.scripts.blocking,
+      },
+      newIssues: afterAnalysis.issues.filter(afterIssue =>
+        !beforeAnalysis.issues.some(beforeIssue => beforeIssue.type === afterIssue.type)
+      ),
+      resolvedIssues: beforeAnalysis.issues.filter(beforeIssue =>
+        !afterAnalysis.issues.some(afterIssue => afterIssue.type === beforeIssue.type)
+      ),
+    };
+  }
+}
+
+
+;// CONCATENATED MODULE: ./src/analyzers/form-css-analyzer.js
+/**
+ * Analyzes CSS for form-specific performance and architectural issues
+ * Focus: Issues that linters cannot detect (architectural, not syntax)
+ */
+class FormCSSAnalyzer {
+  constructor(config = null) {
+    this.config = config;
+  }
+
+  /**
+   * Analyze CSS files for form-specific issues
+   * @param {Array} cssFiles - Array of {filename, content} objects
+   * @returns {Object} Analysis results
+   */
+  analyze(cssFiles) {
+    if (!cssFiles || cssFiles.length === 0) {
+      return { 
+        filesAnalyzed: 0,
+        issues: [],
+        summary: {},
+      };
+    }
+
+    const allIssues = [];
+    const summary = {
+      totalFiles: cssFiles.length,
+      backgroundImages: 0,
+      importantRules: 0,
+      inlineDataURIs: 0,
+      deepSelectors: 0,
+      duplicateSelectors: 0,
+    };
+
+    cssFiles.forEach(file => {
+      const fileIssues = this.analyzeFile(file.filename, file.content);
+      allIssues.push(...fileIssues);
+
+      // Update summary
+      fileIssues.forEach(issue => {
+        if (issue.type === 'css-background-image') summary.backgroundImages++;
+        if (issue.type === 'excessive-important') summary.importantRules += issue.count || 0;
+        if (issue.type === 'inline-data-uri') summary.inlineDataURIs++;
+        if (issue.type === 'deep-selector') summary.deepSelectors++;
+        if (issue.type === 'duplicate-selector') summary.duplicateSelectors++;
+      });
+    });
+
+    return {
+      filesAnalyzed: cssFiles.length,
+      issues: allIssues,
+      summary,
+    };
+  }
+
+  /**
+   * Strip CSS comments from content
+   * This ensures we don't flag commented-out code
+   * Handles both standard CSS and preprocessor (//) comments and HTML comments <!-- -->
+   */
+  stripComments(content) {
+    // Remove /* ... */ style comments (standard CSS)
+    let cleaned = content.replace(/\/\*[\s\S]*?\*\//g, '');
+    
+    // Remove // style comments (SCSS/LESS/SASS)
+    // Match // to end of line, but preserve the newline for accurate line numbers
+    cleaned = cleaned.replace(/\/\/.*$/gm, '');
+    
+    return cleaned;
+  }
+
+  /**
+   * Analyze a single CSS file
+   */
+  analyzeFile(filename, content) {
+    const issues = [];
+
+    // Strip comments to avoid flagging commented-out code
+    const activeContent = this.stripComments(content);
+
+    // Check for background-image usage (should use Image component)
+    issues.push(...this.detectBackgroundImages(filename, activeContent, content));
+
+    // Check for inline data URIs (bloat CSS)
+    issues.push(...this.detectInlineDataURIs(filename, activeContent, content));
+
+    // Check for excessive !important usage
+    issues.push(...this.detectExcessiveImportant(filename, activeContent, content));
+
+    // Check for overly specific selectors (performance)
+    issues.push(...this.detectDeepSelectors(filename, activeContent, content));
+
+    // Check for duplicate selectors (maintainability)
+    issues.push(...this.detectDuplicateSelectors(filename, activeContent, content));
+
+    // Check for render-blocking CSS patterns
+    issues.push(...this.detectRenderBlockingPatterns(filename, activeContent, content));
+
+    // Check for missing CSS custom properties for theming
+    issues.push(...this.detectHardcodedColors(filename, activeContent, content));
+
+    // Check for large CSS files (use original content for size)
+    issues.push(...this.detectLargeFiles(filename, content));
+
+    // Check for non-composited animations
+    issues.push(...this.detectNonCompositedAnimations(filename, activeContent));
+
+    // Check for missing will-change on transform transitions/animations
+    issues.push(...this.detectMissingWillChange(filename, activeContent));
+
+    return issues;
+  }
+
+  /**
+   * Detect CSS background-image usage
+   * Issue: Should use Image component for lazy loading and optimization
+   * @param {string} filename - The CSS filename
+   * @param {string} activeContent - Content with comments stripped
+   * @param {string} originalContent - Original content with comments (for line numbers)
+   */
+  detectBackgroundImages(filename, activeContent, originalContent) {
+    const issues = [];
+    const backgroundImagePattern = /background(-image)?:\s*url\(['"]?([^'"()]+)['"]?\)/gi;
+    
+    let match;
+    while ((match = backgroundImagePattern.exec(activeContent)) !== null) {
+      const imageUrl = match[2];
+      
+      // Skip data URIs (handled separately)
+      if (imageUrl.startsWith('data:')) continue;
+      
+      // Skip SVG patterns/gradients
+      if (imageUrl.includes('.svg') && activeContent.includes('background-repeat')) continue;
+      
+      const lineNumber = this.getLineNumber(activeContent, match.index);
+      
+      // Extract the CSS selector that contains this background-image
+      const selector = this.extractSelectorAtPosition(activeContent, match.index);
+
+      issues.push({
+        severity: 'error',
+        type: 'css-background-image',
+        file: filename,
+        line: lineNumber,
+        message: `CSS background-image detected: "${imageUrl}". Must use Image component instead.`,
+        imageUrl,
+        selector,  // Add selector for AI fix to extract dimensions
+        recommendation: 'Replace with <Image> component for better lazy loading, responsive images, and automatic optimization. Background images cannot be lazy loaded and block form rendering.',
+      });
+    }
+
+    return issues;
+  }
+  
+  /**
+   * Extract CSS selector at a given position in the content
+   * Works backwards from position to find the selector before the opening {
+   */
+  extractSelectorAtPosition(content, position) {
+    // Find the opening brace before this position
+    let bracePos = content.lastIndexOf('{', position);
+    if (bracePos === -1) return null;
+    
+    // Find the closing brace of the previous rule (or start of file)
+    let prevCloseBrace = content.lastIndexOf('}', bracePos);
+    let startPos = prevCloseBrace === -1 ? 0 : prevCloseBrace + 1;
+    
+    // Extract the selector (text between previous } and current {)
+    const selectorText = content.substring(startPos, bracePos).trim();
+    
+    // Clean up: remove comments, @import statements, newlines, etc.
+    const cleanSelector = selectorText
+      .replace(/\/\*[\s\S]*?\*\//g, '') // Remove comments
+      .replace(/@import\s+url\([^)]+\);?/g, '') // Remove @import statements
+      .replace(/@import\s+['"][^'"]+['"];?/g, '') // Remove @import with quotes
+      .replace(/\s+/g, ' ')              // Normalize whitespace
+      .trim();
+    
+    return cleanSelector || 'this CSS rule';
+  }
+
+  /**
+   * Detect inline data URIs in CSS
+   * Issue: Bloats CSS file size and blocks rendering
+   */
+  detectInlineDataURIs(filename, activeContent, originalContent) {
+    const issues = [];
+    const dataUriPattern = /url\(['"]?(data:[^'"()]+)['"]?\)/gi;
+    
+    let match;
+    while ((match = dataUriPattern.exec(activeContent)) !== null) {
+      const dataUri = match[1];
+      const size = dataUri.length;
+      
+      // Flag data URIs larger than 5KB (they bloat CSS and block rendering)
+      if (size > 5120) { // 5KB threshold
+        const lineNumber = this.getLineNumber(activeContent, match.index);
+        
+        // All large data URIs are critical (>5KB) - they block rendering
+        const dataSize = size; // Use actual data URI size, not match[0]
+        
+        issues.push({
+          severity: 'error', // Always critical if >5KB
+          type: 'inline-data-uri',
+          file: filename,
+          line: lineNumber,
+          dataSize,
+          message: `Large inline data URI (${(size / 1024).toFixed(2)} KB) bloats CSS file and blocks rendering.`,
+          size,
+          recommendation: 'Extract to separate image file for better caching and lazy loading. Inline data URIs >5KB significantly impact performance.',
+        });
+      }
+    }
+
+    return issues;
+  }
+
+  /**
+   * Detect excessive !important usage
+   * Issue: Makes CSS hard to maintain and override
+   */
+  detectExcessiveImportant(filename, activeContent, originalContent) {
+    const issues = [];
+    const importantPattern = /!important/gi;
+    const matches = activeContent.match(importantPattern);
+    
+    if (matches && matches.length > 10) {
+      issues.push({
+        severity: 'info',
+        type: 'excessive-important',
+        file: filename,
+        message: `Excessive !important usage (${matches.length} times). This indicates specificity issues.`,
+        count: matches.length,
+        recommendation: 'Refactor CSS to reduce !important usage. Use proper specificity and BEM naming. Excessive !important makes forms hard to customize and theme.',
+      });
+    }
+
+    return issues;
+  }
+
+  /**
+   * Detect overly specific selectors
+   * Issue: Slow selector matching, hard to maintain
+   */
+  detectDeepSelectors(filename, activeContent, originalContent) {
+    const content = activeContent;
+    const issues = [];
+    
+    // Match selectors (simplified - captures most cases)
+    const selectorPattern = /([^{]+)\{/g;
+    
+    let match;
+    while ((match = selectorPattern.exec(content)) !== null) {
+      const selector = match[1].trim();
+      
+      // Skip @-rules
+      if (selector.startsWith('@')) continue;
+      
+      // Count selector depth (number of spaces/combinators)
+      const depth = (selector.match(/[\s>+~]/g) || []).length;
+      
+      // Flag selectors deeper than 4 levels
+      if (depth > 4) {
+        const lineNumber = this.getLineNumber(content, match.index);
+
+        issues.push({
+          severity: 'info',
+          type: 'deep-selector',
+          file: filename,
+          line: lineNumber,
+          message: `Overly specific selector (depth: ${depth}): "${selector.substring(0, 80)}..."`,
+          selector: selector,
+          depth,
+          recommendation: 'Use BEM or utility classes to reduce selector depth. Deep selectors slow down CSS matching in forms with many elements.',
+        });
+      }
+    }
+
+    return issues;
+  }
+
+  /**
+   * Detect duplicate selectors
+   * Issue: Maintainability and file size
+   */
+  detectDuplicateSelectors(filename, activeContent, originalContent) {
+    const content = activeContent;
+    const issues = [];
+    const selectorMap = new Map();
+    const selectorPattern = /([^{]+)\{/g;
+    
+    let match;
+    while ((match = selectorPattern.exec(content)) !== null) {
+      const selector = match[1].trim();
+      
+      if (selector.startsWith('@')) continue;
+      
+      if (selectorMap.has(selector)) {
+        selectorMap.get(selector).count++;
+        selectorMap.get(selector).positions.push(match.index);
+      } else {
+        selectorMap.set(selector, { count: 1, positions: [match.index] });
+      }
+    }
+
+    // Find duplicates
+    selectorMap.forEach((data, selector) => {
+      if (data.count > 2) {
+        const lineNumber = this.getLineNumber(content, data.positions[0]);
+
+        issues.push({
+          severity: 'info',
+          type: 'duplicate-selector',
+          file: filename,
+          line: lineNumber,
+          message: `Selector "${selector.substring(0, 60)}..." appears ${data.count} times.`,
+          selector,
+          count: data.count,
+          recommendation: 'Consolidate duplicate selectors to reduce CSS size and improve maintainability.',
+        });
+      }
+    });
+
+    return issues;
+  }
+
+  /**
+   * Detect render-blocking CSS patterns
+   * Issue: Delays form interactivity
+   */
+  detectRenderBlockingPatterns(filename, activeContent, originalContent) {
+    const issues = [];
+
+    // Check for @import (blocks rendering)
+    const importPattern = /@import\s+(?:url\()?['"]([^'"]+)['"](?:\))?/gi;
+    let match;
+    
+    while ((match = importPattern.exec(activeContent)) !== null) {
+      const importUrl = match[1];
+      const lineNumber = this.getLineNumber(activeContent, match.index);
+
+      issues.push({
+        severity: 'error',
+        type: 'css-import-blocking',
+        file: filename,
+        line: lineNumber,
+        message: `@import detected: "${importUrl}"`,
+        importUrl,
+        recommendation: 'Note: @import statements are bundled into a single CSS file during the build process, so this does not impact production performance. This warning is for development awareness only.',
+      });
+    }
+
+    // Check for large font files inline
+    const fontFacePattern = /@font-face\s*\{[^}]+url\(['"]?(data:[^'"()]+)['"]?\)/gi;
+    while ((match = fontFacePattern.exec(activeContent)) !== null) {
+      const dataUri = match[1];
+      if (dataUri.length > 10000) {
+        const lineNumber = this.getLineNumber(activeContent, match.index);
+
+        issues.push({
+          severity: 'warning',
+          type: 'inline-font-blocking',
+          file: filename,
+          line: lineNumber,
+          message: `Large inline font (${(dataUri.length / 1024).toFixed(2)} KB) blocks CSS parsing.`,
+          size: dataUri.length,
+          recommendation: 'Use external font files with font-display: swap. Inline fonts block form rendering.',
+        });
+      }
+    }
+
+    return issues;
+  }
+
+  /**
+   * Detect hardcoded colors (should use CSS variables for theming)
+   * Issue: Forms cannot be easily themed/customized
+   */
+  detectHardcodedColors(filename, activeContent, originalContent) {
+    const content = activeContent;
+    const issues = [];
+    
+    // Count color declarations
+    const hexColorPattern = /#[0-9a-fA-F]{3,6}/g;
+    const rgbColorPattern = /rgba?\([^)]+\)/g;
+    const hslColorPattern = /hsla?\([^)]+\)/g;
+    
+    const hexColors = (content.match(hexColorPattern) || []).length;
+    const rgbColors = (content.match(rgbColorPattern) || []).length;
+    const hslColors = (content.match(hslColorPattern) || []).length;
+    const totalColors = hexColors + rgbColors + hslColors;
+
+    // Check if using CSS custom properties
+    const cssVarPattern = /var\(--[^)]+\)/g;
+    const cssVars = (content.match(cssVarPattern) || []).length;
+
+    // If lots of hardcoded colors but few CSS variables, flag it
+    if (totalColors > 20 && cssVars < totalColors * 0.3) {
+      issues.push({
+        severity: 'info',
+        type: 'hardcoded-colors',
+        file: filename,
+        message: `${totalColors} hardcoded color values with only ${cssVars} CSS variables. Forms should use design tokens.`,
+        totalColors,
+        cssVars,
+        recommendation: 'Use CSS custom properties (--color-primary, --color-text, etc.) for better theming and consistency across forms. Hardcoded colors make forms hard to customize.',
+      });
+    }
+
+    return issues;
+  }
+
+  /**
+   * Detect large CSS files
+   * Issue: Slow to parse, blocks rendering
+   */
+  detectLargeFiles(filename, content) {
+    const issues = [];
+    const size = content.length;
+
+    // Flag files over 100KB
+    if (size > 100000) {
+      issues.push({
+        severity: 'warning',
+        type: 'large-css-file',
+        file: filename,
+        message: `Large CSS file (${(size / 1024).toFixed(2)} KB). Consider code splitting.`,
+        size,
+        recommendation: 'Split into critical and non-critical CSS. Load critical CSS inline and defer non-critical styles. Large CSS files delay form rendering.',
+      });
+    }
+
+    return issues;
+  }
+
+  /**
+   * Detect @keyframes that animate non-composited CSS properties.
+   * Non-composited properties force layout/paint and are expensive to animate.
+   * @param {string} filename
+   * @param {string} content - comment-stripped CSS
+   * @returns {Array} issues
+   */
+  detectNonCompositedAnimations(filename, content) {
+    const issues = [];
+
+    // Properties that are non-composited when animated
+    const nonCompositedProps = [
+      'top', 'left', 'right', 'bottom',
+      'width', 'height',
+      'margin', 'margin-top', 'margin-right', 'margin-bottom', 'margin-left',
+      'padding', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left',
+      'font-size',
+    ];
+
+    // Match @keyframes blocks: @keyframes name { ... }
+    // Use a manual scan to correctly handle nested braces
+    const keyframePattern = /@keyframes\s+([\w-]+)\s*\{/g;
+    let match;
+
+    while ((match = keyframePattern.exec(content)) !== null) {
+      const keyframeName = match[1];
+      const blockStart = match.index + match[0].length;
+
+      // Find the matching closing brace, tracking nesting
+      let depth = 1;
+      let i = blockStart;
+      while (i < content.length && depth > 0) {
+        if (content[i] === '{') depth++;
+        else if (content[i] === '}') depth--;
+        i++;
+      }
+      const blockContent = content.substring(blockStart, i - 1);
+
+      // Check if any non-composited property appears in this keyframe block
+      for (const prop of nonCompositedProps) {
+        // Match the property as a CSS property name (preceded by whitespace or { or ;)
+        const propPattern = new RegExp(`(?:^|[{;,\\s])${prop.replace('-', '\\-')}\\s*:`, 'm');
+        if (propPattern.test(blockContent)) {
+          const lineNumber = this.getLineNumber(content, match.index);
+          issues.push({
+            severity: 'warning',
+            type: 'non-composited-animation',
+            file: filename,
+            line: lineNumber,
+            property: prop,
+            keyframeName,
+            message: `@keyframes "${keyframeName}" animates non-composited property "${prop}". This forces layout/paint on every frame.`,
+            recommendation: `Replace "${prop}" animation with "transform" equivalent (e.g. translateX/Y for left/top, scaleX/Y for width/height). Non-composited animations cause jank.`,
+          });
+          break; // One issue per keyframe block — report the first offending property
+        }
+      }
+    }
+
+    return issues;
+  }
+
+  /**
+   * Detect transition/animation declarations referencing "transform" without will-change: transform.
+   * Covers:
+   *   - transition: ... transform ... (transform mentioned in transition value)
+   *   - animation: ... (rule block or global CSS has @keyframes using transform)
+   *   - rule block directly contains both animation: and transform:
+   * @param {string} filename
+   * @param {string} content - comment-stripped CSS
+   * @returns {Array} issues
+   */
+  detectMissingWillChange(filename, content) {
+    const issues = [];
+
+    // Pre-check: does this CSS file have any @keyframes that use transform?
+    const keyframesUseTransform = /@keyframes[\s\S]*?transform\s*:/i.test(content);
+
+    // Match rule blocks: selector { ... }
+    const ruleBlockPattern = /([^{}@][^{}]*?)\{([^{}]*)\}/g;
+    let match;
+
+    while ((match = ruleBlockPattern.exec(content)) !== null) {
+      const selector = match[1].trim();
+      const block = match[2];
+
+      // Skip @-rules (keyframes, media, etc.) and empty selectors
+      if (selector.startsWith('@') || selector === '') continue;
+
+      const hasTransformTransition = /transition\s*:[^;]*transform/i.test(block);
+      // animation: in rule block AND (transform in same block, or any keyframe uses transform)
+      const hasAnimation = /animation\s*:/i.test(block);
+      const hasAnimationWithTransform = hasAnimation && (/transform/i.test(block) || keyframesUseTransform);
+
+      if (hasTransformTransition || hasAnimationWithTransform) {
+        const hasWillChange = /will-change\s*:\s*transform/i.test(block);
+        if (!hasWillChange) {
+          const lineNumber = this.getLineNumber(content, match.index);
+          issues.push({
+            severity: 'info',
+            type: 'missing-will-change',
+            file: filename,
+            line: lineNumber,
+            selector: selector.substring(0, 80),
+            message: `Rule "${selector.substring(0, 60)}" uses transform transition/animation without will-change: transform.`,
+            recommendation: 'Add "will-change: transform" to hint the browser to promote this element to its own compositor layer, improving animation smoothness.',
+          });
+        }
+      }
+    }
+
+    return issues;
+  }
+
+  /**
+   * Get line number from content and index
+   */
+  getLineNumber(content, index) {
+    return content.substring(0, index).split('\n').length;
+  }
+
+  /**
+   * Compare before and after analyses
+   */
+  compare(beforeData, afterData) {
+    return {
+      before: beforeData,
+      after: afterData,
+      delta: {
+        backgroundImages: afterData.summary.backgroundImages - beforeData.summary.backgroundImages,
+        importantRules: afterData.summary.importantRules - beforeData.summary.importantRules,
+        inlineDataURIs: afterData.summary.inlineDataURIs - beforeData.summary.inlineDataURIs,
+      },
+      newIssues: afterData.issues.filter(afterIssue =>
+        !beforeData.issues.some(beforeIssue =>
+          beforeIssue.file === afterIssue.file &&
+          beforeIssue.type === afterIssue.type &&
+          beforeIssue.line === afterIssue.line
+        )
+      ),
+      resolvedIssues: beforeData.issues.filter(beforeIssue =>
+        !afterData.issues.some(afterIssue =>
+          afterIssue.file === beforeIssue.file &&
+          afterIssue.type === beforeIssue.type &&
+          afterIssue.line === beforeIssue.line
+        )
+      ),
+    };
+  }
+}
+
+
+;// CONCATENATED MODULE: ./src/analyzers/runtime-cls-analyzer.js
+
+
+
+
+/**
+ * Analyzes JavaScript files for runtime CSS/style/class manipulations
+ * that can cause CLS (Cumulative Layout Shift) during form load.
+ * 
+ * IMPORTANT: Only flags patterns that run during form initialization,
+ * NOT patterns in event handlers or user-triggered callbacks.
+ * 
+ * Detects:
+ * 1. Dynamic CSS loading (loadCSS, dynamic imports)
+ * 2. Dynamic style injection (createElement('style'), createElement('link'))
+ * 3. Dynamic class manipulation (classList.add/remove/toggle)
+ * 4. Direct style manipulation (element.style.xxx)
+ */
+class RuntimeCLSAnalyzer {
+  constructor(config = null) {
+    this.config = config;
+    
+    // Function names that indicate initialization context (FLAG these)
+    this.initializationFunctions = new Set([
+      'decorateForm',
+      'decorate',
+      'init',
+      'initialize',
+      'setup',
+      'loadBlock',
+      'loadEager',
+      'loadLazy',
+      'loadDelayed',
+    ]);
+    
+    // Event types that indicate user-triggered context (DON'T flag inside these)
+    this.userEventTypes = new Set([
+      'click',
+      'dblclick',
+      'mousedown',
+      'mouseup',
+      'mouseover',
+      'mouseout',
+      'mousemove',
+      'keydown',
+      'keyup',
+      'keypress',
+      'change',
+      'input',
+      'blur',
+      'focus',
+      'focusin',
+      'focusout',
+      'submit',
+      'reset',
+      'scroll',
+      'resize',
+      'touchstart',
+      'touchend',
+      'touchmove',
+      'drag',
+      'drop',
+      'dragstart',
+      'dragend',
+    ]);
+    
+    // Class names that are acceptable for state management (allowlist)
+    this.allowedStateClasses = new Set([
+      'valid',
+      'invalid',
+      'error',
+      'success',
+      'warning',
+      'focused',
+      'touched',
+      'dirty',
+      'pristine',
+      'disabled',
+      'readonly',
+      'loading',
+      'loaded',
+      'active',
+      'selected',
+      'checked',
+      'visible',
+      'hidden', // Note: hidden is ok as state class
+      'expanded',
+      'collapsed',
+      'open',
+      'closed',
+    ]);
+  }
+
+  /**
+   * Analyze JavaScript files for runtime CLS patterns
+   * @param {Array} jsFiles - Array of {filename, content} objects
+   * @returns {Object} Analysis results
+   */
+  analyze(jsFiles = []) {
+    if (!jsFiles || jsFiles.length === 0) {
+      return {
+        filesAnalyzed: 0,
+        issues: [],
+        summary: {
+          dynamicCSSLoading: 0,
+          dynamicStyleInjection: 0,
+          dynamicClassManipulation: 0,
+          directStyleManipulation: 0,
+        },
+      };
+    }
+
+    const allIssues = [];
+    const summary = {
+      dynamicCSSLoading: 0,
+      dynamicStyleInjection: 0,
+      dynamicClassManipulation: 0,
+      directStyleManipulation: 0,
+    };
+
+    // Prioritize decorateForm.js files
+    const sortedFiles = [...jsFiles].sort((a, b) => {
+      const aIsDecorate = a.filename.includes('decorateForm');
+      const bIsDecorate = b.filename.includes('decorateForm');
+      if (aIsDecorate && !bIsDecorate) return -1;
+      if (!aIsDecorate && bIsDecorate) return 1;
+      return 0;
+    });
+
+    for (const file of sortedFiles) {
+      try {
+        const fileIssues = this.analyzeFile(file);
+        allIssues.push(...fileIssues);
+
+        // Update summary
+        fileIssues.forEach(issue => {
+          if (issue.type === 'dynamic-css-loading') summary.dynamicCSSLoading++;
+          if (issue.type === 'dynamic-style-injection') summary.dynamicStyleInjection++;
+          if (issue.type === 'dynamic-class-manipulation') summary.dynamicClassManipulation++;
+          if (issue.type === 'direct-style-manipulation') summary.directStyleManipulation++;
+        });
+      } catch (error) {
+        lib_core.warning(`[RuntimeCLS] Failed to parse ${file.filename}: ${error.message}`);
+      }
+    }
+
+    lib_core.info(`[RuntimeCLS] Analyzed ${jsFiles.length} file(s), found ${allIssues.length} issue(s)`);
+    
+    return {
+      filesAnalyzed: jsFiles.length,
+      issues: allIssues,
+      summary,
+    };
+  }
+
+  /**
+   * Analyze a single JavaScript file
+   * @param {Object} file - {filename, content}
+   * @returns {Array} Issues found
+   */
+  analyzeFile(file) {
+    const issues = [];
+    const { filename, content } = file;
+
+    // Skip test files
+    if (filename.includes('test') || filename.includes('spec')) {
+      return issues;
+    }
+
+    // Parse JavaScript
+    let ast;
+    try {
+      ast = acorn_parse(content, {
+        ecmaVersion: 'latest',
+        sourceType: 'module',
+        locations: true,
+      });
+    } catch (error) {
+      // Skip files that can't be parsed
+      return issues;
+    }
+
+    // Track context: are we inside an initialization function or event handler?
+    const context = {
+      currentFunction: null,
+      isInsideEventHandler: false,
+      isInsideInitialization: false,
+      filename,
+      // decorateForm.js is ALWAYS initialization context
+      isDecorateFormFile: filename.includes('decorateForm'),
+    };
+
+    // Walk the AST
+    this.walkAST(ast, content, context, issues);
+
+    return issues;
+  }
+
+  /**
+   * Walk AST and detect CLS-causing patterns
+   */
+  walkAST(ast, content, context, issues) {
+    const self = this;
+
+    // Custom walker to track function context
+    ancestor(ast, {
+      // Track function declarations
+      FunctionDeclaration(node, ancestors) {
+        const funcName = node.id?.name;
+        const prevFunction = context.currentFunction;
+        const prevIsInit = context.isInsideInitialization;
+        
+        context.currentFunction = funcName;
+        context.isInsideInitialization = self.isInitializationFunction(funcName) || context.isDecorateFormFile;
+        
+        // Walk function body
+        self.analyzeNode(node.body, content, context, issues, ancestors);
+        
+        // Restore context
+        context.currentFunction = prevFunction;
+        context.isInsideInitialization = prevIsInit;
+      },
+
+      // Track arrow functions and function expressions
+      ArrowFunctionExpression(node, ancestors) {
+        self.handleFunctionExpression(node, ancestors, content, context, issues);
+      },
+
+      FunctionExpression(node, ancestors) {
+        self.handleFunctionExpression(node, ancestors, content, context, issues);
+      },
+
+      // Detect patterns at call expression level
+      CallExpression(node, ancestors) {
+        self.detectCallExpression(node, ancestors, content, context, issues);
+      },
+
+      // Detect dynamic import() expressions (for CSS imports)
+      ImportExpression(node, ancestors) {
+        self.detectImportExpression(node, ancestors, content, context, issues);
+      },
+
+      // Detect class manipulation and style access
+      MemberExpression(node, ancestors) {
+        self.detectMemberExpression(node, ancestors, content, context, issues);
+      },
+
+      // Detect assignments (for className, style.cssText, etc.)
+      AssignmentExpression(node, ancestors) {
+        self.detectAssignment(node, ancestors, content, context, issues);
+      },
+    });
+  }
+
+  /**
+   * Handle function expressions (arrow functions, anonymous functions)
+   */
+  handleFunctionExpression(node, ancestors, content, context, issues) {
+    // Check if this function is an event handler callback
+    const parent = ancestors[ancestors.length - 2];
+    
+    if (this.isEventHandlerCallback(parent, node)) {
+      // This is an event handler - don't flag patterns inside
+      const prevEventHandler = context.isInsideEventHandler;
+      context.isInsideEventHandler = true;
+      
+      this.analyzeNode(node.body, content, context, issues, ancestors);
+      
+      context.isInsideEventHandler = prevEventHandler;
+    } else {
+      // Check if assigned to an initialization function
+      const funcName = this.getFunctionName(parent, node);
+      const prevFunction = context.currentFunction;
+      const prevIsInit = context.isInsideInitialization;
+      
+      if (funcName) {
+        context.currentFunction = funcName;
+        context.isInsideInitialization = this.isInitializationFunction(funcName) || context.isDecorateFormFile;
+      }
+      
+      this.analyzeNode(node.body, content, context, issues, ancestors);
+      
+      context.currentFunction = prevFunction;
+      context.isInsideInitialization = prevIsInit;
+    }
+  }
+
+  /**
+   * Analyze a node for patterns
+   */
+  analyzeNode(node, content, context, issues, ancestors) {
+    // This is called by the walker, patterns are detected in specific handlers
+  }
+
+  /**
+   * Check if we're inside an event handler callback by examining ancestors
+   */
+  isInsideEventHandlerCallback(ancestors) {
+    // Walk up the ancestors to find if we're inside an event handler callback
+    for (let i = ancestors.length - 1; i >= 0; i--) {
+      const ancestor = ancestors[i];
+      
+      // Check for addEventListener call with our function as callback
+      if (ancestor.type === 'CallExpression') {
+        const calleeName = this.getCalleeName(ancestor.callee);
+        if (calleeName === 'addEventListener' || calleeName.endsWith('.addEventListener')) {
+          const eventType = ancestor.arguments[0];
+          if (eventType && this.userEventTypes.has(this.getStringValue(eventType))) {
+            return true;
+          }
+        }
+      }
+      
+      // Check for onXxx property assignment
+      if (ancestor.type === 'AssignmentExpression') {
+        const left = ancestor.left;
+        if (left && left.type === 'MemberExpression') {
+          const propName = left.property?.name;
+          if (propName && propName.startsWith('on')) {
+            const eventType = propName.slice(2).toLowerCase();
+            if (this.userEventTypes.has(eventType)) {
+              return true;
+            }
+          }
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Get the containing initialization function from ancestors
+   */
+  getInitializationContext(ancestors) {
+    for (let i = ancestors.length - 1; i >= 0; i--) {
+      const ancestor = ancestors[i];
+      
+      if (ancestor.type === 'FunctionDeclaration' && ancestor.id?.name) {
+        if (this.isInitializationFunction(ancestor.id.name)) {
+          return ancestor.id.name;
+        }
+      }
+      
+      if (ancestor.type === 'VariableDeclarator' && ancestor.id?.name) {
+        if (this.isInitializationFunction(ancestor.id.name)) {
+          return ancestor.id.name;
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
+   * True if this node is inside a callback passed to subscribe(...).
+   * Class/style inside subscribe callbacks can cause CLS unless inside the 'change' branch.
+   */
+  isInsideSubscribeCallback(ancestors) {
+    for (let i = ancestors.length - 1; i >= 0; i--) {
+      const ancestor = ancestors[i];
+      if (ancestor.type === 'ArrowFunctionExpression' || ancestor.type === 'FunctionExpression') {
+        const parent = ancestors[i - 1];
+        if (parent?.type === 'CallExpression') {
+          const calleeName = this.getCalleeName(parent.callee);
+          if (calleeName === 'subscribe' || calleeName.endsWith('.subscribe')) {
+            return true;
+          }
+        }
+        break;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * True if test expression is (variable) === value, e.g. eventType === 'register',
+   * a === 'change', etc. Variable name can be anything. Used to detect register vs
+   * change branches in subscribe callbacks.
+   */
+  isEventTypeEquals(testNode, value) {
+    if (!testNode || typeof value !== 'string') return false;
+    if (testNode.type === 'BinaryExpression' && (testNode.operator === '===' || testNode.operator === '==')) {
+      const leftIsIdentifier = testNode.left?.type === 'Identifier';
+      const rightVal = this.getStringValue(testNode.right);
+      if (leftIsIdentifier && rightVal === value) return true;
+    }
+    return false;
+  }
+
+  /**
+   * True if this node is inside a callback passed to x.subscribe (any name: fieldModel,
+   * model, a, etc.). That callback runs on model change events, after form load — no CLS.
+   * Loop is bounded: we walk the fixed ancestors array once (root → current).
+   */
+  isInsideModelSubscribeCallback(ancestors) {
+    for (let i = ancestors.length - 1; i >= 0; i -= 1) {
+      const ancestor = ancestors[i];
+      if (ancestor.type === 'ArrowFunctionExpression' || ancestor.type === 'FunctionExpression') {
+        const parent = ancestors[i - 1];
+        if (parent?.type === 'CallExpression') {
+          const callee = parent.callee;
+          if (callee?.type === 'MemberExpression' && callee.property?.name === 'subscribe') {
+            return true;
+          }
+          // Top-level subscribe(el, formId, cb): keep looking for inner model.subscribe
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * True if this node is inside the "change" branch of a subscribe callback
+   * (e.g. inside "if (eventType === 'change') { ... }" or "else if (eventType === 'change') { ... }").
+   * Class/style in the change branch runs after form load, so no CLS - do not flag.
+   */
+  isInsideSubscribeChangeBranch(ancestors) {
+    if (!this.isInsideSubscribeCallback(ancestors)) return false;
+    for (let i = 0; i < ancestors.length; i++) {
+      const ancestor = ancestors[i];
+      if (ancestor.type === 'IfStatement') {
+        const ifStmt = ancestor;
+        if (!this.isEventTypeEquals(ifStmt.test, 'change')) continue;
+        const childInPath = ancestors[i + 1];
+        if (!childInPath) continue;
+        if (childInPath === ifStmt.consequent) return true;
+        if (ifStmt.alternate && childInPath === ifStmt.alternate) {
+          if (ifStmt.alternate.type === 'IfStatement' && this.isEventTypeEquals(ifStmt.alternate.test, 'change')) return true;
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * True if this node is in the direct body of an init function (e.g. decorate),
+   * not inside a nested callback. Class/style in decorate's direct body is allowed (one-time setup).
+   */
+  isInDirectBodyOfInitFunction(ancestors) {
+    const initContext = this.getInitializationContext(ancestors);
+    if (!initContext) return false;
+
+    for (let i = ancestors.length - 1; i >= 0; i--) {
+      const ancestor = ancestors[i];
+      if (ancestor.type === 'FunctionDeclaration' && ancestor.id?.name === initContext) {
+        return true;
+      }
+      if (ancestor.type === 'ArrowFunctionExpression' || ancestor.type === 'FunctionExpression') {
+        return false;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Detect problematic call expressions
+   */
+  detectCallExpression(node, ancestors, content, context, issues) {
+    // Check if we're inside an event handler callback by examining ancestors
+    if (this.isInsideEventHandlerCallback(ancestors)) {
+      return; // Skip - this code runs after form load
+    }
+
+    const calleeName = this.getCalleeName(node.callee);
+    
+    // Determine if we should flag this call
+    // Only flag if:
+    // 1. In decorateForm file (always initialization context), OR
+    // 2. Inside an initialization function, OR
+    // 3. At top-level of module (no containing function)
+    const initContext = this.getInitializationContext(ancestors);
+    const hasContainingFunction = ancestors.some(a => 
+      a.type === 'FunctionDeclaration' || 
+      a.type === 'FunctionExpression' || 
+      a.type === 'ArrowFunctionExpression'
+    );
+    
+    const shouldFlag = context.isDecorateFormFile || initContext || !hasContainingFunction;
+    
+    if (!shouldFlag) {
+      return; // Not in initialization context
+    }
+
+    // 1. Detect loadCSS() calls
+    if (calleeName === 'loadCSS') {
+      issues.push({
+        severity: 'error',
+        type: 'dynamic-css-loading',
+        file: context.filename,
+        line: node.loc?.start.line,
+        functionContext: initContext || 'top-level',
+        message: `Dynamic CSS loading with loadCSS() during form initialization causes CLS.`,
+        pattern: this.extractCodeSnippet(content, node),
+        recommendation: 'Load CSS in <head> via head.html, or use @import in your main CSS file. Dynamic CSS loading at runtime causes layout shifts.',
+        cwvImpact: 'CLS, LCP',
+      });
+    }
+
+    // 2. Detect dynamic import() for CSS - handle ImportExpression type
+    if (node.type === 'ImportExpression' || node.callee?.type === 'Import') {
+      const arg = node.source || node.arguments?.[0];
+      if (arg && this.isCSSimport(arg, content)) {
+        issues.push({
+          severity: 'error',
+          type: 'dynamic-css-loading',
+          file: context.filename,
+          line: node.loc?.start.line,
+          functionContext: initContext || 'top-level',
+          message: `Dynamic CSS import during form initialization causes CLS.`,
+          pattern: this.extractCodeSnippet(content, node),
+          recommendation: 'Use static imports or load CSS in <head>. Dynamic imports of CSS cause layout shifts.',
+          cwvImpact: 'CLS, LCP',
+        });
+      }
+    }
+
+    // 3. Detect document.createElement('style') or createElement('link')
+    if (calleeName === 'createElement' || calleeName === 'document.createElement') {
+      const arg = node.arguments[0];
+      if (arg && (this.isStringValue(arg, 'style') || this.isStringValue(arg, 'link'))) {
+        const elementType = this.getStringValue(arg);
+        issues.push({
+          severity: 'error',
+          type: 'dynamic-style-injection',
+          file: context.filename,
+          line: node.loc?.start.line,
+          functionContext: initContext || 'top-level',
+          message: `Dynamic <${elementType}> element creation during form initialization causes CLS.`,
+          pattern: this.extractCodeSnippet(content, node),
+          recommendation: elementType === 'link' 
+            ? 'Add stylesheet links in head.html instead of creating them dynamically.'
+            : 'Define styles in CSS files instead of injecting <style> elements at runtime.',
+          cwvImpact: 'CLS, LCP',
+        });
+      }
+    }
+
+    // 4. Detect classList.add/remove/toggle calls
+    if (node.callee.type === 'MemberExpression') {
+      const method = node.callee.property?.name;
+      if (['add', 'remove', 'toggle'].includes(method)) {
+        // Check if it's classList
+        if (this.isClassListMethod(node.callee)) {
+          // Allow in direct body of decorate (one-time setup). Flag inside subscribe and other callbacks.
+          if (this.isInDirectBodyOfInitFunction(ancestors)) {
+            return;
+          }
+          // Allow in subscribe's change branch (runs after form load, no CLS). Flag in register branch.
+          if (this.isInsideSubscribeChangeBranch(ancestors)) {
+            return;
+          }
+          // Allow inside model.subscribe / fieldModel.subscribe callback (runs on model change, after load).
+          if (this.isInsideModelSubscribeCallback(ancestors)) {
+            return;
+          }
+          // Check if the class name is in the allowlist
+          const className = this.getClassNameArgument(node);
+          if (className && !this.isAllowedStateClass(className)) {
+            issues.push({
+              severity: 'warning',
+              type: 'dynamic-class-manipulation',
+              file: context.filename,
+              line: node.loc?.start.line,
+              functionContext: initContext || 'top-level',
+              message: `classList.${method}('${className}') during form initialization may cause CLS if the class affects layout.`,
+              pattern: this.extractCodeSnippet(content, node),
+              className,
+              recommendation: 'Pre-render classes in HTML or apply them server-side. Dynamic class changes during load cause layout shifts. If this is for state management, consider adding the class name to the allowlist.',
+              cwvImpact: 'CLS',
+            });
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Detect dynamic import() expressions for CSS
+   */
+  detectImportExpression(node, ancestors, content, context, issues) {
+    // Check if we're inside an event handler callback
+    if (this.isInsideEventHandlerCallback(ancestors)) {
+      return; // Skip - this code runs after form load
+    }
+
+    // Determine if we should flag this import
+    const initContext = this.getInitializationContext(ancestors);
+    const hasContainingFunction = ancestors.some(a => 
+      a.type === 'FunctionDeclaration' || 
+      a.type === 'FunctionExpression' || 
+      a.type === 'ArrowFunctionExpression'
+    );
+    
+    const shouldFlag = context.isDecorateFormFile || initContext || !hasContainingFunction;
+    
+    if (!shouldFlag) {
+      return; // Not in initialization context
+    }
+
+    // Check if it's a CSS import
+    const source = node.source;
+    if (source && this.isCSSimport(source, content)) {
+      issues.push({
+        severity: 'error',
+        type: 'dynamic-css-loading',
+        file: context.filename,
+        line: node.loc?.start.line,
+        functionContext: initContext || 'top-level',
+        message: `Dynamic CSS import during form initialization causes CLS.`,
+        pattern: this.extractCodeSnippet(content, node),
+        recommendation: 'Use static imports or load CSS in <head>. Dynamic imports of CSS cause layout shifts.',
+        cwvImpact: 'CLS, LCP',
+      });
+    }
+  }
+
+  /**
+   * Detect problematic member expressions (style access)
+   */
+  detectMemberExpression(node, ancestors, content, context, issues) {
+    // Skip if inside event handler
+    if (context.isInsideEventHandler) {
+      return;
+    }
+
+    // Check for element.style.xxx access in assignment context
+    // This is handled in detectAssignment
+  }
+
+  /**
+   * Detect problematic assignments
+   */
+  detectAssignment(node, ancestors, content, context, issues) {
+    // Check if we're inside an event handler callback by examining ancestors
+    if (this.isInsideEventHandlerCallback(ancestors)) {
+      return; // Skip - this code runs after form load
+    }
+
+    // Determine if we should flag this assignment
+    const initContext = this.getInitializationContext(ancestors);
+    const hasContainingFunction = ancestors.some(a => 
+      a.type === 'FunctionDeclaration' || 
+      a.type === 'FunctionExpression' || 
+      a.type === 'ArrowFunctionExpression'
+    );
+    
+    const shouldFlag = context.isDecorateFormFile || initContext || !hasContainingFunction;
+    
+    if (!shouldFlag) {
+      return; // Not in initialization context
+    }
+
+    // Allow style/class in direct body of decorate (one-time setup). Flag inside subscribe and other callbacks.
+    if (this.isInDirectBodyOfInitFunction(ancestors)) {
+      return;
+    }
+    // Allow in subscribe's change branch (runs after form load, no CLS). Flag in register branch.
+    if (this.isInsideSubscribeChangeBranch(ancestors)) {
+      return;
+    }
+    // Allow inside model.subscribe / fieldModel.subscribe callback (runs on model change, after load).
+    if (this.isInsideModelSubscribeCallback(ancestors)) {
+      return;
+    }
+
+    const left = node.left;
+
+    // 1. Detect element.style.xxx = value
+    if (left.type === 'MemberExpression' && left.object?.type === 'MemberExpression') {
+      if (left.object.property?.name === 'style') {
+        const styleProperty = left.property?.name;
+        if (styleProperty && this.isLayoutAffectingStyle(styleProperty)) {
+          issues.push({
+            severity: 'warning',
+            type: 'direct-style-manipulation',
+            file: context.filename,
+            line: node.loc?.start.line,
+            functionContext: initContext || 'top-level',
+            message: `Direct style manipulation (style.${styleProperty}) during form initialization may cause CLS.`,
+            pattern: this.extractCodeSnippet(content, node),
+            styleProperty,
+            recommendation: 'Use CSS classes instead of direct style manipulation. Define styles in CSS files and toggle classes for state changes.',
+            cwvImpact: 'CLS',
+          });
+        }
+      }
+    }
+
+    // 2. Detect element.style.cssText = '...'
+    if (left.type === 'MemberExpression') {
+      if (left.property?.name === 'cssText' && left.object?.property?.name === 'style') {
+        issues.push({
+          severity: 'warning',
+          type: 'direct-style-manipulation',
+          file: context.filename,
+          line: node.loc?.start.line,
+          functionContext: initContext || 'top-level',
+          message: `style.cssText assignment during form initialization causes CLS.`,
+          pattern: this.extractCodeSnippet(content, node),
+          recommendation: 'Use CSS classes instead of inline styles. Define styles in CSS files.',
+          cwvImpact: 'CLS',
+        });
+      }
+    }
+
+    // 3. Detect element.className = '...'
+    if (left.type === 'MemberExpression' && left.property?.name === 'className') {
+      issues.push({
+        severity: 'warning',
+        type: 'dynamic-class-manipulation',
+        file: context.filename,
+        line: node.loc?.start.line,
+        functionContext: initContext || 'top-level',
+        message: `className assignment during form initialization may cause CLS.`,
+        pattern: this.extractCodeSnippet(content, node),
+        recommendation: 'Pre-render classes in HTML. Dynamic className changes during load cause layout shifts.',
+        cwvImpact: 'CLS',
+      });
+    }
+  }
+
+  /**
+   * Check if a function name indicates initialization
+   */
+  isInitializationFunction(funcName) {
+    if (!funcName) return false;
+    return this.initializationFunctions.has(funcName) ||
+           funcName.toLowerCase().includes('init') ||
+           funcName.toLowerCase().includes('setup') ||
+           funcName.toLowerCase().includes('decorate');
+  }
+
+  /**
+   * Check if a node is an event handler callback
+   */
+  isEventHandlerCallback(parent, node) {
+    if (!parent) return false;
+
+    // Check for addEventListener('click', callback)
+    if (parent.type === 'CallExpression') {
+      const calleeName = this.getCalleeName(parent.callee);
+      if (calleeName === 'addEventListener' || calleeName.endsWith('.addEventListener')) {
+        const eventType = parent.arguments[0];
+        if (eventType && this.userEventTypes.has(this.getStringValue(eventType))) {
+          return true;
+        }
+      }
+    }
+
+    // Check for element.onclick = function() {}
+    if (parent.type === 'AssignmentExpression') {
+      const left = parent.left;
+      if (left.type === 'MemberExpression') {
+        const propName = left.property?.name;
+        if (propName && propName.startsWith('on')) {
+          const eventType = propName.slice(2).toLowerCase();
+          if (this.userEventTypes.has(eventType)) {
+            return true;
+          }
+        }
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * Get function name from parent context
+   */
+  getFunctionName(parent, node) {
+    if (!parent) return null;
+
+    // const funcName = () => {}
+    if (parent.type === 'VariableDeclarator' && parent.id?.name) {
+      return parent.id.name;
+    }
+
+    // obj.funcName = () => {}
+    if (parent.type === 'AssignmentExpression' && parent.left?.property?.name) {
+      return parent.left.property.name;
+    }
+
+    // { funcName: () => {} }
+    if (parent.type === 'Property' && parent.key?.name) {
+      return parent.key.name;
+    }
+
+    return null;
+  }
+
+  /**
+   * Get callee name from various node types
+   */
+  getCalleeName(callee) {
+    if (!callee) return '';
+    
+    if (callee.type === 'Identifier') {
+      return callee.name;
+    }
+    
+    if (callee.type === 'MemberExpression') {
+      const obj = callee.object?.name || '';
+      const prop = callee.property?.name || '';
+      return obj ? `${obj}.${prop}` : prop;
+    }
+    
+    return '';
+  }
+
+  /**
+   * Check if an argument is a CSS import
+   */
+  isCSSimport(arg, content) {
+    if (arg.type === 'Literal' && typeof arg.value === 'string') {
+      return arg.value.endsWith('.css');
+    }
+    if (arg.type === 'TemplateLiteral') {
+      // Extract template literal content
+      const snippet = content.substring(arg.start, arg.end);
+      return snippet.includes('.css');
+    }
+    return false;
+  }
+
+  /**
+   * Check if a node is classList method
+   */
+  isClassListMethod(callee) {
+    if (callee.object?.type === 'MemberExpression') {
+      return callee.object.property?.name === 'classList';
+    }
+    if (callee.object?.type === 'Identifier' && callee.object.name === 'classList') {
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Get class name from classList.add/remove/toggle call
+   */
+  getClassNameArgument(node) {
+    const arg = node.arguments[0];
+    if (!arg) return null;
+    return this.getStringValue(arg);
+  }
+
+  /**
+   * Check if a class name is in the allowed state classes
+   */
+  isAllowedStateClass(className) {
+    if (!className) return false;
+    
+    // Check exact match
+    if (this.allowedStateClasses.has(className)) {
+      return true;
+    }
+    
+    // Check if contains allowed patterns (e.g., 'field-valid', 'input-error')
+    for (const allowed of this.allowedStateClasses) {
+      if (className.includes(allowed)) {
+        return true;
+      }
+    }
+    
+    return false;
+  }
+
+  /**
+   * Check if a style property affects layout
+   */
+  isLayoutAffectingStyle(property) {
+    const layoutProperties = new Set([
+      'display',
+      'visibility',
+      'width',
+      'height',
+      'minWidth',
+      'minHeight',
+      'maxWidth',
+      'maxHeight',
+      'padding',
+      'paddingTop',
+      'paddingBottom',
+      'paddingLeft',
+      'paddingRight',
+      'margin',
+      'marginTop',
+      'marginBottom',
+      'marginLeft',
+      'marginRight',
+      'position',
+      'top',
+      'bottom',
+      'left',
+      'right',
+      'flex',
+      'flexDirection',
+      'flexWrap',
+      'flexGrow',
+      'flexShrink',
+      'flexBasis',
+      'grid',
+      'gridTemplate',
+      'gridTemplateColumns',
+      'gridTemplateRows',
+      'gap',
+      'fontSize',
+      'lineHeight',
+      'transform',
+      'float',
+      'clear',
+      'overflow',
+      'overflowX',
+      'overflowY',
+    ]);
+    
+    return layoutProperties.has(property);
+  }
+
+  /**
+   * Check if argument is a specific string value
+   */
+  isStringValue(arg, value) {
+    if (arg.type === 'Literal' && arg.value === value) {
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Get string value from a node
+   */
+  getStringValue(node) {
+    if (!node) return null;
+    if (node.type === 'Literal' && typeof node.value === 'string') {
+      return node.value;
+    }
+    return null;
+  }
+
+  /**
+   * Extract code snippet from content
+   */
+  extractCodeSnippet(content, node) {
+    try {
+      const lines = content.split('\n');
+      const line = lines[node.loc.start.line - 1];
+      return line?.trim().substring(0, 100) || '';
+    } catch (e) {
+      return '';
+    }
+  }
+
+  /**
+   * Compare before and after analyses
+   */
+  compare(beforeAnalysis, afterAnalysis) {
+    const before = beforeAnalysis || { issues: [], summary: {} };
+    const after = afterAnalysis || { issues: [], summary: {} };
+
+    // Find new issues (in after but not in before)
+    const newIssues = (after.issues || []).filter(afterIssue =>
+      !(before.issues || []).some(beforeIssue =>
+        beforeIssue.file === afterIssue.file &&
+        beforeIssue.type === afterIssue.type &&
+        beforeIssue.line === afterIssue.line
+      )
+    );
+
+    // Find resolved issues (in before but not in after)
+    const resolvedIssues = (before.issues || []).filter(beforeIssue =>
+      !(after.issues || []).some(afterIssue =>
+        afterIssue.file === beforeIssue.file &&
+        afterIssue.type === beforeIssue.type &&
+        afterIssue.line === beforeIssue.line
+      )
+    );
+
+    return {
+      before,
+      after,
+      newIssues,
+      resolvedIssues,
+      delta: {
+        dynamicCSSLoading: (after.summary?.dynamicCSSLoading || 0) - (before.summary?.dynamicCSSLoading || 0),
+        dynamicStyleInjection: (after.summary?.dynamicStyleInjection || 0) - (before.summary?.dynamicStyleInjection || 0),
+        dynamicClassManipulation: (after.summary?.dynamicClassManipulation || 0) - (before.summary?.dynamicClassManipulation || 0),
+        directStyleManipulation: (after.summary?.directStyleManipulation || 0) - (before.summary?.directStyleManipulation || 0),
+      },
+    };
+  }
+}
+
+;// CONCATENATED MODULE: ./src/pipeline.js
+/**
+ * Shared analyzer pipeline
+ *
+ * Single source of truth for running all 9 analyzers.
+ * Used by both the GitHub Actions entry (src/index.js) and the local CLI
+ * (src/cli/analyze.js). Adding a new analyzer means editing only this file.
+ *
+ * @param {Object} beforeData   - { formJson, html } from URLAnalyzer (or null formJson when no URLs)
+ * @param {Object} afterData    - { formJson, html } from URLAnalyzer (or null formJson when no URLs)
+ * @param {Array}  jsFiles      - Array of { filename, content } for JS analysis
+ * @param {Array}  cssFiles     - Array of { filename, content } for CSS analysis
+ * @param {Object} config       - Loaded config object from loadConfig()
+ * @param {Object} [logger]     - Optional logger: { info, warning, error }. Defaults to console.
+ * @returns {Promise<Object>}   - Results object with one key per analyzer
+ */
+
+
+
+
+
+
+
+
+
+
+
+const DEFAULT_LOGGER = {
+  info:    msg => console.log(msg),
+  warning: msg => console.warn(msg),
+  error:   msg => console.error(msg),
+};
+
+async function runAnalysis(beforeData, afterData, jsFiles = [], cssFiles = [], config, logger = {}) {
+  const log = { ...DEFAULT_LOGGER, ...logger };
+
+  const hasFormData = !!(beforeData?.formJson && afterData?.formJson);
+
+  const formAnalyzer     = new FormAnalyzer(config);
+  const eventsAnalyzer   = new FormEventsAnalyzer(config);
+  const hiddenAnalyzer   = new HiddenFieldsAnalyzer(config);
+  const disabledAnalyzer = new DisabledFieldsAnalyzer(config);
+  const ruleAnalyzer     = new RulePerformanceAnalyzer(config);
+  const htmlAnalyzer     = new FormHTMLAnalyzer(config);
+  const cssAnalyzer      = new FormCSSAnalyzer(config);
+  const cfAnalyzer       = new CustomFunctionAnalyzer(config);
+  const clsAnalyzer      = new RuntimeCLSAnalyzer(config);
+
+  let formStructure, formEvents, hiddenFields, disabledFields, ruleCycles, formHTML;
+  let customFunctions, runtimeCLS;
+
+  const cssRaw    = cssAnalyzer.analyze(cssFiles);
+  const clsResult = clsAnalyzer.analyze(jsFiles);
+
+  if (hasFormData) {
+    log.info('Running all 9 analyzers in parallel...');
+
+    const [
+      hiddenBefore,   hiddenAfter,
+      disabledBefore, disabledAfter,
+      ruleBefore,     ruleAfter,
+      cfBefore,       cfAfter,
+    ] = await Promise.all([
+      hiddenAnalyzer.analyze(beforeData.formJson, jsFiles),
+      hiddenAnalyzer.analyze(afterData.formJson,  jsFiles),
+      disabledAnalyzer.analyze(beforeData.formJson, jsFiles),
+      disabledAnalyzer.analyze(afterData.formJson,  jsFiles),
+      (async () => {
+        try {
+          return await ruleAnalyzer.analyze(beforeData.formJson);
+        } catch (e) {
+          log.error(`Rule analysis (before) failed: ${e.message}`);
+          return { totalRules: 0, cycles: 0, slowRuleCount: 0, runtimeErrors: [] };
+        }
+      })(),
+      (async () => {
+        try {
+          return await ruleAnalyzer.analyze(afterData.formJson);
+        } catch (e) {
+          log.error(`Rule analysis (after) failed: ${e.message}`);
+          return { totalRules: 0, cycles: 0, slowRuleCount: 0, runtimeErrors: [] };
+        }
+      })(),
+      cfAnalyzer.analyze(beforeData.formJson, jsFiles),
+      cfAnalyzer.analyze(afterData.formJson,  jsFiles),
+    ]);
+
+    formStructure  = formAnalyzer.compare(beforeData.formJson, afterData.formJson);
+    formEvents     = eventsAnalyzer.compare(beforeData.formJson, afterData.formJson);
+    formHTML       = htmlAnalyzer.compare(beforeData.html, afterData.html);
+    hiddenFields   = hiddenAnalyzer.compare(hiddenBefore, hiddenAfter);
+    disabledFields = disabledAnalyzer.compare(disabledBefore, disabledAfter);
+    ruleCycles     = ruleAnalyzer.compare(ruleBefore, ruleAfter);
+    customFunctions = cfAnalyzer.compare(cfBefore, cfAfter);
+
+    // Merge runtime errors from rule cycle analysis into custom functions issues
+    _mergeRuntimeErrors(ruleCycles, customFunctions, log);
+
+  } else {
+    log.info('Running limited analysis (CSS/JS only — no form JSON available)...');
+
+    const [cfBefore, cfAfter] = await Promise.all([
+      cfAnalyzer.analyze(null, jsFiles),
+      cfAnalyzer.analyze(null, jsFiles),
+    ]);
+
+    formStructure   = { after: { components: { total: 0 }, issues: [] }, before: { components: { total: 0 }, issues: [] } };
+    formEvents      = { after: { apiCallsInInitialize: [] }, newIssues: [], resolvedIssues: [] };
+    formHTML        = { after: { issues: [] }, newIssues: [], resolvedIssues: [] };
+    hiddenFields    = { after: { unnecessaryHiddenFields: 0, hiddenFields: [] }, newIssues: [], resolvedIssues: [] };
+    disabledFields  = { after: { totalDisabledFields: 0, disabledFields: [] }, newIssues: [], resolvedIssues: [] };
+    ruleCycles      = { after: { totalRules: 0, cycles: 0, slowRuleCount: 0, runtimeErrors: [] }, newCycles: [], resolvedCycles: [] };
+    customFunctions = cfAnalyzer.compare(cfBefore, cfAfter);
+  }
+
+  runtimeCLS = { after: clsResult, newIssues: clsResult.issues ?? [], resolvedIssues: [] };
+
+  return {
+    formStructure,
+    formEvents,
+    hiddenFields,
+    disabledFields,
+    ruleCycles,
+    formHTML,
+    formCSS:         { after: cssRaw, newIssues: cssRaw.issues, resolvedIssues: [] },
+    customFunctions,
+    runtimeCLS,
+  };
+}
+
+/**
+ * Merges runtime errors detected by RulePerformanceAnalyzer into the
+ * customFunctions results so they surface in the same report section.
+ */
+function _mergeRuntimeErrors(ruleCycles, customFunctions, log) {
+  const runtimeErrors = ruleCycles?.after?.runtimeErrors;
+  if (!runtimeErrors?.length) return;
+
+  log.info(`Merging ${runtimeErrors.length} runtime error(s) into custom functions`);
+
+  if (!customFunctions.after.issues) customFunctions.after.issues = [];
+  if (!customFunctions.newIssues)    customFunctions.newIssues    = [];
+
+  const existing = new Set(
+    customFunctions.after.issues
+      .filter(i => i.type === 'runtime-error-in-custom-function')
+      .map(i => i.functionName)
+  );
+
+  const toAdd = runtimeErrors.filter(e => !existing.has(e.functionName));
+  customFunctions.after.issues.push(...toAdd);
+  customFunctions.newIssues.push(...toAdd);
+
+  if (ruleCycles.after.runtimeErrorCount != null) {
+    customFunctions.after.runtimeErrorCount = ruleCycles.after.runtimeErrorCount;
+  }
+}
 
 ;// CONCATENATED MODULE: ./src/reporters/pr-reporter-form.js
 /**
@@ -191986,6 +192144,8 @@ async function loadConfig(configPath = null) {
 
 
 
+// Scheduled mode uses individual analyzers directly (per-URL loop, not before/after comparison)
+
 
 
 
@@ -192094,345 +192254,45 @@ async function runPRMode(context, octokit, patOctokit, config) {
     lib_core.info(`✓ After URL: ${urls.after}`);
   }
 
-  // Initialize analyzers with config
-  const formCSSAnalyzer = new FormCSSAnalyzer(config);
-  const customFunctionAnalyzer = new CustomFunctionAnalyzer(config);
-  const runtimeCLSAnalyzer = new RuntimeCLSAnalyzer(config);
   const aiAutoFixAnalyzer = new AIAutoFixAnalyzer(config);
+  const customFunctionAnalyzer = new CustomFunctionAnalyzer(config);
 
-  // URL-based analysis (only if URLs provided)
-  let beforeData = null;
-  let afterData = null;
-  
+  // URL-based fetch (only if URLs provided)
+  let beforeData = { formJson: null, html: null };
+  let afterData  = { formJson: null, html: null };
+
   if (hasUrls) {
+    lib_core.info('Fetching before URL...');
     const urlAnalyzer = new URLAnalyzer();
-    
-    // Analyze both URLs
-    lib_core.info('Fetching and analyzing before URL...');
     beforeData = await urlAnalyzer.analyze(urls.before);
-    lib_core.info(`✓ Fetched before URL: ${beforeData.rawSize} bytes HTML`);
-    
-    // Validate that form JSON was extracted from before URL
     if (!beforeData.formJson) {
-      const errorMsg = beforeData.jsonErrors && beforeData.jsonErrors.length > 0
+      const msg = beforeData.jsonErrors?.length
         ? `Failed to extract form JSON from before URL: ${beforeData.jsonErrors[0].message}`
-        : 'Failed to extract form JSON from before URL. No form JSON found in the page.';
-      lib_core.error(errorMsg);
-      lib_core.setFailed(errorMsg);
+        : `Failed to extract form JSON from before URL: ${urls.before}`;
+      lib_core.setFailed(msg);
       return;
     }
-    const beforeJsonStr = JSON.stringify(beforeData.formJson);
-    const beforeFormId = beforeData.formJson.id || 'unknown';
-    const beforeFormTitle = beforeData.formJson.title || 'unknown';
-    lib_core.info(`Form JSON extracted from before URL (${beforeJsonStr.length} bytes)`);
-    lib_core.info(`Before form: id="${beforeFormId}", title="${beforeFormTitle}"`);
-
-    lib_core.info('Fetching and analyzing after URL...');
-    afterData = await urlAnalyzer.analyze(urls.after);
-    lib_core.info(`✓ Fetched after URL: ${afterData.rawSize} bytes HTML`);
-    
-    // Validate that form JSON was extracted from after URL
+    lib_core.info('Fetching after URL...');
+    afterData  = await urlAnalyzer.analyze(urls.after);
     if (!afterData.formJson) {
-      const errorMsg = afterData.jsonErrors && afterData.jsonErrors.length > 0
+      const msg = afterData.jsonErrors?.length
         ? `Failed to extract form JSON from after URL: ${afterData.jsonErrors[0].message}`
-        : 'Failed to extract form JSON from after URL. No form JSON found in the page.';
-      lib_core.error(errorMsg);
-      lib_core.setFailed(errorMsg);
+        : `Failed to extract form JSON from after URL: ${urls.after}`;
+      lib_core.setFailed(msg);
       return;
     }
-    const afterJsonStr = JSON.stringify(afterData.formJson);
-    const afterFormId = afterData.formJson.id || 'unknown';
-    const afterFormTitle = afterData.formJson.title || 'unknown';
-    lib_core.info(`Form JSON extracted from after URL (${afterJsonStr.length} bytes)`);
-    lib_core.info(`After form: id="${afterFormId}", title="${afterFormTitle}"`);
-    
-    // Warn if both JSONs appear identical
-    if (beforeJsonStr === afterJsonStr) {
-      lib_core.warning('WARNING: Before and After form JSONs are identical! This may indicate:');
-      lib_core.warning('  1. The URLs are pointing to the same content (caching issue?)');
-      lib_core.warning('  2. The PR branch has not been deployed yet');
-      lib_core.warning('  3. The form has not changed between branches');
-      lib_core.warning('Analysis will continue but results may not show differences.');
-    }
-  } else {
-    // No URLs provided - create empty data objects
-    lib_core.info('Skipping URL-based analysis (no URLs provided)');
-    beforeData = { formJson: null, html: null };
-    afterData = { formJson: null, html: null };
   }
 
-  // Load JavaScript and CSS files from checked-out repository (faster than API)
+  // Load JS/CSS files from checked-out workspace
   lib_core.info('Loading JavaScript and CSS files from checked-out repository...');
   const { jsFiles, cssFiles } = await loadFilesFromWorkspace();
 
-  // Perform analyses based on available data
-  let formStructureAnalysis, formEventsAnalysis, beforeHiddenFields, afterHiddenFields;
-  let beforeRuleCycles, afterRuleCycles, formHTMLAnalysis, cssAnalysis;
-  let beforeCustomFunctions, afterCustomFunctions;
-  let runtimeCLSAnalysis;
-  let disabledFieldsAnalysis;
-  
-  if (hasUrls) {
-    // Full analysis with form JSON
-    lib_core.info('Running all analyses in parallel (form JSON available)...');
-    
-    // Initialize form-specific analyzers
-    const formAnalyzer = new FormAnalyzer(config);
-    const formEventsAnalyzer = new FormEventsAnalyzer(config);
-    const hiddenFieldsAnalyzer = new HiddenFieldsAnalyzer(config);
-    const disabledFieldsAnalyzer = new DisabledFieldsAnalyzer(config);
-    const rulePerformanceAnalyzer = new RulePerformanceAnalyzer(config);
-    const formHTMLAnalyzer = new FormHTMLAnalyzer(config);
-    
-    const [
-      fsa,
-      fea,
-      { beforeHiddenFields: bhf, afterHiddenFields: ahf },
-      { beforeDisabledFields: bdf, afterDisabledFields: adf },
-      { beforeRuleCycles: brc, afterRuleCycles: arc },
-      fha,
-      css,
-      { beforeCustomFunctions: bcf, afterCustomFunctions: acf },
-      runtimeCLSResult
-    ] = await Promise.all([
-      // 1. Form Structure (synchronous)
-      Promise.resolve(formAnalyzer.compare(beforeData.formJson, afterData.formJson)),
-      
-      // 2. Form Events (synchronous)
-      Promise.resolve(formEventsAnalyzer.compare(beforeData.formJson, afterData.formJson)),
-      
-      // 3. Hidden Fields (synchronous)
-      Promise.resolve({
-        beforeHiddenFields: hiddenFieldsAnalyzer.analyze(beforeData.formJson, jsFiles),
-        afterHiddenFields: hiddenFieldsAnalyzer.analyze(afterData.formJson, jsFiles)
-      }),
-      
-      // 3b. Disabled Fields (synchronous)
-      Promise.resolve({
-        beforeDisabledFields: disabledFieldsAnalyzer.analyze(beforeData.formJson, jsFiles),
-        afterDisabledFields: disabledFieldsAnalyzer.analyze(afterData.formJson, jsFiles)
-      }),
-      
-      // 4. Rule Cycles (async - uses real function implementations from checked-out repo)
-      (async () => {
-        try {
-          lib_core.info('Starting rule cycle analysis...');
-          const beforeRuleCycles = await rulePerformanceAnalyzer.analyze(beforeData.formJson);
-          lib_core.info(`Before rules: ${beforeRuleCycles.totalRules || 0} rules, ${beforeRuleCycles.cycles || 0} cycles, ${beforeRuleCycles.slowRuleCount || 0} slow`);
-          if (beforeRuleCycles.cycles > 0) {
-            lib_core.warning(`  Found ${beforeRuleCycles.cycles} cycle(s) in BEFORE state`);
-          }
-          
-          const afterRuleCycles = await rulePerformanceAnalyzer.analyze(afterData.formJson);
-          lib_core.info(`After rules: ${afterRuleCycles.totalRules || 0} rules, ${afterRuleCycles.cycles || 0} cycles, ${afterRuleCycles.slowRuleCount || 0} slow`);
-          if (afterRuleCycles.cycles > 0) {
-            lib_core.warning(`  Found ${afterRuleCycles.cycles} cycle(s) in AFTER state`);
-            if (afterRuleCycles.cycleDetails) {
-              afterRuleCycles.cycleDetails.forEach((cycle, i) => {
-                lib_core.warning(`    Cycle ${i + 1}: ${(cycle.fields || []).join(' → ')}`);
-              });
-            }
-          }
-          
-          return { beforeRuleCycles, afterRuleCycles };
-        } catch (error) {
-          lib_core.error(`Rule cycle analysis failed: ${error.message}`);
-          lib_core.error(error.stack);
-          return {
-            beforeRuleCycles: { totalRules: 0, cycles: 0, error: error.message },
-            afterRuleCycles: { totalRules: 0, cycles: 0, error: error.message }
-          };
-        }
-      })(),
-      
-      // 5. Form HTML (synchronous)
-      Promise.resolve(formHTMLAnalyzer.compare(beforeData.html, afterData.html)),
-      
-      // 6. CSS (synchronous)
-      Promise.resolve(formCSSAnalyzer.analyze(cssFiles)),
-      
-      // 7. Custom Functions (synchronous)
-      Promise.resolve({
-        beforeCustomFunctions: customFunctionAnalyzer.analyze(beforeData.formJson, jsFiles),
-        afterCustomFunctions: customFunctionAnalyzer.analyze(afterData.formJson, jsFiles)
-      }),
-      
-      // 8. Runtime CLS (synchronous) - detects dynamic CSS/class manipulation during form load
-      Promise.resolve(runtimeCLSAnalyzer.analyze(jsFiles))
-    ]);
-    
-    formStructureAnalysis = fsa;
-    formEventsAnalysis = fea;
-    beforeHiddenFields = bhf;
-    afterHiddenFields = ahf;
-    disabledFieldsAnalysis = disabledFieldsAnalyzer.compare(bdf, adf);
-    beforeRuleCycles = brc;
-    afterRuleCycles = arc;
-    formHTMLAnalysis = fha;
-    cssAnalysis = css;
-    beforeCustomFunctions = bcf;
-    afterCustomFunctions = acf;
-    runtimeCLSAnalysis = { after: runtimeCLSResult, newIssues: runtimeCLSResult.issues, resolvedIssues: [] };
-    
-  } else {
-    // Limited analysis without URLs - only CSS and JS files
-    lib_core.info('Running limited analysis (CSS/JS only, no form JSON)...');
-    
-    const [css, { beforeCustomFunctions: bcf, afterCustomFunctions: acf }, runtimeCLSResult] = await Promise.all([
-      // CSS analysis
-      Promise.resolve(formCSSAnalyzer.analyze(cssFiles)),
-      
-      // Custom Functions (without form JSON context)
-      Promise.resolve({
-        beforeCustomFunctions: customFunctionAnalyzer.analyze(null, jsFiles),
-        afterCustomFunctions: customFunctionAnalyzer.analyze(null, jsFiles)
-      }),
-      
-      // Runtime CLS (detects dynamic CSS/class manipulation during form load)
-      Promise.resolve(runtimeCLSAnalyzer.analyze(jsFiles))
-    ]);
-    
-    // Set empty results for form-specific analyzers
-    formStructureAnalysis = { after: { components: { total: 0 } }, before: { components: { total: 0 } } };
-    formEventsAnalysis = { after: { apiCallsInInitialize: [] }, newIssues: [], resolvedIssues: [] };
-    beforeHiddenFields = { unnecessaryHiddenFields: 0, fields: [] };
-    afterHiddenFields = { unnecessaryHiddenFields: 0, fields: [] };
-    disabledFieldsAnalysis = { after: { totalDisabledFields: 0, disabledFields: [] }, before: { totalDisabledFields: 0, disabledFields: [] } };
-    beforeRuleCycles = { totalRules: 0, cycles: 0, slowRuleCount: 0, runtimeErrors: [] };
-    afterRuleCycles = { totalRules: 0, cycles: 0, slowRuleCount: 0, runtimeErrors: [] };
-    formHTMLAnalysis = { after: { issues: [] }, newIssues: [], resolvedIssues: [] };
-    cssAnalysis = css;
-    beforeCustomFunctions = bcf;
-    afterCustomFunctions = acf;
-    runtimeCLSAnalysis = { after: runtimeCLSResult, newIssues: runtimeCLSResult.issues, resolvedIssues: [] };
-  }
-
-  // Compile comparison results
-  const hiddenFieldsAnalysis = hasUrls 
-    ? (new HiddenFieldsAnalyzer(config)).compare(beforeHiddenFields, afterHiddenFields)
-    : { after: afterHiddenFields, before: beforeHiddenFields, newIssues: [], resolvedIssues: [] };
-    
-  const ruleCycleAnalysis = hasUrls
-    ? (new RulePerformanceAnalyzer(config)).compare(beforeRuleCycles, afterRuleCycles)
-    : { after: afterRuleCycles, before: beforeRuleCycles, newCycles: [], resolvedCycles: [], slowRuleCount: 0 };
-    
-  const formCSSAnalysis = { after: cssAnalysis, newIssues: cssAnalysis.issues, resolvedIssues: [] };
-  const customFunctionAnalysis = customFunctionAnalyzer.compare(beforeCustomFunctions, afterCustomFunctions);
-  
-  lib_core.info(hasUrls ? ' All analyses completed' : ' Limited analysis completed (CSS/JS only)');
-
-  // Merge runtime errors from rule cycle analysis into custom functions
-  if (ruleCycleAnalysis?.after?.runtimeErrors && ruleCycleAnalysis.after.runtimeErrors.length > 0) {
-    lib_core.info(`Merging ${ruleCycleAnalysis.after.runtimeErrors.length} runtime error(s) into custom functions`);
-    
-    // Add runtime errors as issues to custom functions
-    // Runtime errors already have the correct file path from RulePerformanceAnalyzer
-    const runtimeErrorsWithFiles = ruleCycleAnalysis.after.runtimeErrors.map(error => {
-      // Find the function in custom function analysis to get line number
-      const functionInfo = customFunctionAnalysis.after.analysis?.find(
-        fn => fn.functionName === error.functionName
-      );
-      
-      let lineNumber = functionInfo?.line;
-      
-      // If line number not found (function not in static analysis), search file content
-      if (!lineNumber && error.file && error.file !== 'unknown') {
-        try {
-          const filePath = (0,external_path_.join)(process.cwd(), error.file);
-          if ((0,external_fs_.existsSync)(filePath)) {
-            const content = (0,external_fs_.readFileSync)(filePath, 'utf-8');
-            const lines = content.split('\n');
-            
-            // Search for function definition (supports: function name(), export function name(), const name =)
-            const functionPattern = new RegExp(
-              `(export\\s+)?(async\\s+)?function\\s+${error.functionName}\\s*\\(|` +
-              `(export\\s+)?const\\s+${error.functionName}\\s*=|` +
-              `${error.functionName}\\s*:\\s*(async\\s+)?function`
-            );
-            
-            for (let i = 0; i < lines.length; i++) {
-              if (functionPattern.test(lines[i])) {
-                lineNumber = i + 1; // Convert to 1-indexed
-                lib_core.info(`  Found ${error.functionName} at line ${lineNumber} in ${error.file}`);
-                break;
-              }
-            }
-          }
-        } catch (err) {
-          lib_core.warning(`  Could not search file for ${error.functionName}: ${err.message}`);
-        }
-      }
-      
-      return {
-        ...error,
-        // error.file already has the correct path from RulePerformanceAnalyzer
-        // If not present, try to get from customFunctionAnalysis
-        file: error.file || functionInfo?.file || 'unknown',
-        line: lineNumber || 1  // Fallback to 1 only if search fails
-      };
-    });
-    
-    if (!customFunctionAnalysis.after.issues) {
-      customFunctionAnalysis.after.issues = [];
-    }
-    
-    // Deduplicate - don't add if already exists (by functionName)
-    const existingFunctionNames = new Set(
-      customFunctionAnalysis.after.issues
-        .filter(i => i.type === 'runtime-error-in-custom-function')
-        .map(i => i.functionName)
-    );
-    
-    lib_core.info(`  Existing runtime errors in customFunctionAnalysis: ${existingFunctionNames.size}`);
-    if (existingFunctionNames.size > 0) {
-      lib_core.info(`    Functions: ${Array.from(existingFunctionNames).join(', ')}`);
-    }
-    
-    const newRuntimeErrors = runtimeErrorsWithFiles.filter(
-      err => !existingFunctionNames.has(err.functionName)
-    );
-    
-    if (newRuntimeErrors.length > 0) {
-      customFunctionAnalysis.after.issues.push(...newRuntimeErrors);
-      lib_core.info(`  Added ${newRuntimeErrors.length} new runtime error(s) (${runtimeErrorsWithFiles.length - newRuntimeErrors.length} already present)`);
-    } else {
-      lib_core.info(`  No new runtime errors to add (all ${runtimeErrorsWithFiles.length} already in customFunctionAnalysis)`);
-    }
-    
-    // Final dedupe: Remove any remaining duplicates by function name (safety check)
-    const seenFunctions = new Set();
-    customFunctionAnalysis.after.issues = customFunctionAnalysis.after.issues.filter(issue => {
-      if (issue.type === 'runtime-error-in-custom-function') {
-        if (seenFunctions.has(issue.functionName)) {
-          lib_core.warning(`  Removing duplicate runtime error for ${issue.functionName}`);
-          return false;
-        }
-        seenFunctions.add(issue.functionName);
-      }
-      return true;
-    });
-    
-    // Add to newIssues for reporting (only new ones)
-    if (!customFunctionAnalysis.newIssues) {
-      customFunctionAnalysis.newIssues = [];
-    }
-    customFunctionAnalysis.newIssues.push(...newRuntimeErrors);
-    
-    // Track runtime error count
-    customFunctionAnalysis.after.runtimeErrorCount = ruleCycleAnalysis.after.runtimeErrorCount;
-  }
-
-  let results = {
-    formStructure: formStructureAnalysis,
-    formEvents: formEventsAnalysis,
-    hiddenFields: hiddenFieldsAnalysis,
-    disabledFields: disabledFieldsAnalysis,
-    ruleCycles: ruleCycleAnalysis,
-    formHTML: formHTMLAnalysis,
-    formCSS: formCSSAnalysis,
-    customFunctions: customFunctionAnalysis,
-    runtimeCLS: runtimeCLSAnalysis,
-  };
+  // Run all 9 analyzers via shared pipeline
+  let results = await runAnalysis(beforeData, afterData, jsFiles, cssFiles, config, {
+    info:    msg => lib_core.info(msg),
+    warning: msg => lib_core.warning(msg),
+    error:   msg => lib_core.error(msg),
+  });
 
   // FILTER results to PR diff files only
   lib_core.info(' Filtering results to PR diff files only...');
