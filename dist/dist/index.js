@@ -179873,6 +179873,7 @@ class CustomFunctionAnalyzer {
     const domAccesses = [];
     const windowAccesses = [];
     const httpRequests = [];
+    const customEventUsages = [];
 
     // Walk through function body to detect violations
     simple(node, {
@@ -179930,6 +179931,13 @@ class CustomFunctionAnalyzer {
             line: newNode.loc?.start.line,
           });
         }
+        // Check for new CustomEvent() — bypasses the AF model event bus
+        if (newNode.callee?.name === 'CustomEvent') {
+          customEventUsages.push({
+            type: 'CustomEvent',
+            line: newNode.loc?.start.line,
+          });
+        }
       },
     });
 
@@ -179942,10 +179950,12 @@ class CustomFunctionAnalyzer {
       hasDOMAccess: domAccesses.length > 0,
       hasWindowAccess: windowAccesses.length > 0,
       hasHTTPRequests: httpRequests.length > 0,
+      hasCustomEventUsage: customEventUsages.length > 0,
       hasBulkSetProperty: bulkSetPropertyGroups.length > 0,
       domAccesses,
       windowAccesses,
       httpRequests,
+      customEventUsages,
       bulkSetPropertyGroups,
     };
   }
@@ -180099,6 +180109,22 @@ class CustomFunctionAnalyzer {
           details: analysis.httpRequests,
           recommendation: 'Replace direct HTTP calls with the form\'s API tool (request() function). This ensures proper error handling, loading states, and integration with the forms runtime.',
           cwvImpact: 'LCP, TBT',
+        });
+      }
+
+      // DOM CustomEvent violation
+      if (analysis.hasCustomEventUsage) {
+        violations.push({
+          severity: 'error',
+          type: 'custom-event-in-custom-function',
+          functionName: analysis.functionName,
+          file: analysis.file,
+          line: analysis.customEventUsages[0]?.line || analysis.line,
+          message: `Custom function "${analysis.functionName}" uses \`new CustomEvent()\`. This fires on the browser DOM event bus, not the AEM Forms model bus — Rule Editor listeners will never trigger.`,
+          details: analysis.customEventUsages,
+          recommendation: 'Replace with globals.functions.dispatchEvent(globals.form, \'custom:eventName\', payload). ' +
+            'Rule Editor "When: custom:eventName" rules only listen to the AF model bus, not DOM CustomEvents.',
+          cwvImpact: 'INP',
         });
       }
 
