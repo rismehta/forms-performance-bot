@@ -188341,6 +188341,316 @@ class RuntimeCLSAnalyzer {
   }
 }
 
+;// CONCATENATED MODULE: ./src/analyzers/fragment-qualified-name-analyzer.js
+
+
+
+
+/**
+ * Detects fragment-portability bugs in custom functions.
+ *
+ * When a custom function lives inside a fragment (i.e. its call sites are all
+ * within a node where `properties['fd:fragment'] === true`), references like
+ * `globals.form.<fragmentName>...` break the function whenever the fragment is
+ * embedded under a different parent. The af2-web-runtime exposes
+ * `globals.fragment` (resolved via BaseNode.getFragmentRuleNode at the call
+ * site) which is portable across embeddings.
+ *
+ * Critical bug: a single misuse breaks the function on every form except the
+ * one it was authored against.
+ */
+class FragmentQualifiedNameAnalyzer {
+  constructor(config = null) {
+    this.config = config;
+  }
+
+  /**
+   * @param {Object} formJson
+   * @param {Array<{filename, content}>} jsFiles
+   */
+  analyze(formJson, jsFiles = []) {
+    if (!formJson || !jsFiles?.length) {
+      return { functionsAnalyzed: 0, violations: 0, issues: [], fragmentsFound: 0 };
+    }
+
+    const fragments = this._collectFragments(formJson);
+    if (fragments.length === 0) {
+      return { functionsAnalyzed: 0, violations: 0, issues: [], fragmentsFound: 0 };
+    }
+
+    // Map function name → set of enclosing fragment names (or null for "outside any fragment").
+    const fnContexts = this._mapFunctionContexts(formJson, fragments);
+
+    // Decide which functions to flag, based on the set of enclosing fragments
+    // across all of their call sites:
+    //
+    //   Case 1 — ctxs = { 'X' }                    → FLAG
+    //     Function is called only from inside fragment X. `globals.fragment`
+    //     resolves to X at every call site. `globals.form.X.*` is non-portable
+    //     and should be `globals.fragment.*`.
+    //
+    //   Case 2 — ctxs = { null }                   → SKIP
+    //     Function is called only from outside any fragment. `globals.fragment`
+    //     is undefined here, so `globals.form.X.*` is the only working form.
+    //     Flagging would force code that breaks at runtime.
+    //
+    //   Case 3 — ctxs = { 'X', null }              → SKIP
+    //     Mixed: some call sites inside fragment X, some outside. The function
+    //     legitimately needs the safe-fallback ternary
+    //     (`globals.fragment?.<child> ? globals.fragment : globals.form?.X`).
+    //     Also short-circuited downstream by the `usesFragmentApi` check.
+    //
+    //   Case 4 — ctxs = { 'X', 'Y' }               → SKIP (known false negative)
+    //     Called from two different fragments. We can't tell which
+    //     `globals.form.<name>` reference belongs to which call site, so
+    //     conservatively skip. In practice rare — shared functions usually
+    //     already use `globals.fragment` and would be skipped by
+    //     `usesFragmentApi`. Revisit if a real example shows up.
+    const flaggable = new Map(); // funcName → fragmentName
+    for (const [fn, ctxs] of fnContexts.entries()) {
+      if (ctxs.size !== 1) continue;        // Cases 3 and 4
+      const [only] = ctxs;
+      if (only) flaggable.set(fn, only);    // Case 1 — only Case 2 falls through (null)
+    }
+
+    if (flaggable.size === 0) {
+      return { functionsAnalyzed: 0, violations: 0, issues: [], fragmentsFound: fragments.length };
+    }
+
+    const issues = [];
+    let analyzed = 0;
+
+    for (const file of jsFiles) {
+      let ast;
+      try {
+        ast = acorn_parse(file.content, {
+          ecmaVersion: 'latest',
+          sourceType: 'module',
+          locations: true,
+        });
+      } catch (err) {
+        lib_core.warning(`[FragmentQualifiedName] Failed to parse ${file.filename}: ${err.message}`);
+        continue;
+      }
+
+      const visitFn = (node, name) => {
+        if (!flaggable.has(name)) return;
+        analyzed++;
+        const fragmentName = flaggable.get(name);
+        const fnIssues = this._scanFunction(node, name, fragmentName, file);
+        issues.push(...fnIssues);
+      };
+
+      simple(ast, {
+        FunctionDeclaration: (node) => {
+          if (node.id?.name) visitFn(node, node.id.name);
+        },
+        VariableDeclarator: (node) => {
+          if (
+            node.id?.name &&
+            (node.init?.type === 'FunctionExpression' || node.init?.type === 'ArrowFunctionExpression')
+          ) {
+            visitFn(node.init, node.id.name);
+          }
+        },
+        AssignmentExpression: (node) => {
+          if (
+            node.left?.type === 'MemberExpression' &&
+            node.left.property?.name &&
+            (node.right?.type === 'FunctionExpression' || node.right?.type === 'ArrowFunctionExpression')
+          ) {
+            visitFn(node.right, node.left.property.name);
+          }
+        },
+      });
+    }
+
+    return {
+      functionsAnalyzed: analyzed,
+      violations: issues.length,
+      issues,
+      fragmentsFound: fragments.length,
+    };
+  }
+
+  /**
+   * Walks the form JSON and returns one entry per fragment node.
+   * @returns {Array<{ name: string, node: object }>}
+   */
+  _collectFragments(formJson) {
+    const out = [];
+    const walkItems = (items) => {
+      if (!items) return;
+      for (const item of Object.values(items)) {
+        if (item?.properties?.['fd:fragment'] === true && item.name) {
+          out.push({ name: item.name, node: item });
+        }
+        if (item?.[':items']) walkItems(item[':items']);
+      }
+    };
+    walkItems(formJson?.[':items']);
+    return out;
+  }
+
+  /**
+   * For every function name referenced in the form JSON, records the set of
+   * enclosing fragment names across all of its call sites. A `null` entry in
+   * the set means "called from outside any fragment".
+   *
+   * @returns {Map<string, Set<string|null>>}
+   */
+  _mapFunctionContexts(formJson, fragments) {
+    const fragmentNodes = new Set(fragments.map(f => f.node));
+    const fnContexts = new Map();
+
+    const addFn = (fnName, enclosing) => {
+      if (!fnContexts.has(fnName)) fnContexts.set(fnName, new Set());
+      fnContexts.get(fnName).add(enclosing);
+    };
+
+    const extractFns = (expr) => {
+      if (!expr || typeof expr !== 'string') return [];
+      const matches = expr.matchAll(/(\w+)\s*\(/g);
+      const names = [];
+      for (const m of matches) names.push(m[1]);
+      return names;
+    };
+
+    const collectFromNode = (item, enclosingFragment) => {
+      if (!item) return;
+
+      const fnsHere = new Set();
+      const harvest = (s) => extractFns(s).forEach(n => fnsHere.add(n));
+
+      if (item.events) {
+        for (const arr of Object.values(item.events)) {
+          if (Array.isArray(arr)) arr.forEach(harvest);
+        }
+      }
+      if (item.rules) {
+        for (const rule of Object.values(item.rules)) harvest(rule);
+      }
+      if (item.validationExpression) harvest(item.validationExpression);
+      if (item.displayValueExpression) harvest(item.displayValueExpression);
+
+      for (const fn of fnsHere) addFn(fn, enclosingFragment);
+    };
+
+    const walkContainer = (items, enclosingFragment) => {
+      if (!items) return;
+      for (const item of Object.values(items)) {
+        if (!item) continue;
+        const nextEnclosing = fragmentNodes.has(item) ? item.name : enclosingFragment;
+        collectFromNode(item, nextEnclosing);
+        if (item[':items']) walkContainer(item[':items'], nextEnclosing);
+      }
+    };
+
+    // Form-level events/rules (always outside any fragment).
+    collectFromNode(formJson, null);
+    walkContainer(formJson?.[':items'], null);
+
+    return fnContexts;
+  }
+
+  /**
+   * Scans a function body for `globals.form.<fragmentName>...` references.
+   * Skips the function entirely if it already references `globals.fragment`
+   * (developer is using the fragment API or fallback pattern intentionally).
+   */
+  _scanFunction(fnNode, functionName, expectedFragment, file) {
+    let usesFragmentApi = false;
+    const offenders = [];
+
+    simple(fnNode, {
+      MemberExpression: (node) => {
+        const path = this._getMemberPath(node);
+        if (!path) return;
+        if (path === 'globals.fragment' || path.startsWith('globals.fragment.')) {
+          usesFragmentApi = true;
+          return;
+        }
+        // _getMemberPath flattens optional chains (globals?.form.X → globals.form.X),
+        // so we only need to match the canonical "globals.form." prefix.
+        if (!path.startsWith('globals.form.')) return;
+        const stripped = path.slice('globals.form.'.length);
+        const head = stripped.split('.')[0];
+        if (head === expectedFragment) {
+          offenders.push({ path, line: node.loc?.start.line });
+        }
+      },
+    });
+
+    if (usesFragmentApi || offenders.length === 0) return [];
+
+    // Dedupe by line. acorn-walk visits every nested MemberExpression in a
+    // chain (a.b.c.d → 4 visits, all matching), so without dedup we'd emit
+    // multiple `details` entries per actual offending line.
+    const seen = new Set();
+    const unique = offenders.filter(o => {
+      if (seen.has(o.line)) return false;
+      seen.add(o.line);
+      return true;
+    });
+
+    return [{
+      severity: 'error',
+      type: 'fragment-qualified-name-in-custom-function',
+      functionName,
+      file: file.filename,
+      line: unique[0].line ?? fnNode.loc?.start.line,
+      message:
+        `Custom function "${functionName}" references "globals.form.${expectedFragment}..." but lives inside fragment "${expectedFragment}". ` +
+        `This breaks portability — the function will fail when the fragment is embedded under a different parent.`,
+      details: unique,
+      fragmentName: expectedFragment,
+      recommendation:
+        `Replace "globals.form.${expectedFragment}" with "globals.fragment". The af2-web-runtime resolves "globals.fragment" ` +
+        `to the nearest enclosing fragment root via getFragmentRuleNode(), making the function portable across embeddings. ` +
+        `If the function is also called from outside the fragment context, use the safe fallback: ` +
+        `\`const ref = globals.fragment?.<knownChild> ? globals.fragment : globals.form?.${expectedFragment};\``,
+      cwvImpact: 'Functional (crashes on embedded fragments)',
+    }];
+  }
+
+  /**
+   * Builds a dotted path from a MemberExpression chain. Mirrors the helper in
+   * custom-function-analyzer.js — returns null on computed access (a[b]).
+   */
+  _getMemberPath(node) {
+    if (!node) return null;
+    if (node.type === 'Identifier') return node.name;
+    if (node.type === 'MemberExpression') {
+      const obj = this._getMemberPath(node.object);
+      const prop = node.computed ? null : node.property?.name;
+      if (!obj || !prop) return null;
+      return `${obj}.${prop}`;
+    }
+    if (node.type === 'ChainExpression') return this._getMemberPath(node.expression);
+    return null;
+  }
+
+  compare(beforeAnalysis, afterAnalysis) {
+    const safe = (a) => a && !a.error ? a : { functionsAnalyzed: 0, violations: 0, issues: [] };
+    const before = safe(beforeAnalysis);
+    const after  = safe(afterAnalysis);
+
+    const key = (i) => `${i.functionName}|${i.file}|${i.line}`;
+    const beforeKeys = new Set((before.issues || []).map(key));
+    const afterKeys  = new Set((after.issues  || []).map(key));
+
+    const resolvedIssues = (before.issues || []).filter(i => !afterKeys.has(key(i)));
+
+    return {
+      before,
+      after,
+      delta: { violationsAdded: (after.violations || 0) - (before.violations || 0) },
+      newIssues: after.issues || [],
+      resolvedIssues,
+    };
+  }
+}
+
 ;// CONCATENATED MODULE: ./src/pipeline.js
 /**
  * Shared analyzer pipeline
@@ -188357,6 +188667,7 @@ class RuntimeCLSAnalyzer {
  * @param {Object} [logger]     - Optional logger: { info, warning, error }. Defaults to console.
  * @returns {Promise<Object>}   - Results object with one key per analyzer
  */
+
 
 
 
@@ -188388,9 +188699,10 @@ async function runAnalysis(beforeData, afterData, jsFiles = [], cssFiles = [], c
   const cssAnalyzer      = new FormCSSAnalyzer(config);
   const cfAnalyzer       = new CustomFunctionAnalyzer(config);
   const clsAnalyzer      = new RuntimeCLSAnalyzer(config);
+  const fragQNAnalyzer   = new FragmentQualifiedNameAnalyzer(config);
 
   let formStructure, formEvents, hiddenFields, disabledFields, ruleCycles, formHTML;
-  let customFunctions, runtimeCLS;
+  let customFunctions, runtimeCLS, fragmentQualifiedName;
 
   const cssRaw    = cssAnalyzer.analyze(cssFiles);
   const clsResult = clsAnalyzer.analyze(jsFiles);
@@ -188428,6 +188740,10 @@ async function runAnalysis(beforeData, afterData, jsFiles = [], cssFiles = [], c
       cfAnalyzer.analyze(afterData.formJson,  jsFiles),
     ]);
 
+    const fragQNBefore = fragQNAnalyzer.analyze(beforeData.formJson, jsFiles);
+    const fragQNAfter  = fragQNAnalyzer.analyze(afterData.formJson,  jsFiles);
+    fragmentQualifiedName = fragQNAnalyzer.compare(fragQNBefore, fragQNAfter);
+
     formStructure  = formAnalyzer.compare(beforeData.formJson, afterData.formJson);
     formEvents     = eventsAnalyzer.compare(beforeData.formJson, afterData.formJson);
     formHTML       = htmlAnalyzer.compare(beforeData.html, afterData.html);
@@ -188438,6 +188754,10 @@ async function runAnalysis(beforeData, afterData, jsFiles = [], cssFiles = [], c
 
     // Merge runtime errors from rule cycle analysis into custom functions issues
     _mergeRuntimeErrors(ruleCycles, customFunctions, log);
+
+    // Merge fragment qualified-name violations into custom functions issues —
+    // they share the same surface (custom function code) and inline-comment plumbing.
+    _mergeFragmentQualifiedNameIssues(fragmentQualifiedName, customFunctions, log);
 
   } else {
     log.info('Running limited analysis (CSS/JS only — no form JSON available)...');
@@ -188454,6 +188774,7 @@ async function runAnalysis(beforeData, afterData, jsFiles = [], cssFiles = [], c
     disabledFields  = { after: { totalDisabledFields: 0, disabledFields: [] }, newIssues: [], resolvedIssues: [] };
     ruleCycles      = { after: { totalRules: 0, cycles: 0, slowRuleCount: 0, runtimeErrors: [] }, newCycles: [], resolvedCycles: [] };
     customFunctions = cfAnalyzer.compare(cfBefore, cfAfter);
+    fragmentQualifiedName = { after: { functionsAnalyzed: 0, violations: 0, issues: [] }, newIssues: [], resolvedIssues: [] };
   }
 
   runtimeCLS = { after: clsResult, newIssues: clsResult.issues ?? [], resolvedIssues: [] };
@@ -188468,6 +188789,7 @@ async function runAnalysis(beforeData, afterData, jsFiles = [], cssFiles = [], c
     formCSS:         { after: cssRaw, newIssues: cssRaw.issues, resolvedIssues: [] },
     customFunctions,
     runtimeCLS,
+    fragmentQualifiedName,
   };
 }
 
@@ -188496,6 +188818,35 @@ function _mergeRuntimeErrors(ruleCycles, customFunctions, log) {
 
   if (ruleCycles.after.runtimeErrorCount != null) {
     customFunctions.after.runtimeErrorCount = ruleCycles.after.runtimeErrorCount;
+  }
+}
+
+/**
+ * Merges fragment-qualified-name violations from FragmentQualifiedNameAnalyzer
+ * into the customFunctions issues stream so they reuse the same reporter
+ * section and inline-comment infrastructure.
+ */
+function _mergeFragmentQualifiedNameIssues(fragmentQualifiedName, customFunctions, log) {
+  const issues = fragmentQualifiedName?.after?.issues;
+  if (!issues?.length) return;
+
+  log.info(`Merging ${issues.length} fragment-portability violation(s) into custom functions`);
+
+  if (!customFunctions.after.issues) customFunctions.after.issues = [];
+  if (!customFunctions.newIssues)    customFunctions.newIssues    = [];
+
+  // CustomFunctionAnalyzer.compare returns newIssues as the same array reference
+  // as after.issues, so push only once when they alias.
+  const aliased = customFunctions.after.issues === customFunctions.newIssues;
+
+  const key = (i) => `${i.functionName}|${i.file}|${i.line}|${i.type}`;
+  const existing = new Set(customFunctions.after.issues.map(key));
+
+  for (const issue of issues) {
+    if (existing.has(key(issue))) continue;
+    customFunctions.after.issues.push(issue);
+    if (!aliased) customFunctions.newIssues.push(issue);
+    existing.add(key(issue));
   }
 }
 
@@ -189250,6 +189601,16 @@ class FormPRReporter {
         });
         lines.push('');
       }
+
+      const fragQNIssues = newIssues.filter(i => i.type === 'fragment-qualified-name-in-custom-function');
+      if (fragQNIssues.length > 0) {
+        lines.push(`**${fragQNIssues.length} Fragment-Portability Violation(s) — Use \`globals.fragment\`:**\n`);
+        fragQNIssues.forEach(issue => {
+          lines.push(`- \`${issue.functionName}()\` in \`${issue.file}:${issue.line}\` references \`globals.form.${issue.fragmentName}\``);
+          lines.push(`  - ${issue.recommendation}`);
+        });
+        lines.push('');
+      }
     }
 
     // Show resolved violations
@@ -189734,6 +190095,7 @@ class FormPRReporter {
     }
     
     // Custom functions (only PR diff files)
+    // Includes fragment-qualified-name violations (merged into newIssues by pipeline).
     if (results.customFunctions?.newIssues?.length) {
       count += results.customFunctions.newIssues.length;
     }
