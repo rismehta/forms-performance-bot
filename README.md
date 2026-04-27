@@ -64,6 +64,32 @@ A GitHub Action that analyzes Adaptive Form performance by comparing before/afte
 
 For more options (offline tests, full vs basic live test), see [test/README.md](test/README.md).
 
+### Standalone CLI (pre-built release artifact)
+
+A standalone `dist/cli/index.js` is published on every merge to `main`. No `git clone` or `npm install` required.
+
+```bash
+# Install
+mkdir -p ~/.performance-bot
+curl -L https://github.com/adobe-aem-forms/performance-bot/releases/latest/download/performance-bot-cli.tar.gz \
+  | tar -xz -C ~/.performance-bot
+
+# Single URL snapshot
+node ~/.performance-bot/index.js --url https://your-branch--your-project.aem.live/
+
+# Before/after comparison
+node ~/.performance-bot/index.js \
+  --before https://main--your-project.aem.live/ \
+  --after  https://branch--your-project.aem.live/
+
+# Git diff mode — analyze only your changed files (run from your project repo)
+node ~/.performance-bot/index.js --diff                        # auto-detects merge-base
+node ~/.performance-bot/index.js --diff HEAD                   # uncommitted changes only
+node ~/.performance-bot/index.js --diff --url https://...      # changed files + URL analysis
+```
+
+See [docs/SKILL.md](docs/SKILL.md) for full CLI reference.
+
 ### Run tests (CI/build)
 
 ```bash
@@ -194,6 +220,7 @@ src/
 │   └── pr-reporter-form.js
 └── utils/
     ├── config-loader.js
+    ├── git-changed-files.js
     └── github-helper.js
 ```
 
