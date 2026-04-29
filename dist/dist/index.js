@@ -184513,17 +184513,17 @@ class HiddenFieldsAnalyzer {
 
       // Pattern 2: Direct property assignment like field.visible = true
       const directAssignmentPattern = /globals\.form(?:\?\.)?([a-zA-Z0-9_.?]+)\.visible\s*=\s*(true|false)/g;
-      
+
       while ((match = directAssignmentPattern.exec(content)) !== null) {
         const fieldPath = match[1];
         const visibleValue = match[2] === 'true';
-        
+
         const pathSegments = fieldPath.split(/[.?]/).filter(Boolean);
         const fieldName = pathSegments[pathSegments.length - 1];
         const fullPath = pathSegments.join('.');
-        
+
         const keys = [fieldName, fullPath];
-        
+
         keys.forEach(key => {
           if (!visibilityChanges[key]) {
             visibilityChanges[key] = {
@@ -184541,6 +184541,133 @@ class HiddenFieldsAnalyzer {
 
           if (visibleValue) {
             visibilityChanges[key].madeVisible = true;
+          } else {
+            visibilityChanges[key].madeHidden = true;
+          }
+        });
+      }
+
+      // Pattern 3: Aliased setProperty — same shape as Pattern 1 but with any matching prefix
+      // e.g. registerPLAUtils.globalPath.functions.setProperty(registerPLAUtils.globalPath.form.X, { visible: true })
+      // \1 backref ensures the call alias matches the form-arg alias; skip 'globals' (handled by Pattern 1).
+      const aliasedSetPropertyPattern =
+        /([\w$]+(?:\.[\w$]+)*)\.functions\.setProperty\s*\(\s*\1\.form(?:\?\.)?([a-zA-Z0-9_.?]+)\s*,\s*\{[^}]*visible\s*:\s*(true|false)[^}]*\}/g;
+
+      while ((match = aliasedSetPropertyPattern.exec(content)) !== null) {
+        if (match[1] === 'globals') continue;
+        const fieldPath = match[2];
+        const visibleValue = match[3] === 'true';
+        fileMatches++;
+        totalMatches++;
+
+        const pathSegments = fieldPath.split(/[.?]/).filter(Boolean);
+        const fieldName = pathSegments[pathSegments.length - 1];
+        const fullPath = pathSegments.join('.');
+
+        const keys = [fieldName, fullPath];
+
+        keys.forEach(key => {
+          if (!visibilityChanges[key]) {
+            visibilityChanges[key] = {
+              files: [],
+              madeVisible: false,
+              madeHidden: false,
+            };
+          }
+
+          visibilityChanges[key].files.push({
+            filename,
+            visible: visibleValue,
+            line: this.getLineNumber(content, match.index),
+          });
+
+          if (visibleValue) {
+            visibilityChanges[key].madeVisible = true;
+          } else {
+            visibilityChanges[key].madeHidden = true;
+          }
+        });
+      }
+
+      // Pattern 4a: Object-literal entry with key-then-data shape
+      // { <anyKey>: <chain>, data: { visible: true|false } }
+      // Key name is project-specific (fieldPath / path / target / ref / etc) — skip when literally 'data'.
+      const objectLiteralKeyFirstPattern =
+        /\b(\w+)\s*:\s*([\w$.?]+)\s*,\s*data\s*:\s*\{[^{}]*\bvisible\s*:\s*(true|false)[^{}]*\}/g;
+
+      while ((match = objectLiteralKeyFirstPattern.exec(content)) !== null) {
+        if (match[1] === 'data') continue;
+        const fieldPath = match[2];
+        const visibleValue = match[3] === 'true';
+        fileMatches++;
+        totalMatches++;
+
+        const pathSegments = fieldPath.split(/[.?]/).filter(Boolean);
+        const fieldName = pathSegments[pathSegments.length - 1];
+        const fullPath = pathSegments.join('.');
+
+        const keys = [fieldName, fullPath];
+
+        keys.forEach(key => {
+          if (!visibilityChanges[key]) {
+            visibilityChanges[key] = {
+              files: [],
+              madeVisible: false,
+              madeHidden: false,
+            };
+          }
+
+          visibilityChanges[key].files.push({
+            filename,
+            visible: visibleValue,
+            line: this.getLineNumber(content, match.index),
+          });
+
+          if (visibleValue) {
+            visibilityChanges[key].madeVisible = true;
+          } else {
+            visibilityChanges[key].madeHidden = true;
+          }
+        });
+      }
+
+      // Pattern 4b: Object-literal entry with data-then-key shape
+      // { data: { visible: true|false }, <anyKey>: <chain> }
+      const objectLiteralDataFirstPattern =
+        /\bdata\s*:\s*\{[^{}]*\bvisible\s*:\s*(true|false)[^{}]*\}\s*,\s*(\w+)\s*:\s*([\w$.?]+)/g;
+
+      while ((match = objectLiteralDataFirstPattern.exec(content)) !== null) {
+        if (match[2] === 'data') continue;
+        const visibleValue = match[1] === 'true';
+        const fieldPath = match[3];
+        fileMatches++;
+        totalMatches++;
+
+        const pathSegments = fieldPath.split(/[.?]/).filter(Boolean);
+        const fieldName = pathSegments[pathSegments.length - 1];
+        const fullPath = pathSegments.join('.');
+
+        const keys = [fieldName, fullPath];
+
+        keys.forEach(key => {
+          if (!visibilityChanges[key]) {
+            visibilityChanges[key] = {
+              files: [],
+              madeVisible: false,
+              madeHidden: false,
+            };
+          }
+
+          visibilityChanges[key].files.push({
+            filename,
+            visible: visibleValue,
+            line: this.getLineNumber(content, match.index),
+          });
+
+          if (visibleValue) {
+            visibilityChanges[key].madeVisible = true;
+          } else {
+            visibilityChanges[key].madeHidden = true;
           }
         });
       }
