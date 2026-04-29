@@ -188778,11 +188778,213 @@ class FragmentQualifiedNameAnalyzer {
   }
 }
 
+;// CONCATENATED MODULE: ./src/analyzers/block-decorator-analyzer.js
+
+
+
+
+/**
+ * Analyzes EDS block-component decorator JS files for anti-patterns
+ * that bypass the form runtime model.
+ *
+ * Scope: files matching /blocks/form/components/<name>/<name>.js
+ *        (Core Component setups have no equivalent files — analyzer no-ops.)
+ *
+ * Rule:
+ *   block-decorator-input-mutation (error)
+ *     Mutates `event.target.value` inside `addEventListener('input'|'keydown'|'keyup', ...)`
+ *     without dispatching `change` or calling `setProperty` / `setValue`.
+ *     DOM and runtime model desync — submission may send the original value.
+ */
+
+const BLOCK_DECORATOR_PATH = /\/blocks\/form\/components\/([^/]+)\/([^/]+)\.js$/;
+const KEYSTROKE_EVENTS = new Set(['input', 'keydown', 'keyup']);
+// Conventional event-arg names accepted in addition to the handler's first param.
+const EVENT_ALIASES = new Set(['event', 'e', 'evt', 'ev']);
+
+/**
+ * Returns true only for the EDS decorator entrypoint convention:
+ *   .../blocks/form/components/<name>/<name>.js
+ * Sibling files in the same folder (helper.js, constants.js, etc.) are excluded.
+ */
+function isBlockDecoratorPath(filename) {
+  const norm = String(filename || '').replace(/\\/g, '/');
+  const m = norm.match(BLOCK_DECORATOR_PATH);
+  return !!m && m[1] === m[2];
+}
+
+class BlockDecoratorAnalyzer {
+  constructor(config = null) {
+    this.config = config;
+  }
+
+  /**
+   * @param {Array} jsFiles - Array of { filename, content }
+   * @returns {Object} { filesAnalyzed, issues }
+   */
+  analyze(jsFiles = []) {
+    const blockFiles = (jsFiles || []).filter(f => isBlockDecoratorPath(f.filename));
+
+    const issues = [];
+    for (const file of blockFiles) {
+      try {
+        const ast = acorn_parse(file.content, {
+          ecmaVersion: 'latest',
+          sourceType: 'module',
+          locations: true,
+        });
+        this.checkFile(ast, file, issues);
+      } catch (err) {
+        lib_core.warning(`[BlockDecorator] Failed to parse ${file.filename}: ${err.message}`);
+      }
+    }
+
+    lib_core.info(`[BlockDecorator] Analyzed ${blockFiles.length} block file(s), found ${issues.length} issue(s)`);
+
+    return {
+      filesAnalyzed: blockFiles.length,
+      issues,
+    };
+  }
+
+  checkFile(ast, file, issues) {
+    simple(ast, {
+      CallExpression: (node) => {
+        if (!this.isAddEventListener(node)) return;
+        const eventArg = node.arguments[0];
+        const eventType = eventArg?.value;
+        if (!KEYSTROKE_EVENTS.has(eventType)) return;
+
+        const handler = node.arguments[1];
+        if (!handler) return;
+        if (handler.type !== 'FunctionExpression' && handler.type !== 'ArrowFunctionExpression') return;
+
+        const info = this.scanHandlerBody(handler, this.eventArgNames(handler));
+
+        // Value mutation without model sync
+        if (info.targetValueAssign && !info.dispatchesChange && !info.callsSetter) {
+          issues.push({
+            severity: 'error',
+            type: 'block-decorator-input-mutation',
+            file: file.filename,
+            line: info.targetValueAssign.loc.start.line,
+            eventType,
+            message: `Mutates event.target.value inside '${eventType}' handler without dispatching 'change' or calling setProperty — form runtime model desyncs from the visible value.`,
+            recommendation: "Prevent invalid input via 'beforeinput' + e.preventDefault(); or after assignment dispatch new Event('change', { bubbles: true }) so the runtime syncs the model.",
+          });
+        }
+      },
+    });
+  }
+
+  /**
+   * Walk a handler function body and report what it does.
+   * @param {Set<string>} allowedRoots - root identifier names accepted as the event argument.
+   */
+  scanHandlerBody(handlerNode, allowedRoots) {
+    const result = {
+      targetValueAssign: null,
+      dispatchesChange: false,
+      callsSetter: false,
+    };
+
+    simple(handlerNode.body, {
+      AssignmentExpression: (node) => {
+        if (this.isEventTargetValueAssign(node, allowedRoots)) {
+          result.targetValueAssign ||= node;
+        }
+      },
+      CallExpression: (node) => {
+        if (this.isDispatchChange(node)) result.dispatchesChange = true;
+        if (this.isRuntimeSetter(node)) result.callsSetter = true;
+      },
+    });
+
+    return result;
+  }
+
+  /**
+   * Names accepted as the event-argument root for a given handler:
+   *   - the actual first parameter name (Identifier only — destructured params skipped)
+   *   - common conventional aliases: event, e, evt, ev
+   */
+  eventArgNames(handlerNode) {
+    const allowed = new Set(EVENT_ALIASES);
+    const first = handlerNode.params?.[0];
+    if (first?.type === 'Identifier') allowed.add(first.name);
+    return allowed;
+  }
+
+  // <eventArg>.target.value = X   where <eventArg> is the handler's first param
+  // identifier or a conventional alias (event/e/evt/ev).
+  isEventTargetValueAssign(node, allowedRoots) {
+    const left = node.left;
+    if (!left || left.type !== 'MemberExpression') return false;
+    if (left.property?.name !== 'value') return false;
+    const obj = left.object;
+    if (!obj || obj.type !== 'MemberExpression') return false;
+    if (obj.property?.name !== 'target') return false;
+    const root = obj.object;
+    if (!root || root.type !== 'Identifier') return false;
+    return allowedRoots.has(root.name);
+  }
+
+  // X.addEventListener('eventName', handler)
+  isAddEventListener(node) {
+    if (node.callee?.type !== 'MemberExpression') return false;
+    if (node.callee.property?.name !== 'addEventListener') return false;
+    const arg0 = node.arguments?.[0];
+    return arg0?.type === 'Literal' && typeof arg0.value === 'string';
+  }
+
+  // X.dispatchEvent(new Event('change')) / new CustomEvent('change')
+  isDispatchChange(node) {
+    if (node.callee?.type !== 'MemberExpression') return false;
+    if (node.callee.property?.name !== 'dispatchEvent') return false;
+    const arg = node.arguments?.[0];
+    if (!arg) return false;
+    if (arg.type === 'NewExpression' &&
+        (arg.callee?.name === 'Event' || arg.callee?.name === 'CustomEvent')) {
+      return arg.arguments?.[0]?.value === 'change';
+    }
+    return false;
+  }
+
+  // X.setProperty(...) / X.setValue(...)
+  isRuntimeSetter(node) {
+    if (node.callee?.type !== 'MemberExpression') return false;
+    const name = node.callee.property?.name;
+    return name === 'setProperty' || name === 'setValue';
+  }
+
+  /**
+   * Diff between two analyses.
+   */
+  compare(beforeJsFiles, afterJsFiles) {
+    const before = this.analyze(beforeJsFiles);
+    const after = this.analyze(afterJsFiles);
+
+    const key = i => `${i.file}|${i.type}|${i.line}`;
+    const afterKeys = new Set(after.issues.map(key));
+    const beforeKeys = new Set(before.issues.map(key));
+
+    return {
+      before,
+      after,
+      delta: {
+        issuesAdded: after.issues.length - before.issues.length,
+      },
+      newIssues: after.issues.filter(i => !beforeKeys.has(key(i))),
+      resolvedIssues: before.issues.filter(i => !afterKeys.has(key(i))),
+    };
+  }
+}
+
 ;// CONCATENATED MODULE: ./src/pipeline.js
 /**
  * Shared analyzer pipeline
  *
- * Single source of truth for running all 9 analyzers.
+ * Single source of truth for running all analyzers.
  * Used by both the GitHub Actions entry (src/index.js) and the local CLI
  * (src/cli/analyze.js). Adding a new analyzer means editing only this file.
  *
@@ -188794,6 +188996,7 @@ class FragmentQualifiedNameAnalyzer {
  * @param {Object} [logger]     - Optional logger: { info, warning, error }. Defaults to console.
  * @returns {Promise<Object>}   - Results object with one key per analyzer
  */
+
 
 
 
@@ -188827,15 +189030,17 @@ async function runAnalysis(beforeData, afterData, jsFiles = [], cssFiles = [], c
   const cfAnalyzer       = new CustomFunctionAnalyzer(config);
   const clsAnalyzer      = new RuntimeCLSAnalyzer(config);
   const fragQNAnalyzer   = new FragmentQualifiedNameAnalyzer(config);
+  const blockDecAnalyzer = new BlockDecoratorAnalyzer(config);
 
   let formStructure, formEvents, hiddenFields, disabledFields, ruleCycles, formHTML;
-  let customFunctions, runtimeCLS, fragmentQualifiedName;
+  let customFunctions, runtimeCLS, fragmentQualifiedName, blockDecorator;
 
-  const cssRaw    = cssAnalyzer.analyze(cssFiles);
-  const clsResult = clsAnalyzer.analyze(jsFiles);
+  const cssRaw          = cssAnalyzer.analyze(cssFiles);
+  const clsResult       = clsAnalyzer.analyze(jsFiles);
+  const blockDecResult  = blockDecAnalyzer.analyze(jsFiles);
 
   if (hasFormData) {
-    log.info('Running all 9 analyzers in parallel...');
+    log.info('Running all analyzers in parallel...');
 
     const [
       hiddenBefore,   hiddenAfter,
@@ -188905,6 +189110,7 @@ async function runAnalysis(beforeData, afterData, jsFiles = [], cssFiles = [], c
   }
 
   runtimeCLS = { after: clsResult, newIssues: clsResult.issues ?? [], resolvedIssues: [] };
+  blockDecorator = { after: blockDecResult, newIssues: blockDecResult.issues ?? [], resolvedIssues: [] };
 
   return {
     formStructure,
@@ -188917,6 +189123,7 @@ async function runAnalysis(beforeData, afterData, jsFiles = [], cssFiles = [], c
     customFunctions,
     runtimeCLS,
     fragmentQualifiedName,
+    blockDecorator,
   };
 }
 
@@ -189824,6 +190031,38 @@ class FormPRReporter {
   }
 
   /**
+   * Build Block Decorator Analysis section
+   * Anti-patterns in EDS form-block decorator JS files: mutating
+   * event.target.value without dispatching `change` or calling setProperty.
+   */
+  buildBlockDecoratorSection(blockDecorator) {
+    if (!blockDecorator || !blockDecorator.newIssues || blockDecorator.newIssues.length === 0) {
+      return '';
+    }
+
+    const lines = ['### Block Decorator Anti-Patterns\n'];
+    const { after, newIssues } = blockDecorator;
+
+    if (after) {
+      lines.push(`**Files Analyzed:** ${after.filesAnalyzed}\n`);
+    }
+
+    const mutationIssues = newIssues.filter(i => i.type === 'block-decorator-input-mutation');
+
+    if (mutationIssues.length > 0) {
+      lines.push(`**${mutationIssues.length} Direct Value Mutation (Critical):**\n`);
+      lines.push('Mutating `event.target.value` without dispatching `change` desyncs the form runtime model from the DOM — submission may send the original (unstripped) value.\n');
+      mutationIssues.forEach(issue => {
+        lines.push(`- \`${issue.file}:${issue.line}\` (event: \`${issue.eventType}\`)`);
+        lines.push(`  - ${issue.recommendation}`);
+      });
+      lines.push('');
+    }
+
+    return lines.join('\n');
+  }
+
+  /**
    * Build summary section
    */
   buildFormSummarySection(results) {
@@ -190108,6 +190347,24 @@ class FormPRReporter {
       }
     }
 
+    // Block decorator anti-patterns
+    if (results.blockDecorator && results.blockDecorator.newIssues && results.blockDecorator.newIssues.length > 0) {
+      const { newIssues, resolvedIssues } = results.blockDecorator;
+
+      const mutationIssues = newIssues.filter(i => i.type === 'block-decorator-input-mutation');
+
+      if (mutationIssues.length > 0) {
+        impact.critical.push(`${mutationIssues.length} block decorator(s) mutate input.value without model sync (form runtime desync)`);
+        impact.recommendations.push('Use beforeinput + preventDefault, or dispatch new Event("change") after assignment, so the form runtime model stays in sync.');
+        score -= mutationIssues.length * 40;
+      }
+
+      if (resolvedIssues && resolvedIssues.length > 0) {
+        impact.positives.push(`Fixed ${resolvedIssues.length} block decorator issue(s)`);
+        score += resolvedIssues.length * 30;
+      }
+    }
+
     // Determine overall rating
     if (score > 20) {
       impact.rating = 'Positive';
@@ -190235,6 +190492,11 @@ class FormPRReporter {
     // Runtime CLS (only PR diff files - only count errors, not warnings)
     if (results.runtimeCLS?.newIssues?.length) {
       count += results.runtimeCLS.newIssues.filter(i => i.severity === 'error').length;
+    }
+
+    // Block decorator anti-patterns (only count errors)
+    if (results.blockDecorator?.newIssues?.length) {
+      count += results.blockDecorator.newIssues.filter(i => i.severity === 'error').length;
     }
     
     // HTML (only PR diff - URL-based, always shown)
