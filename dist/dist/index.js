@@ -184618,7 +184618,14 @@ class HiddenFieldsAnalyzer {
     jsFiles.forEach(file => {
       const { filename, content } = file;
       let fileMatches = 0;
-      
+
+      // Pre-pass: build alias map for this file.
+      // Maps variable names → actual field names for patterns like:
+      //   var modal = root.emailOtpModal;
+      //   globals.functions.setProperty(modal, { visible: true });
+      // Without this, Pattern 5 records 'modal' instead of 'emailOtpModal'.
+      const aliasMap = this.buildAliasMap(content);
+
       // Pattern 1: globals.functions.setProperty(globals.form.fieldName, { visible: true/false/variable })
       // Matches literal true/false AND variable identifiers (e.g. visible: isAssisted)
       const setPropertyPattern = /globals\.functions\.setProperty\s*\(\s*globals\.form(?:\?\.)?([a-zA-Z0-9_.?]+)\s*,\s*\{[^}]*visible\s*:\s*(true|false|[a-zA-Z_$][a-zA-Z0-9_$]*)[^}]*\}/g;
@@ -184784,6 +184791,49 @@ class HiddenFieldsAnalyzer {
         });
       }
 
+      // Pattern 5: globals.functions.setProperty(<localVar>, { visible: true|false })
+      // Catches fragment-local field references not prefixed with globals.form.
+      // Two sub-cases:
+      //   5a — multi-segment chain: setProperty(step2Panel.step2IconDone, ...) → extract last segment
+      //   5b — single-token alias:  setProperty(modal, ...)                   → resolve via aliasMap
+      // Must run AFTER Patterns 1-4 to avoid double-counting globals.form.X matches.
+      const localVarSetPropertyPattern =
+        /globals\.functions\.setProperty\s*\(\s*([\w$][\w$.?]*)\s*,\s*\{[^}]*visible\s*:\s*(true|false|[a-zA-Z_$][a-zA-Z0-9_$]*)[^}]*\}/g;
+
+      while ((match = localVarSetPropertyPattern.exec(content)) !== null) {
+        const rawArg = match[1];
+        // Skip if already covered by Pattern 1 (globals.form prefix) or Pattern 3 (aliased prefix)
+        if (/^globals[.?]form/.test(rawArg) || /\.form[.?]/.test(rawArg)) continue;
+        const visibleValue = match[2] === 'false' ? false : true;
+        fileMatches++;
+        totalMatches++;
+
+        const pathSegments = rawArg.split(/[.?]/).filter(Boolean);
+        let fieldName;
+
+        if (pathSegments.length === 1) {
+          // 5b — single-token alias: look up in aliasMap to get the real field name
+          fieldName = aliasMap[rawArg] || rawArg;
+        } else {
+          // 5a — multi-segment chain: last segment is the field name
+          fieldName = pathSegments[pathSegments.length - 1];
+        }
+
+        if (!visibilityChanges[fieldName]) {
+          visibilityChanges[fieldName] = { files: [], madeVisible: false, madeHidden: false };
+        }
+        visibilityChanges[fieldName].files.push({
+          filename,
+          visible: visibleValue,
+          line: this.getLineNumber(content, match.index),
+        });
+        if (visibleValue) {
+          visibilityChanges[fieldName].madeVisible = true;
+        } else {
+          visibilityChanges[fieldName].madeHidden = true;
+        }
+      }
+
       // Pattern 4b: Object-literal entry with data-then-key shape
       // { data: { visible: true|false }, <anyKey>: <chain> }
       const objectLiteralDataFirstPattern =
@@ -184827,6 +184877,67 @@ class HiddenFieldsAnalyzer {
     });
 
     return visibilityChanges;
+  }
+
+  /**
+   * Build a per-file alias map: variable name → resolved field name.
+   *
+   * Resolves patterns like:
+   *   var modal       = root.emailOtpModal;             → { modal: 'emailOtpModal' }
+   *   var manualPanel = addrPanel.manualAddressPanel;   → { manualPanel: 'manualAddressPanel' }
+   *   var loaderWrapper = globals && globals.form && globals.form.xplLoaderWrapper;
+   *                                                     → { loaderWrapper: 'xplLoaderWrapper' }
+   *
+   * Strategy: for each var/const/let declaration, extract the last valid identifier
+   * from the RHS (skipping JS keywords and the alias itself). This covers dot-chains,
+   * optional-chaining, and &&-guarded assignments regardless of depth.
+   *
+   * Limitations:
+   * - Dynamic access (e.g. fieldsPanel[bankFields[i]]) cannot be resolved → skipped.
+   * - When the same alias is declared in multiple scopes, the longest field name wins
+   *   (heuristic: longer names are more specific and less likely to be an intermediate panel).
+   * - Does not track scope boundaries; treats the whole file as one flat namespace.
+   *
+   * @param {string} content - JavaScript source
+   * @returns {Object} alias → fieldName map
+   */
+  buildAliasMap(content) {
+    const aliasMap = {};
+    const JS_KEYWORDS = new Set([
+      'var', 'const', 'let', 'function', 'return', 'if', 'else', 'new', 'this',
+      'true', 'false', 'null', 'undefined', 'globals', 'window', 'document',
+      'typeof', 'instanceof', 'void', 'delete', 'in', 'of', 'for', 'while',
+      'do', 'switch', 'case', 'break', 'continue', 'try', 'catch', 'finally',
+      'throw', 'class', 'extends', 'import', 'export', 'default', 'async', 'await',
+    ]);
+
+    // [^;]+ captures multi-line RHS because [^;] matches \n
+    const varDeclPattern = /(?:var|const|let)\s+(\w+)\s*=\s*([^;]+);/g;
+    let match;
+    while ((match = varDeclPattern.exec(content)) !== null) {
+      const alias = match[1];
+      const rhs = match[2].replace(/\s+/g, ' ').trim();
+
+      // Skip dynamic array access — cannot resolve statically
+      if (/\[[^\]]*[a-zA-Z_$][^\]]*\]/.test(rhs)) continue;
+
+      // Extract all identifier tokens from RHS; take the last non-keyword one
+      const identifiers = rhs
+        .split(/[^a-zA-Z0-9_$]+/)
+        .filter(s => s.length > 0 && /^[a-zA-Z_$]/.test(s) && !JS_KEYWORDS.has(s));
+
+      if (identifiers.length === 0) continue;
+      const fieldName = identifiers[identifiers.length - 1];
+
+      // Skip trivial mappings (alias === fieldName already handled by last-segment extraction)
+      if (alias === fieldName) continue;
+
+      // When the same alias appears in multiple scopes, prefer the longer (more specific) field name
+      if (!aliasMap[alias] || fieldName.length > aliasMap[alias].length) {
+        aliasMap[alias] = fieldName;
+      }
+    }
+    return aliasMap;
   }
 
   /**
