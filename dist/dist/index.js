@@ -184619,13 +184619,15 @@ class HiddenFieldsAnalyzer {
       const { filename, content } = file;
       let fileMatches = 0;
       
-      // Pattern 1: globals.functions.setProperty(globals.form.fieldName, { visible: true/false })
-      const setPropertyPattern = /globals\.functions\.setProperty\s*\(\s*globals\.form(?:\?\.)?([a-zA-Z0-9_.?]+)\s*,\s*\{[^}]*visible\s*:\s*(true|false)[^}]*\}/g;
-      
+      // Pattern 1: globals.functions.setProperty(globals.form.fieldName, { visible: true/false/variable })
+      // Matches literal true/false AND variable identifiers (e.g. visible: isAssisted)
+      const setPropertyPattern = /globals\.functions\.setProperty\s*\(\s*globals\.form(?:\?\.)?([a-zA-Z0-9_.?]+)\s*,\s*\{[^}]*visible\s*:\s*(true|false|[a-zA-Z_$][a-zA-Z0-9_$]*)[^}]*\}/g;
+
       let match;
       while ((match = setPropertyPattern.exec(content)) !== null) {
         const fieldPath = match[1];
-        const visibleValue = match[2] === 'true';
+        // Variable value (not a literal) → treat as madeVisible=true since it can be shown
+        const visibleValue = match[2] === 'false' ? false : true;
         fileMatches++;
         totalMatches++;
         
@@ -184702,12 +184704,12 @@ class HiddenFieldsAnalyzer {
       // e.g. registerPLAUtils.globalPath.functions.setProperty(registerPLAUtils.globalPath.form.X, { visible: true })
       // \1 backref ensures the call alias matches the form-arg alias; skip 'globals' (handled by Pattern 1).
       const aliasedSetPropertyPattern =
-        /([\w$]+(?:\.[\w$]+)*)\.functions\.setProperty\s*\(\s*\1\.form(?:\?\.)?([a-zA-Z0-9_.?]+)\s*,\s*\{[^}]*visible\s*:\s*(true|false)[^}]*\}/g;
+        /([\w$]+(?:\.[\w$]+)*)\.functions\.setProperty\s*\(\s*\1\.form(?:\?\.)?([a-zA-Z0-9_.?]+)\s*,\s*\{[^}]*visible\s*:\s*(true|false|[a-zA-Z_$][a-zA-Z0-9_$]*)[^}]*\}/g;
 
       while ((match = aliasedSetPropertyPattern.exec(content)) !== null) {
         if (match[1] === 'globals') continue;
         const fieldPath = match[2];
-        const visibleValue = match[3] === 'true';
+        const visibleValue = match[3] === 'false' ? false : true;
         fileMatches++;
         totalMatches++;
 
