@@ -179582,18 +179582,29 @@ class CustomFunctionAnalyzer {
       for (const jsFile of jsFiles) {
         try {
           // Parse with locations enabled to get line numbers
-          const ast = acorn_parse(jsFile.content, { 
+          const ast = acorn_parse(jsFile.content, {
             ecmaVersion: 'latest',  // Support all modern JavaScript including class fields
             sourceType: 'module',
             locations: true  // ← CRITICAL: Required for line numbers!
           });
+          // Build declaration map once per file — used for re-export resolution (Gap 1)
+          // and transitive call following (Gap 2).
+          const fileDeclarations = this.buildFileDeclarations(ast);
           simple(ast, {
             ExportNamedDeclaration: (node) => {
-              if (node.declaration && node.declaration.type === 'FunctionDeclaration') {
+              // Case 1: export function foo() {}
+              if (node.declaration?.type === 'FunctionDeclaration') {
                 const funcName = node.declaration.id.name;
-                const analysis = this.analyzeFunctionNode(node.declaration, jsFile, funcName);
-                if (analysis) {
-                  allFunctionAnalyses.push(analysis);
+                const analysis = this.analyzeFunctionNode(node.declaration, jsFile, funcName, fileDeclarations);
+                if (analysis) allFunctionAnalyses.push(analysis);
+              }
+              // Case 2: export { foo, bar } — look up each specifier in the declaration map
+              for (const specifier of node.specifiers ?? []) {
+                const name = specifier.local.name;
+                const funcNode = fileDeclarations.get(name);
+                if (funcNode) {
+                  const analysis = this.analyzeFunctionNode(funcNode, jsFile, name, fileDeclarations);
+                  if (analysis) allFunctionAnalyses.push(analysis);
                 }
               }
             }
@@ -179681,6 +179692,28 @@ class CustomFunctionAnalyzer {
     const functionNames = this.extractFunctionNames(formJson);
     lib_core.info(`[CustomFunctions] Extracted ${functionNames.length} custom function(s) from form JSON`);
 
+    // If form JSON references a customFunctionsPath file but has no compiled function calls,
+    // custom function analysis will silently produce no results. Flag it as a critical issue.
+    if (functionNames.length === 0 && filteredJsFiles.length > 0) {
+      const exportedFunctions = this.countExportedFunctions(filteredJsFiles);
+      if (exportedFunctions > 0) {
+        lib_core.error(`[CustomFunctions] ❌ customFunctionsPath points to a file with ${exportedFunctions} exported function(s) but the form JSON contains no function call expressions — custom function analysis was skipped.`);
+        return {
+          functionsFound: 0,
+          functionNames: [],
+          functionsAnalyzed: 0,
+          violations: 0,
+          issues: [{
+            severity: 'error',
+            type: 'custom-functions-not-analyzed',
+            message: `customFunctionsPath is set and the JS file has ${exportedFunctions} exported function(s), but the form JSON contains no function call expressions. Custom function analysis was skipped.`,
+            file: filteredJsFiles[0]?.filename,
+          }],
+          details: [],
+        };
+      }
+    }
+
     // Step 2: Find and analyze these functions in the filtered JS files
     const functionAnalyses = this.analyzeFunctionsInJS(functionNames, filteredJsFiles);
     lib_core.info(`[CustomFunctions] Found ${functionAnalyses.length} function definition(s) in JS files`);
@@ -179705,6 +179738,32 @@ class CustomFunctionAnalyzer {
       issues: violations,
       details: functionAnalyses,
     };
+  }
+
+  /**
+   * Count exported functions in JS files without needing a name list.
+   * Used to detect when a file has functions but the form JSON references none.
+   */
+  countExportedFunctions(jsFiles) {
+    let count = 0;
+    for (const file of jsFiles) {
+      try {
+        const ast = acorn_parse(file.content, { ecmaVersion: 'latest', sourceType: 'module', locations: true });
+        // Build declaration map so we can verify export { X } specifiers are actually functions.
+        const fileDeclarations = this.buildFileDeclarations(ast);
+        simple(ast, {
+          ExportNamedDeclaration: (node) => {
+            // export function foo() {}
+            if (node.declaration?.type === 'FunctionDeclaration') count++;
+            // export { foo, bar } — only count specifiers that resolve to function declarations
+            for (const specifier of node.specifiers ?? []) {
+              if (fileDeclarations.has(specifier.local.name)) count++;
+            }
+          },
+        });
+      } catch (_) { /* unparseable — skip */ }
+    }
+    return count;
   }
 
   /**
@@ -179824,11 +179883,13 @@ class CustomFunctionAnalyzer {
           locations: true,
         });
 
+        const fileDeclarations = this.buildFileDeclarations(ast);
+
         // Find function definitions
         simple(ast, {
           FunctionDeclaration: (node) => {
             if (node.id && nameSet.has(node.id.name)) {
-              const analysis = this.analyzeFunctionNode(node, file);
+              const analysis = this.analyzeFunctionNode(node, file, null, fileDeclarations);
               analyses.push(analysis);
             }
           },
@@ -179837,7 +179898,7 @@ class CustomFunctionAnalyzer {
             if (node.id && nameSet.has(node.id.name) &&
                 (node.init?.type === 'FunctionExpression' ||
                  node.init?.type === 'ArrowFunctionExpression')) {
-              const analysis = this.analyzeFunctionNode(node.init, file, node.id.name);
+              const analysis = this.analyzeFunctionNode(node.init, file, node.id.name, fileDeclarations);
               analyses.push(analysis);
             }
           },
@@ -179846,7 +179907,7 @@ class CustomFunctionAnalyzer {
             if (node.left?.property && nameSet.has(node.left.property.name) &&
                 (node.right?.type === 'FunctionExpression' ||
                  node.right?.type === 'ArrowFunctionExpression')) {
-              const analysis = this.analyzeFunctionNode(node.right, file, node.left.property.name);
+              const analysis = this.analyzeFunctionNode(node.right, file, node.left.property.name, fileDeclarations);
               analyses.push(analysis);
             }
           },
@@ -179868,7 +179929,7 @@ class CustomFunctionAnalyzer {
    * @param {string} name - Function name (optional, extracted from node if not provided)
    * @returns {Object} Analysis result
    */
-  analyzeFunctionNode(node, file, name = null) {
+  analyzeFunctionNode(node, file, name = null, fileDeclarations = new Map()) {
     const functionName = name || node.id?.name || 'anonymous';
     const domAccesses = [];
     const windowAccesses = [];
@@ -179942,6 +180003,7 @@ class CustomFunctionAnalyzer {
     });
 
     const bulkSetPropertyGroups = this.detectBulkSetProperty(node);
+    const directPropertiesMutations = this.detectDirectPropertiesMutation(node, fileDeclarations, new Set([functionName]));
 
     return {
       functionName,
@@ -179952,11 +180014,13 @@ class CustomFunctionAnalyzer {
       hasHTTPRequests: httpRequests.length > 0,
       hasCustomEventUsage: customEventUsages.length > 0,
       hasBulkSetProperty: bulkSetPropertyGroups.length > 0,
+      hasDirectPropertiesMutation: directPropertiesMutations.length > 0,
       domAccesses,
       windowAccesses,
       httpRequests,
       customEventUsages,
       bulkSetPropertyGroups,
+      directPropertiesMutations,
     };
   }
 
@@ -180043,6 +180107,73 @@ class CustomFunctionAnalyzer {
       }
     }
     return violations;
+  }
+
+  /**
+   * Builds a map of all function declarations in an AST.
+   * Used for re-export resolution (Gap 1) and transitive call following (Gap 2).
+   *
+   * @param {Object} ast - Parsed acorn AST
+   * @returns {Map<string, Object>} name → function AST node
+   */
+  buildFileDeclarations(ast) {
+    const decls = new Map();
+    simple(ast, {
+      FunctionDeclaration: (node) => {
+        if (node.id?.name) decls.set(node.id.name, node);
+      },
+      VariableDeclarator: (node) => {
+        const name = node.id?.name;
+        const init = node.init;
+        if (name && (init?.type === 'FunctionExpression' || init?.type === 'ArrowFunctionExpression')) {
+          decls.set(name, init);
+        }
+      },
+    });
+    return decls;
+  }
+
+  /**
+   * Detects direct mutations of globals.form.$properties.key = value.
+   * These bypass the AEM Forms model — the runtime never sees the change.
+   * Both direct (globals.form.$properties.key) and aliased
+   * (alias.form.$properties.key) patterns are caught.
+   *
+   * @param {Object} node - Function AST node
+   * @returns {Array<{line, path, key}>}
+   */
+  detectDirectPropertiesMutation(node, fileDeclarations = new Map(), visited = new Set()) {
+    const mutations = [];
+
+    simple(node, {
+      AssignmentExpression: (assignNode) => {
+        const leftPath = this.getMemberExpressionPath(assignNode.left);
+        if (!leftPath) return;
+        // Match any path containing .$properties.<key> on the left-hand side
+        if (!leftPath.includes('.$properties.')) return;
+        const afterProperties = leftPath.split('.$properties.')[1];
+        if (!afterProperties) return;
+        mutations.push({
+          line: assignNode.loc?.start.line,
+          path: leftPath,
+          key: afterProperties,
+        });
+      },
+      CallExpression: (callNode) => {
+        // Follow simple identifier calls to local helper functions (Gap 2).
+        // Only tracks Identifier callees (e.g. _helperSetProps(...)), not method calls.
+        if (callNode.callee.type !== 'Identifier') return;
+        const calleeName = callNode.callee.name;
+        if (visited.has(calleeName)) return; // cycle guard
+        const helperNode = fileDeclarations.get(calleeName);
+        if (!helperNode) return;
+        visited.add(calleeName);
+        const helperMutations = this.detectDirectPropertiesMutation(helperNode, fileDeclarations, visited);
+        mutations.push(...helperMutations);
+      },
+    });
+
+    return mutations;
   }
 
   /**
@@ -180146,6 +180277,26 @@ class CustomFunctionAnalyzer {
             cwvImpact: 'INP, TBT',
           });
         }
+      }
+
+      // Direct $properties mutation — bypasses the AEM Forms model
+      if (analysis.hasDirectPropertiesMutation) {
+        violations.push({
+          severity: 'error',
+          type: 'direct-properties-mutation',
+          functionName: analysis.functionName,
+          file: analysis.file,
+          line: analysis.directPropertiesMutations[0]?.line || analysis.line,
+          message: `Custom function "${analysis.functionName}" directly mutates \`$properties\` (e.g. \`globals.form.$properties.${analysis.directPropertiesMutations[0]?.key} = ...\`). The AEM Forms runtime never sees this change — reads after a model flush will return stale data.`,
+          details: analysis.directPropertiesMutations,
+          mutationCount: analysis.directPropertiesMutations.length,
+          keys: analysis.directPropertiesMutations.map(m => m.key),
+          recommendation:
+            'Replace each direct assignment with a setProperty call. The runtime replaces the entire properties object, so spread existing properties to preserve them:\n' +
+            '`globals.functions.setProperty(globals.form, { properties: { ...globals.form.$properties, <propertyKey>: <value> } })`\n' +
+            'If the file already has a setProperty(propertyName, value, globals) helper, use that instead.',
+          cwvImpact: 'Data integrity',
+        });
       }
     }
 
@@ -187644,6 +187795,12 @@ class RuntimeCLSAnalyzer {
       return issues;
     }
 
+    // Skip AEM platform boilerplate — standard page decoration, not custom form code
+    const BOILERPLATE_NAMES = ['aem.js', 'aem.min.js', 'lib-franklin.js'];
+    if (BOILERPLATE_NAMES.some(n => filename === n || filename.endsWith('/' + n) || filename.endsWith('\\' + n))) {
+      return issues;
+    }
+
     // Parse JavaScript
     let ast;
     try {
@@ -187960,6 +188117,11 @@ class RuntimeCLSAnalyzer {
 
     // 1. Detect loadCSS() calls
     if (calleeName === 'loadCSS') {
+      // Same rule as classList: allow in the direct body of an init function.
+      // Covers decorateForm() loading customStylesPath and loadBlock() lazy-loading block CSS.
+      if (this.isInDirectBodyOfInitFunction(ancestors)) {
+        return;
+      }
       issues.push({
         severity: 'error',
         type: 'dynamic-css-loading',
@@ -189932,6 +190094,18 @@ class FormPRReporter {
         bulkSetPropertyIssues.forEach(issue => {
           lines.push(`- \`${issue.functionName}\` in \`${issue.file}\`: ${issue.callCount} \`setProperty\` calls on \`${issue.parentPath}\``);
           lines.push(`  - ${issue.recommendation}`);
+        });
+        lines.push('');
+      }
+
+      const directPropMutations = newIssues.filter(i => i.type === 'direct-properties-mutation');
+      if (directPropMutations.length > 0) {
+        lines.push(`**🔴 ${directPropMutations.length} Direct \`$properties\` Mutation(s) — Model Bypass:**\n`);
+        lines.push('These assignments write directly to the JS object and are invisible to the AEM Forms runtime. Data is lost on model flush.\n');
+        directPropMutations.forEach(issue => {
+          const keyList = issue.keys?.length ? issue.keys.join('`, `') : '(unknown)';
+          lines.push(`- \`${issue.functionName}\` in \`${issue.file}:${issue.line}\` — mutates key(s): \`${keyList}\``);
+          lines.push(`  - **Fix:** \`globals.functions.setProperty(globals.form, { properties: { ...globals.form.\$properties, <propertyKey>: <value> } })\` (spread preserves existing keys — runtime replaces, not merges)`);
         });
         lines.push('');
       }
