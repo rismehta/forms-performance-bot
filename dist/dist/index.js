@@ -189053,6 +189053,205 @@ class FragmentQualifiedNameAnalyzer {
   }
 }
 
+;// CONCATENATED MODULE: ./src/analyzers/fragment-globals-scope-analyzer.js
+
+
+
+
+
+/**
+ * Detects `globals.form.<field>` traversals inside fragment JS files.
+ *
+ * Fragment functions must use `globals.fragment` to access fields — not
+ * `globals.form.<fragmentName>.*` — because the runtime resolves
+ * `globals.fragment` to the nearest enclosing fragment root, making the
+ * function portable regardless of where the fragment is embedded.
+ *
+ * Allowed uses of `globals.form` in fragment files:
+ *   - `globals.form.$properties.*`   — reading form-level config (intentional)
+ *   - `globals.form` as a plain arg  — e.g. `getVariable('key', globals.form)`,
+ *                                      `dispatchEvent(globals.form, ...)` (form-scope vars/events)
+ *
+ * Everything else (`globals.form.$items`, `globals.form.<fieldName>`, etc.)
+ * is flagged as severity: 'critical'.
+ *
+ * Fragment file detection:
+ *   1. Path segment `/fragment/` present in filename (primary)
+ *   2. Basename matches a panel with `fd:fragment: true` in the form JSON (secondary)
+ */
+class FragmentGlobalsScopeAnalyzer {
+  constructor(config = null) {
+    this.config = config;
+  }
+
+  /**
+   * @param {Object|null} formJson
+   * @param {Array<{filename, content}>} jsFiles
+   */
+  analyze(formJson, jsFiles = []) {
+    if (!jsFiles?.length) {
+      return { filesAnalyzed: 0, violations: 0, issues: [] };
+    }
+
+    const fragmentNames = formJson ? this._collectFragmentNames(formJson) : new Set();
+    const issues = [];
+    let analyzed = 0;
+
+    for (const file of jsFiles) {
+      if (!this._isFragmentFile(file.filename, fragmentNames)) continue;
+      analyzed++;
+
+      let ast;
+      try {
+        ast = acorn_parse(file.content, {
+          ecmaVersion: 'latest',
+          sourceType: 'module',
+          locations: true,
+        });
+      } catch (err) {
+        lib_core.warning(`[FragmentGlobalsScope] Failed to parse ${file.filename}: ${err.message}`);
+        continue;
+      }
+
+      const fileIssues = this._scanFile(ast, file);
+      issues.push(...fileIssues);
+    }
+
+    return { filesAnalyzed: analyzed, violations: issues.length, issues };
+  }
+
+  _collectFragmentNames(formJson) {
+    const names = new Set();
+    const walkItems = (items) => {
+      if (!items) return;
+      for (const item of Object.values(items)) {
+        if (item?.properties?.['fd:fragment'] === true && item.name) {
+          names.add(item.name);
+        }
+        if (item?.[':items']) walkItems(item[':items']);
+      }
+    };
+    walkItems(formJson?.[':items']);
+    return names;
+  }
+
+  _isFragmentFile(filename, fragmentNames) {
+    const normalized = filename.replace(/\\/g, '/');
+    if (/\/fragment\//.test(normalized)) return true;
+    if (fragmentNames.size > 0) {
+      const base = external_path_.basename(filename, '.js');
+      if (fragmentNames.has(base)) return true;
+    }
+    return false;
+  }
+
+  _scanFile(ast, file) {
+    const issues = [];
+
+    ancestor(ast, {
+      MemberExpression: (node, _state, ancestors) => {
+        // Only flag the direct child of globals.form (not deeper levels).
+        // This avoids duplicate issues for globals.form.a.b.c chains
+        // since we only care about the first-level access.
+        const objPath = this._getMemberPath(node.object);
+        if (objPath !== 'globals.form') return;
+
+        // Computed access (globals.form['x']) — skip, can't reason statically
+        if (node.computed) return;
+
+        const prop = node.property?.name;
+        if (!prop) return;
+
+        // $properties is the only allowed child traversal
+        if (prop === '$properties') return;
+
+        const fullPath = `globals.form.${prop}`;
+        const line = node.loc?.start.line;
+        const fnName = this._enclosingFunctionName(ancestors);
+
+        issues.push({
+          severity: 'critical',
+          type: 'fragment-globals-form-traversal',
+          functionName: fnName || '(module scope)',
+          file: file.filename,
+          line,
+          path: fullPath,
+          message:
+            `Fragment file references \`${fullPath}\` — fragment code must not traverse ` +
+            `the absolute form root. Use \`globals.fragment\` to keep this portable across embeddings.`,
+          recommendation:
+            `Replace \`globals.form.${prop}\` with \`globals.fragment.${prop}\` (or the appropriate child). ` +
+            `The runtime resolves \`globals.fragment\` to the nearest enclosing fragment root via ` +
+            `getFragmentRuleNode(). Passing \`globals.form\` as a scope argument to ` +
+            `getVariable/setVariable/dispatchEvent is still allowed — only direct field traversal is prohibited.`,
+          cwvImpact: 'Functional (breaks on re-embedded or renamed fragments)',
+        });
+      },
+    });
+
+    return issues;
+  }
+
+  /**
+   * Returns the name of the nearest enclosing function in the ancestor stack.
+   */
+  _enclosingFunctionName(ancestors) {
+    for (let i = ancestors.length - 2; i >= 0; i--) {
+      const a = ancestors[i];
+      if (a.type === 'FunctionDeclaration' && a.id?.name) return a.id.name;
+      if (
+        a.type === 'VariableDeclarator' &&
+        a.id?.name &&
+        (a.init?.type === 'FunctionExpression' || a.init?.type === 'ArrowFunctionExpression')
+      ) {
+        return a.id.name;
+      }
+      if (
+        a.type === 'AssignmentExpression' &&
+        (a.right?.type === 'FunctionExpression' || a.right?.type === 'ArrowFunctionExpression') &&
+        a.left?.type === 'MemberExpression'
+      ) {
+        return this._getMemberPath(a.left) || null;
+      }
+    }
+    return null;
+  }
+
+  _getMemberPath(node) {
+    if (!node) return null;
+    if (node.type === 'Identifier') return node.name;
+    if (node.type === 'MemberExpression') {
+      const obj = this._getMemberPath(node.object);
+      const prop = node.computed ? null : node.property?.name;
+      if (!obj || !prop) return null;
+      return `${obj}.${prop}`;
+    }
+    if (node.type === 'ChainExpression') return this._getMemberPath(node.expression);
+    return null;
+  }
+
+  compare(beforeAnalysis, afterAnalysis) {
+    const safe = (a) => (a && !a.error ? a : { filesAnalyzed: 0, violations: 0, issues: [] });
+    const before = safe(beforeAnalysis);
+    const after  = safe(afterAnalysis);
+
+    const key = (i) => `${i.file}|${i.line}|${i.path}`;
+    const beforeKeys = new Set((before.issues || []).map(key));
+    const afterKeys  = new Set((after.issues  || []).map(key));
+
+    const resolvedIssues = (before.issues || []).filter(i => !afterKeys.has(key(i)));
+    const newIssues      = (after.issues  || []).filter(i => !beforeKeys.has(key(i)));
+
+    return {
+      before,
+      after,
+      delta: { violationsAdded: (after.violations || 0) - (before.violations || 0) },
+      newIssues,
+      resolvedIssues,
+    };
+  }
+}
+
 ;// CONCATENATED MODULE: ./src/analyzers/block-decorator-analyzer.js
 
 
@@ -189284,6 +189483,7 @@ class BlockDecoratorAnalyzer {
 
 
 
+
 const DEFAULT_LOGGER = {
   info:    msg => console.log(msg),
   warning: msg => console.warn(msg),
@@ -189305,10 +189505,11 @@ async function runAnalysis(beforeData, afterData, jsFiles = [], cssFiles = [], c
   const cfAnalyzer       = new CustomFunctionAnalyzer(config);
   const clsAnalyzer      = new RuntimeCLSAnalyzer(config);
   const fragQNAnalyzer   = new FragmentQualifiedNameAnalyzer(config);
+  const fragScopeAnalyzer = new FragmentGlobalsScopeAnalyzer(config);
   const blockDecAnalyzer = new BlockDecoratorAnalyzer(config);
 
   let formStructure, formEvents, hiddenFields, disabledFields, ruleCycles, formHTML;
-  let customFunctions, runtimeCLS, fragmentQualifiedName, blockDecorator;
+  let customFunctions, runtimeCLS, fragmentQualifiedName, fragmentGlobalsScope, blockDecorator;
 
   const cssRaw          = cssAnalyzer.analyze(cssFiles);
   const clsResult       = clsAnalyzer.analyze(jsFiles);
@@ -189351,6 +189552,10 @@ async function runAnalysis(beforeData, afterData, jsFiles = [], cssFiles = [], c
     const fragQNAfter  = fragQNAnalyzer.analyze(afterData.formJson,  jsFiles);
     fragmentQualifiedName = fragQNAnalyzer.compare(fragQNBefore, fragQNAfter);
 
+    const fragScopeBefore = fragScopeAnalyzer.analyze(beforeData.formJson, jsFiles);
+    const fragScopeAfter  = fragScopeAnalyzer.analyze(afterData.formJson,  jsFiles);
+    fragmentGlobalsScope = fragScopeAnalyzer.compare(fragScopeBefore, fragScopeAfter);
+
     formStructure  = formAnalyzer.compare(beforeData.formJson, afterData.formJson);
     formEvents     = eventsAnalyzer.compare(beforeData.formJson, afterData.formJson);
     formHTML       = htmlAnalyzer.compare(beforeData.html, afterData.html);
@@ -189365,6 +189570,9 @@ async function runAnalysis(beforeData, afterData, jsFiles = [], cssFiles = [], c
     // Merge fragment qualified-name violations into custom functions issues —
     // they share the same surface (custom function code) and inline-comment plumbing.
     _mergeFragmentQualifiedNameIssues(fragmentQualifiedName, customFunctions, log);
+
+    // Merge fragment globals-scope violations (globals.form.* in fragment files) into custom functions
+    _mergeFragmentGlobalsScopeIssues(fragmentGlobalsScope, customFunctions, log);
 
   } else {
     log.info('Running limited analysis (CSS/JS only — no form JSON available)...');
@@ -189382,6 +189590,11 @@ async function runAnalysis(beforeData, afterData, jsFiles = [], cssFiles = [], c
     ruleCycles      = { after: { totalRules: 0, cycles: 0, slowRuleCount: 0, runtimeErrors: [] }, newCycles: [], resolvedCycles: [] };
     customFunctions = cfAnalyzer.compare(cfBefore, cfAfter);
     fragmentQualifiedName = { after: { functionsAnalyzed: 0, violations: 0, issues: [] }, newIssues: [], resolvedIssues: [] };
+
+    const fragScopeBefore = fragScopeAnalyzer.analyze(null, jsFiles);
+    const fragScopeAfter  = fragScopeAnalyzer.analyze(null, jsFiles);
+    fragmentGlobalsScope = fragScopeAnalyzer.compare(fragScopeBefore, fragScopeAfter);
+    _mergeFragmentGlobalsScopeIssues(fragmentGlobalsScope, customFunctions, log);
   }
 
   runtimeCLS = { after: clsResult, newIssues: clsResult.issues ?? [], resolvedIssues: [] };
@@ -189398,6 +189611,7 @@ async function runAnalysis(beforeData, afterData, jsFiles = [], cssFiles = [], c
     customFunctions,
     runtimeCLS,
     fragmentQualifiedName,
+    fragmentGlobalsScope,
     blockDecorator,
   };
 }
@@ -189427,6 +189641,32 @@ function _mergeRuntimeErrors(ruleCycles, customFunctions, log) {
 
   if (ruleCycles.after.runtimeErrorCount != null) {
     customFunctions.after.runtimeErrorCount = ruleCycles.after.runtimeErrorCount;
+  }
+}
+
+/**
+ * Merges globals.form.* traversal violations from FragmentGlobalsScopeAnalyzer
+ * into the customFunctions issues stream.
+ */
+function _mergeFragmentGlobalsScopeIssues(fragmentGlobalsScope, customFunctions, log) {
+  const issues = fragmentGlobalsScope?.after?.issues;
+  if (!issues?.length) return;
+
+  log.info(`Merging ${issues.length} fragment-globals-scope violation(s) into custom functions`);
+
+  if (!customFunctions.after.issues) customFunctions.after.issues = [];
+  if (!customFunctions.newIssues)    customFunctions.newIssues    = [];
+
+  const aliased = customFunctions.after.issues === customFunctions.newIssues;
+
+  const key = (i) => `${i.functionName}|${i.file}|${i.line}|${i.type}|${i.path ?? ''}`;
+  const existing = new Set(customFunctions.after.issues.map(key));
+
+  for (const issue of issues) {
+    if (existing.has(key(issue))) continue;
+    customFunctions.after.issues.push(issue);
+    if (!aliased) customFunctions.newIssues.push(issue);
+    existing.add(key(issue));
   }
 }
 
@@ -190228,6 +190468,17 @@ class FormPRReporter {
         lines.push(`**${fragQNIssues.length} Fragment-Portability Violation(s) — Use \`globals.fragment\`:**\n`);
         fragQNIssues.forEach(issue => {
           lines.push(`- \`${issue.functionName}()\` in \`${issue.file}:${issue.line}\` references \`globals.form.${issue.fragmentName}\``);
+          lines.push(`  - ${issue.recommendation}`);
+        });
+        lines.push('');
+      }
+
+      const fragScopeIssues = newIssues.filter(i => i.type === 'fragment-globals-form-traversal');
+      if (fragScopeIssues.length > 0) {
+        lines.push(`**🔴 ${fragScopeIssues.length} Critical: \`globals.form\` Traversal(s) in Fragment File(s):**\n`);
+        lines.push('Fragment files must not traverse the absolute form root — this breaks when the fragment is re-embedded.\n');
+        fragScopeIssues.forEach(issue => {
+          lines.push(`- \`${issue.functionName}\` in \`${issue.file}:${issue.line}\` — \`${issue.path}\``);
           lines.push(`  - ${issue.recommendation}`);
         });
         lines.push('');
