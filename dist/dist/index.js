@@ -180004,6 +180004,7 @@ class CustomFunctionAnalyzer {
 
     const bulkSetPropertyGroups = this.detectBulkSetProperty(node);
     const directPropertiesMutations = this.detectDirectPropertiesMutation(node, fileDeclarations, new Set([functionName]));
+    const setPropertyFormPropertiesHits = this.detectSetPropertyFormProperties(node);
 
     return {
       functionName,
@@ -180015,12 +180016,14 @@ class CustomFunctionAnalyzer {
       hasCustomEventUsage: customEventUsages.length > 0,
       hasBulkSetProperty: bulkSetPropertyGroups.length > 0,
       hasDirectPropertiesMutation: directPropertiesMutations.length > 0,
+      hasSetPropertyFormProperties: setPropertyFormPropertiesHits.length > 0,
       domAccesses,
       windowAccesses,
       httpRequests,
       customEventUsages,
       bulkSetPropertyGroups,
       directPropertiesMutations,
+      setPropertyFormPropertiesHits,
     };
   }
 
@@ -180177,6 +180180,51 @@ class CustomFunctionAnalyzer {
   }
 
   /**
+   * Detects globals.functions.setProperty(globals.form, { properties: {...} }) misuse.
+   * The correct API for setting form-level variables is setVariable(key, value, globals.form).
+   * @param {Object} node - Function AST node
+   * @returns {Array<{line, keys}>}
+   */
+  detectSetPropertyFormProperties(node) {
+    const hits = [];
+
+    simple(node, {
+      CallExpression: (callNode) => {
+        const callee = callNode.callee;
+        if (callee.type !== 'MemberExpression') return;
+        if (callee.property?.name !== 'setProperty') return;
+
+        // callee object must be *.functions
+        const calleeObjPath = this.getMemberExpressionPath(callee.object);
+        if (!calleeObjPath || !calleeObjPath.endsWith('.functions')) return;
+
+        const args = callNode.arguments;
+        if (args.length < 2) return;
+
+        // First arg must be *.form (exact — no further property access)
+        const firstArgPath = this.getMemberExpressionPath(args[0]);
+        if (!firstArgPath || !firstArgPath.endsWith('.form')) return;
+
+        // Second arg must be ObjectExpression with a top-level 'properties' key whose value is also an ObjectExpression
+        const secondArg = args[1];
+        if (secondArg.type !== 'ObjectExpression') return;
+        const propertiesProp = secondArg.properties.find(
+          p => (p.key?.name === 'properties' || p.key?.value === 'properties') && p.value?.type === 'ObjectExpression'
+        );
+        if (!propertiesProp) return;
+
+        const keys = propertiesProp.value.properties
+          .map(p => p.key?.name || p.key?.value)
+          .filter(Boolean);
+
+        hits.push({ line: callNode.loc?.start.line, keys });
+      },
+    });
+
+    return hits;
+  }
+
+  /**
    * Get call expression name (handles nested calls like $.ajax, axios.get)
    */
   getCallExpressionName(callee) {
@@ -180292,11 +180340,30 @@ class CustomFunctionAnalyzer {
           mutationCount: analysis.directPropertiesMutations.length,
           keys: analysis.directPropertiesMutations.map(m => m.key),
           recommendation:
-            'Replace each direct assignment with a setProperty call. The runtime replaces the entire properties object, so spread existing properties to preserve them:\n' +
-            '`globals.functions.setProperty(globals.form, { properties: { ...globals.form.$properties, <propertyKey>: <value> } })`\n' +
-            'If the file already has a setProperty(propertyName, value, globals) helper, use that instead.',
+            'Replace each direct assignment with `globals.functions.setVariable(key, value, globals.form)` — one call per property key.\n' +
+            'Example: `globals.functions.setVariable(\'triggerEventName\', value, globals.form)`\n' +
+            'If the file already has a `setVariable(propertyName, value, globals)` helper, use that instead.',
           cwvImpact: 'Data integrity',
         });
+      }
+
+      // setProperty(globals.form, { properties: {...} }) — should be setVariable
+      if (analysis.hasSetPropertyFormProperties) {
+        for (const hit of analysis.setPropertyFormPropertiesHits) {
+          violations.push({
+            severity: 'warning',
+            type: 'set-property-form-properties',
+            functionName: analysis.functionName,
+            file: analysis.file,
+            line: hit.line,
+            message: `Custom function "${analysis.functionName}" uses \`setProperty(globals.form, { properties: {...} })\` to store form-level data. Use \`setVariable\` instead.`,
+            keys: hit.keys,
+            recommendation:
+              `Replace with individual \`setVariable\` calls — one per key:\n` +
+              hit.keys.map(k => `\`globals.functions.setVariable('${k}', <value>, globals.form)\``).join('\n'),
+            cwvImpact: 'Data integrity',
+          });
+        }
       }
     }
 
@@ -190458,7 +190525,21 @@ class FormPRReporter {
         directPropMutations.forEach(issue => {
           const keyList = issue.keys?.length ? issue.keys.join('`, `') : '(unknown)';
           lines.push(`- \`${issue.functionName}\` in \`${issue.file}:${issue.line}\` — mutates key(s): \`${keyList}\``);
-          lines.push(`  - **Fix:** \`globals.functions.setProperty(globals.form, { properties: { ...globals.form.\$properties, <propertyKey>: <value> } })\` (spread preserves existing keys — runtime replaces, not merges)`);
+          lines.push(`  - **Fix:** Use \`globals.functions.setVariable('<propertyKey>', <value>, globals.form)\` for each key — one call per property.`);
+        });
+        lines.push('');
+      }
+
+      const setPropertyFormPropertiesViolations = newIssues.filter(i => i.type === 'set-property-form-properties');
+      if (setPropertyFormPropertiesViolations.length > 0) {
+        lines.push(`**⚠️ ${setPropertyFormPropertiesViolations.length} \`setProperty\` Misuse(s) — Use \`setVariable\` for Form-Level Data:**\n`);
+        setPropertyFormPropertiesViolations.forEach(issue => {
+          lines.push(`- \`${issue.functionName}\` in \`${issue.file}:${issue.line}\``);
+          if (issue.keys && issue.keys.length > 0) {
+            issue.keys.forEach(k => {
+              lines.push(`  - **Fix:** \`globals.functions.setVariable('${k}', <value>, globals.form)\``);
+            });
+          }
         });
         lines.push('');
       }
