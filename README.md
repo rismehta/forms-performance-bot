@@ -97,9 +97,15 @@ node ~/.performance-bot/index.js lint --dir blocks/form
 
 # Machine-readable output for tooling
 node ~/.performance-bot/index.js lint --diff --json
+
+# Exclude extra files by regex (repeatable), on top of the built-in skips
+# (generated bundles, node_modules, *.test.js/*.spec.js, vendored afb-runtime.js)
+node ~/.performance-bot/index.js lint --dir blocks/form --exclude 'vendor/' --exclude '\.gen\.js$'
 ```
 
 From a clone you can run it via npm: `npm run lint:forms -- <files… | --diff | --dir <path>>`.
+
+`analyze` gates natively with `--fail-on error|warning` (default report-only) and honours the same `--exclude <regex>` — e.g. `analyze --diff --fail-on error --exclude 'vendor/'`.
 
 **Output.** `lint` prints the **complete** findings list — every finding from every analyzer (perf + design-canon), grouped by file, each as `✗ [error] <type>:<line>` (or `[warning]`) with a one-line explanation, then an `N error(s), M warning(s)` footer. It exits `1` if any error is present, else `0`.
 
@@ -136,7 +142,7 @@ Both run the **same full analyzer pipeline** (all analyzers, including the desig
 
 Both run every analyzer — `lint` differs only in that it's file/offline-driven and turns findings into an exit code. Rule of thumb: **`lint`** while you code (fast, offline, gates on your files); **`analyze`** against a deployed URL when you want the performance picture.
 
-See [docs/SKILL.md](docs/SKILL.md) for full CLI reference.
+See [docs/release-notes.md](docs/release-notes.md) for full CLI reference.
 
 ### Run tests (CI/build)
 
