@@ -1,20 +1,15 @@
 # Performance Bot
 
-A GitHub Action that analyzes Adaptive Form performance by comparing before/after URLs in pull requests.
+Static analyzer for AEM Adaptive Forms. Runs as a **GitHub Action** (before/after URL comparison on a PR), a **standalone CLI** (`analyze` report), and a **design-canon linter** (`lint` gate). All three share one analyzer pipeline (`src/pipeline.js`).
 
-## Features
+## What it checks
 
-- **Form structure** – Component count, nesting depth, complexity
-- **Form events** – Blocking API calls in `initialize` events (move to custom events after render)
-- **Hidden fields** – Unnecessary hidden fields that bloat the DOM (never made visible)
-- **Disabled fields** – Disabled vs readOnly; disabled fields do not submit data
-- **Rule performance** – Circular dependencies (infinite loops) and slow rules (via @aemforms/af-core)
-- **Custom functions** – DOM access, **window** access, and HTTP requests (use API tool / `request()` instead)
-- **Runtime CLS** – Dynamic CSS/style/class during form load (e.g. in `subscribe` or init) that causes layout shift
-- **Form HTML** – Lazy loading, image dimensions, blocking/inline scripts, iframes, autoplay
-- **Form CSS** – background-image, large data URIs, @import, deep/duplicate selectors, !important, hardcoded colors, large files
-- **AI auto-fix** – Optional PR with fixes (CSS + JS suggestions for DOM/HTTP/window); Azure OpenAI
-- **CWV-focused reports** – Impact mapped to Core Web Vitals; configurable thresholds
+Two families of analyzers, all defined in `src/pipeline.js` (the single source of truth):
+
+- **Performance / CWV** – form structure & nesting, blocking API calls in `initialize`, unnecessary hidden & disabled fields, circular/slow rules, DOM/`window`/HTTP in custom functions, runtime CLS, HTML (lazy-load, dimensions, blocking scripts, iframes), CSS (background-image, data URIs, `@import`, deep/duplicate selectors, `!important`, hardcoded colors).
+- **Design canon** – ownership & storage-class rules from the AEM Forms design canon: field-writes-sibling, foreign-fragment-root, dispatch-on-form-not-field, rules-vs-code, storage-class namespacing, content-in-code, display-format-in-code (use `displayFormat`/`displayValueExpression`), and more.
+
+Optional **AI auto-fix** (Azure OpenAI) can open a PR with CSS fixes and JS suggestions.
 
 ## Quick Start
 
@@ -87,6 +82,59 @@ node ~/.performance-bot/index.js --diff                        # auto-detects me
 node ~/.performance-bot/index.js --diff HEAD                   # uncommitted changes only
 node ~/.performance-bot/index.js --diff --url https://...      # changed files + URL analysis
 ```
+
+The same bundle exposes a **`lint`** subcommand — a static gate that runs the **full** analyzer pipeline (perf + design-canon) over your files and exits non-zero on any error-severity finding:
+
+```bash
+# Lint explicit files (exits non-zero on any error-severity finding → use in a commit hook / CI)
+node ~/.performance-bot/index.js lint blocks/form/scripts/fragment/myfrag.js
+
+# Lint everything you changed vs the merge-base
+node ~/.performance-bot/index.js lint --diff
+
+# Lint a whole directory tree
+node ~/.performance-bot/index.js lint --dir blocks/form
+
+# Machine-readable output for tooling
+node ~/.performance-bot/index.js lint --diff --json
+```
+
+From a clone you can run it via npm: `npm run lint:forms -- <files… | --diff | --dir <path>>`.
+
+**Output.** `lint` prints the **complete** findings list — every finding from every analyzer (perf + design-canon), grouped by file, each as `✗ [error] <type>:<line>` (or `[warning]`) with a one-line explanation, then an `N error(s), M warning(s)` footer. It exits `1` if any error is present, else `0`.
+
+```text
+──────────────────────────────────────────────────────────────────────
+Forms lint (performance + design-canon)
+──────────────────────────────────────────────────────────────────────
+
+blocks/form/scripts/fragment/loanoffer10sec.js
+  ✗ [error] dom-access-in-custom-function:154   ← performance analyzer
+      Custom function "handleResetAll" accesses the DOM…
+  ✗ [error] getvariable-not-namespaced:72       ← design-canon analyzer
+      getVariable('tenureValues') reads a form-scoped property with no positive namespace prefix…
+  ✗ [error] display-format-in-code:344           ← design-canon analyzer
+      A field's display value is FORMATTED in code — move the decoration to displayFormat / displayValueExpression…
+──────────────────────────────────────────────────────────────────────
+  206 error(s), 3 warning(s)
+──────────────────────────────────────────────────────────────────────
+```
+
+`--json` emits `{ findings: [{ severity, type, message, file, line, analyzer }], errors, warnings }` for tooling/editor integration.
+
+### `analyze` vs `lint` — when to use which
+
+Both run the **same full analyzer pipeline** (all analyzers, including the design-canon checks). They differ only in how they're driven and what they do with the results:
+
+| | `analyze` (default command) | `lint` subcommand |
+|---|---|---|
+| **Question it answers** | "How does this form perform, and what's the CWV impact?" | "Do my files have any error-severity finding (perf or design-canon)? Fail if so." |
+| **Input** | live form **URL(s)** (`--url` / `--before`/`--after`), optionally `--diff` to scope files | **files** — explicit paths, `--diff`, or `--dir` (no URL, no browser) |
+| **Output** | a full Markdown **report** (perf sections + a **Design Canon** summary) written to `-o` | a findings list; **exits non-zero** on any error-severity finding |
+| **Use it for** | PR performance review, before/after comparison, CWV dashboards | pre-commit / pre-PR **gate**, editor integration, CI check |
+| **Findings surfaced** | full report, incl. a **Design Canon** section | all findings flattened; **any error fails the gate** |
+
+Both run every analyzer — `lint` differs only in that it's file/offline-driven and turns findings into an exit code. Rule of thumb: **`lint`** while you code (fast, offline, gates on your files); **`analyze`** against a deployed URL when you want the performance picture.
 
 See [docs/SKILL.md](docs/SKILL.md) for full CLI reference.
 
@@ -173,25 +221,16 @@ Set repo secrets: `AZURE_API_KEY`, `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_MODEL`
 ## Architecture
 
 ```
-PR (Before/After URLs) → URL extraction (HTML, Form JSON, JS/CSS from branch)
-                     → Parallel analysis (analyzers)
-                     → Compare before/after, report, optional auto-fix PR
+GitHub Action:  PR (Before/After URLs) → URL extraction → runAnalysis → compare → PR comment + optional auto-fix PR
+analyze CLI:    URL(s) / --diff files  → runAnalysis → Markdown report (perf + Design Canon sections)
+lint CLI:       files / --diff / --dir → runAnalysis → collectFindings → exit non-zero on error findings
 ```
+
+All three call the same `runAnalysis()` in `src/pipeline.js`, so every analyzer runs in every mode; the modes differ only in input and how results are surfaced.
 
 ### Analyzers
 
-| Analyzer | Purpose |
-|----------|---------|
-| **FormAnalyzer** | Structure, component count, depth |
-| **FormEventsAnalyzer** | API calls in `events.initialize` (blocks render) |
-| **HiddenFieldsAnalyzer** | Hidden fields never made visible (JS/events) |
-| **DisabledFieldsAnalyzer** | Disabled vs readOnly; enable/disable in JS and events |
-| **RulePerformanceAnalyzer** | Circular rule dependencies + slow rules (@aemforms/af-core) |
-| **CustomFunctionAnalyzer** | DOM access, **window** access, HTTP (fetch/XHR/axios) in custom functions |
-| **RuntimeCLSAnalyzer** | Dynamic CSS/style/class during form load (decorate vs subscribe) |
-| **FormHTMLAnalyzer** | Lazy load, dimensions, blocking/inline scripts, iframes, videos |
-| **FormCSSAnalyzer** | background-image, data URIs, @import, selectors, !important, colors, file size |
-| **EventImpactAnalyzer** | Event/rule → impacted field names (reporting/CLI) |
+Every analyzer lives in `src/analyzers/` and is wired into `src/pipeline.js`. The full list is `src/pipeline.js` itself — perf analyzers (`FormAnalyzer`, `FormEventsAnalyzer`, `RulePerformanceAnalyzer`, `CustomFunctionAnalyzer`, `RuntimeCLSAnalyzer`, `FormHTMLAnalyzer`, `FormCSSAnalyzer`, …) and design-canon analyzers (`StorageClassAnalyzer`, `FieldWritesSiblingAnalyzer`, `DisplayFormatInCodeAnalyzer`, …). The design-canon keys are enumerated in `DESIGN_CANON_KEYS` (`src/reporters/pr-reporter-form.js`).
 
 ### Project structure
 
@@ -200,24 +239,12 @@ src/
 ├── index.js           ← GitHub Actions entry point (PR + scheduled modes)
 ├── pipeline.js        ← Shared analyzer pipeline (single source of truth)
 ├── cli/
-│   └── analyze.js     ← Local CLI entry point
-├── extractors/
-│   └── json-extractor.js
-├── analyzers/
-│   ├── url-analyzer.js
-│   ├── form-analyzer.js
-│   ├── form-events-analyzer.js
-│   ├── hidden-fields-analyzer.js
-│   ├── disabled-fields-analyzer.js
-│   ├── rule-performance-analyzer.js
-│   ├── custom-function-analyzer.js
-│   ├── runtime-cls-analyzer.js
-│   ├── form-html-analyzer.js
-│   ├── form-css-analyzer.js
-│   ├── event-impact-analyzer.js
-│   └── ai-autofix-analyzer.js
+│   ├── analyze.js     ← CLI entry: default `analyze` report + `lint` subcommand dispatch
+│   ├── lint.js        ← Design-canon linter (runLintMain, collectFindings)
+│   └── file-loaders.js← Shared file/diff loaders (breaks the analyze↔lint import cycle)
+├── analyzers/         ← one file per analyzer (perf + design-canon)
 ├── reporters/
-│   └── pr-reporter-form.js
+│   └── pr-reporter-form.js   ← report rendering + DESIGN_CANON_KEYS
 └── utils/
     ├── config-loader.js
     ├── git-changed-files.js
@@ -232,19 +259,13 @@ src/
 
 1. **Create** `src/analyzers/my-analyzer.js` with `analyze(...)` and `compare(before, after)` methods following the existing analyzer pattern.
 
-2. **Wire into `src/pipeline.js`**:
-   - Import the analyzer at the top
-   - Call `analyze()` inside the `Promise.all([...])` in `runAnalysis()`
-   - Call `compare()` in the results assembly block
-   - Add the result key to the returned object
+2. **Wire into `src/pipeline.js`** — import it, run `analyze()`, and add its result key (`{ after, newIssues, resolvedIssues }`) to the returned object. `lint` picks it up automatically (`collectFindings` iterates every result key).
 
-3. **Report the findings** in `src/reporters/pr-reporter-form.js` — add a section that reads from the new results key.
+3. **If it's a design-canon rule**, add its result key to `DESIGN_CANON_KEYS` in `src/reporters/pr-reporter-form.js` — that single map drives the `analyze` report's Design Canon section, the summary count, and the AI-autofix titles.
 
-4. **Add unit tests** in `test/test-all-analyzers.js` using fixture data from `test/fixtures/`.
+4. **Add tests** — `test/test-design-canon.js` for a design-canon analyzer (bad/good fixtures + a dedicated block), or `test/test-all-analyzers.js` for a perf analyzer.
 
-5. **Update `test/test-cli.js`** — add the new key to `EXPECTED_KEYS` and assert the result shape.
-
-That's it. `src/index.js`, `src/cli/analyze.js`, and `test/test-runner.js` all pick up the change automatically through the shared pipeline.
+That's it. The Action, both CLI modes, and the release bundle pick up the change through the shared pipeline.
 
 ## Performance checks (what the bot enforces)
 

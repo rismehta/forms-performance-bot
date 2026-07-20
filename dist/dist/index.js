@@ -182576,6 +182576,7 @@ If you want to optimize development server performance, you can manually bundle 
       fragmentRuleFormRef: 'Fragment rule references $form (must be independent of the parent form)',
       orphanFragmentHandler: 'Fragment handler wired to no event/rule (forgot to stitch)',
       contentInCode: 'Copy/validation message hardcoded in code (use dynamic-text / constraintMessages)',
+      displayFormatInCode: 'Display value formatted in code (use displayFormat / displayValueExpression)',
     };
 
     const suggestions = [];
@@ -190230,6 +190231,12 @@ class HardcodedConfigAnalyzer {
  * never copied into a variable. Flow flags are Class-3 vars. Detectors:
  *  (a) form-data-in-a-variable: `setVariable('<name>', …)` where `<name>` also appears as a field's
  *      `name` bound by a `dataRef` in the form JSON → the value should ride its dataRef, not a var.
+ *      Scope: only a form-level ANCHOR scope arg counts — `globals.form` or `globals.fragment.<root>`
+ *      (or an absent 3rd arg). A scope arg targeting a SPECIFIC node's own property bag — `globals.field`
+ *      OR a chain that descends into a named child below the anchor (`globals.fragment.<root>.<panel>.
+ *      <field>`, e.g. a slider config or dynamic-text substitution) — is that node's own, non-restorable
+ *      bag, NOT journey state, so it is exempt from (a)/(b). Local aliases are resolved
+ *      (`const banner = globals.fragment.root.banner; setVariable('x', v, banner.greetingText)`).
  *  (b) variable-not-namespaced: a FORM-scoped `setVariable('<bareName>', …, globals.form)` whose name
  *      lacks a positive namespace prefix (`data.` = fieldless Class-1 data; `uistate.` = persisted
  *      Class-3/4 flow-UI state; `uistate._` = ephemeral scratch). The journey-state-model requires
@@ -190284,11 +190291,14 @@ class StorageClassAnalyzer {
   }
 
   // Recognises a READ of `<node>.$properties.<key>` (or `['key']`). The `$properties` bag hangs off a
-  // form-level model node — `globals.form` OR a `globals.fragment.<root>` panel — both are form-level
-  // restorable state, in scope. Only `globals.field.$properties` (the field's OWN, component-owned
-  // bag) is exempt. Returns { key } when `m` is the `.$properties.<key>` node and it is NOT the target
-  // of an assignment (writes are owned by direct-properties-mutation). Else null.
-  static formPropertiesRead(m, ancestors) {
+  // model node. Only a form-level ANCHOR bag — `globals.form` OR `globals.fragment.<root>` (the root
+  // itself) — is restorable journey state, in scope. `globals.field.$properties` (the field's OWN bag)
+  // AND a chain that descends into a named child below the anchor (`…<root>.<panel>.<field>` — that
+  // node's own component/dynamic-text bag) are exempt. `classify` resolves the chain (with aliases).
+  // Returns { key } when `m` is an in-scope `.$properties.<key>` read and NOT the target of an
+  // assignment (writes are owned by direct-properties-mutation). Else null. `resolve` expands a leading
+  // alias to the full segment chain (returns segments); classification happens here.
+  static formPropertiesRead(m, ancestors, resolve) {
     // m must be `<obj>.$properties` where <obj>.property is the key — i.e. m.object.property.name === '$properties'.
     const obj = m.object;
     if (!(obj?.type === 'MemberExpression' && obj.property?.name === '$properties' && !obj.computed)) return null;
@@ -190299,15 +190309,10 @@ class StorageClassAnalyzer {
     else if (m.computed && m.property?.type === 'Literal' && typeof m.property.value === 'string') key = m.property.value;
     if (key == null) return null;
 
-    // Exempt only FIELD-scoped access — a `.field` segment anywhere in the root chain
-    // (globals.field.$properties / field.$properties). Everything else (form, fragment.<root>,
-    // any panel) is form-level state → in scope.
-    let cur = obj.object;
-    while (cur) {
-      if (cur.type === 'Identifier') { if (cur.name === 'field') return null; break; }
-      if (cur.type === 'MemberExpression') { if (cur.property?.name === 'field') return null; cur = cur.object; }
-      else break;
-    }
+    // Exempt field-scoped ($properties on globals.field) AND descended-node access (a named child
+    // below the form/fragment-root anchor) — both target a specific node's own, non-restorable bag.
+    const scope = StorageClassAnalyzer.classifyChain(resolve(obj.object));
+    if (scope === 'field' || scope === 'descended') return null;
 
     // Skip WRITES: if this member expr is the LHS of an assignment / update, it's a mutation.
     const parent = ancestors[ancestors.length - 2];
@@ -190315,6 +190320,53 @@ class StorageClassAnalyzer {
     if (parent?.type === 'UpdateExpression' && parent.argument === m) return null;
 
     return { key };
+  }
+
+  // Ordered segment names of a member/identifier chain, root-first. Handles `.prop` and `['literal']`.
+  // Returns null on a dynamic computed segment (obj[expr]) — the chain can't be statically resolved.
+  //   globals.fragment.root.banner.greetingText → ['globals','fragment','root','banner','greetingText']
+  static chainSegments(node) {
+    const segs = [];
+    let cur = node;
+    while (cur) {
+      if (cur.type === 'Identifier') { segs.unshift(cur.name); return segs; }
+      if (cur.type === 'MemberExpression') {
+        let key;
+        if (!cur.computed && cur.property?.type === 'Identifier') key = cur.property.name;
+        else if (cur.computed && cur.property?.type === 'Literal' && typeof cur.property.value === 'string') key = cur.property.value;
+        else return null;
+        segs.unshift(key);
+        cur = cur.object;
+      } else return null;
+    }
+    return segs;
+  }
+
+  // Classify a scope chain by how its target's property bag relates to restorable journey state:
+  //   'field'           — the anchor segment is `.field` → component-owned transient (EXEMPT)
+  //   'descended'       — descends into a NAMED child below globals.form / globals.fragment.<root>
+  //                       (a specific field/sub-node's own bag, e.g. dynamic-text) (EXEMPT)
+  //   'form-anchor'     — terminates at globals.form            (restorable form-level → IN SCOPE)
+  //   'fragment-anchor' — terminates at globals.fragment.<root> (restorable form-level → IN SCOPE)
+  //   'unknown'         — not a globals.<anchor> chain / unresolved (default IN SCOPE, preserves prior
+  //                       behaviour)
+  // The anchor is POSITIONAL — it is the FIRST segment (a bare `field`/`form`/`fragment` scope arg,
+  // e.g. a destructured param) or the segment right after the `globals`/`g` root — NOT any occurrence
+  // of the word. This avoids mis-anchoring when a DESCENDANT node/property is itself named
+  // `field`/`form`/`fragment` (e.g. `globals.fragment.root.form` is a descended node, not the form
+  // anchor). A chain that is neither → 'unknown' (in scope; alias resolution has already expanded any
+  // local alias to its full chain before we get here).
+  static classifyChain(segs) {
+    if (!segs || segs.length === 0) return 'unknown';
+    // anchor index: right after a `globals`/`g` root, else the chain's own first segment.
+    const ai = (segs[0] === 'globals' || segs[0] === 'g') ? 1 : 0;
+    const anchor = segs[ai];
+    const depth = segs.length - ai; // segments from the anchor onward (anchor itself = 1)
+    if (anchor === 'field') return 'field';
+    if (anchor === 'form') return depth > 1 ? 'descended' : 'form-anchor';
+    // fragment anchor spans 2 segments (`fragment` + `<root>`); anything beyond descends into a child.
+    if (anchor === 'fragment') return depth > 2 ? 'descended' : 'fragment-anchor';
+    return 'unknown';
   }
 
   // Name of the nearest enclosing function from an ancestor stack (innermost first). Handles
@@ -190355,29 +190407,24 @@ class StorageClassAnalyzer {
     const issues = [];
     const dataRefNames = StorageClassAnalyzer.dataRefFieldNames(formJson);
 
-    // A scope arg (setVariable's 3rd / getVariable's 2nd) is FIELD-scoped ONLY when it is rooted at
-    // `globals.field` / `field` — component-owned transient state, out of scope. `globals.form` AND
-    // `globals.fragment.<root>` / a panel are BOTH form-level → in scope (not field-scoped). Absent
-    // scope arg (undefined) defaults to form-scope → in scope.
-    const isFieldScopedArg = (scopeArg) => {
+    // A scope arg (setVariable's 3rd / getVariable's 2nd) is OUT of scope (not restorable journey
+    // state) when it targets a SPECIFIC node's own property bag — either `globals.field` (the
+    // component-context field) OR a chain that descends into a named child below the form/fragment-root
+    // anchor (`globals.fragment.<root>.<panel>.<field>`, a slider/dynamic-text bag). Only the anchors
+    // themselves (`globals.form`, `globals.fragment.<root>`) are form-level restorable state → in
+    // scope. Absent scope arg (undefined) defaults to form-scope → in scope.
+    // `resolve` expands local aliases (e.g. `const banner = globals.fragment.root.banner`).
+    const outOfScopeScopeArg = (scopeArg, resolve) => {
       if (!scopeArg) return false;
-      let cur = scopeArg;
-      while (cur) {
-        if (cur.type === 'Identifier') return cur.name === 'field';
-        if (cur.type === 'MemberExpression') {
-          if (cur.property?.name === 'field') return true;
-          if (cur.property?.name === 'form' || cur.property?.name === 'fragment') return false;
-          cur = cur.object;
-        } else break;
-      }
-      return false;
+      const scope = StorageClassAnalyzer.classifyChain(resolve(scopeArg));
+      return scope === 'field' || scope === 'descended';
     };
 
     // First pass: collect setVariable / getVariable call sites across all files. getVariable sites
     // also record the enclosing function name (for the init check) via the ancestor stack.
     const readNames = new Set();
     const setSites = []; // { name, file, line }
-    const getSites = []; // { name, file, line, fieldScoped, enclosingFn, access } — 'getVariable' | '$properties'
+    const getSites = []; // { name, file, line, outOfScope, enclosingFn, access } — 'getVariable' | '$properties'
     for (const jsFile of jsFiles) {
       let ast;
       try {
@@ -190386,6 +190433,44 @@ class StorageClassAnalyzer {
         lib_core.warning(`[StorageClass] parse failed for ${jsFile.filename}: ${e.message}`);
         continue;
       }
+
+      // Pre-pass: collect local aliases `const x = <member chain>` (e.g. `const banner =
+      // globals.fragment.root.banner`) so a later `banner.greetingText` scope arg resolves to its full
+      // chain. Only alias declarations whose init is a static member/identifier chain are recorded.
+      // This pass is file-wide, NOT scope-aware — so if the SAME name is declared with DIFFERENT chains
+      // (shadowing across functions/blocks), we can't know which binding a given use sees. Rather than
+      // pick a (possibly wrong) last-wins binding, we POISON the name (map it to null): resolve() then
+      // leaves it unresolved → classifyChain → 'unknown' → IN SCOPE → flagged. That is the safe
+      // direction — a rare false-positive on an ambiguous alias, never a silent exemption of a real
+      // violation. (A name re-declared with the SAME chain is not a conflict.)
+      const aliases = new Map(); // name → segments | null (null = ambiguous/poisoned)
+      simple(ast, {
+        VariableDeclarator: (d) => {
+          if (d.id?.type !== 'Identifier' || !d.init) return;
+          const segs = StorageClassAnalyzer.chainSegments(d.init);
+          if (!segs) return;
+          const name = d.id.name;
+          if (!aliases.has(name)) { aliases.set(name, segs); return; }
+          const prev = aliases.get(name);
+          if (!prev || prev.length !== segs.length || prev.some((s, i) => s !== segs[i])) {
+            aliases.set(name, null); // conflicting bindings → ambiguous
+          }
+        },
+      });
+      // Resolve a scope-arg node to its full segment chain, expanding a leading alias transitively.
+      // A poisoned (null) alias short-circuits to null (unresolved → in scope → flagged).
+      const resolve = (node) => {
+        let segs = StorageClassAnalyzer.chainSegments(node);
+        const seen = new Set();
+        while (segs && aliases.has(segs[0]) && !seen.has(segs[0])) {
+          seen.add(segs[0]);
+          const bound = aliases.get(segs[0]);
+          if (!bound) return null; // ambiguous alias — cannot safely resolve
+          segs = [...bound, ...segs.slice(1)];
+        }
+        return segs;
+      };
+
       ancestor(ast, {
         CallExpression: (c, ancestors) => {
           const name = StorageClassAnalyzer.calleeName(c.callee);
@@ -190398,14 +190483,15 @@ class StorageClassAnalyzer {
               name: key,
               file: jsFile.filename,
               line: c.loc?.start.line,
-              fieldScoped: isFieldScopedArg(c.arguments?.[1]),
+              outOfScope: outOfScopeScopeArg(c.arguments?.[1], resolve),
               enclosingFn: StorageClassAnalyzer.enclosingFnName(ancestors),
               access: 'getVariable',
             });
           }
           if (name === 'setVariable') {
-            // Only form-scoped setVariable is in scope (field-scoped = component-owned transient).
-            if (!isFieldScopedArg(c.arguments?.[2])) {
+            // In scope only when the scope arg is a form-level anchor (globals.form / fragment.<root>).
+            // A specific-node bag (field, or a descended child) is out of scope — not journey state.
+            if (!outOfScopeScopeArg(c.arguments?.[2], resolve)) {
               setSites.push({ name: key, file: jsFile.filename, line: c.loc?.start.line });
             }
           }
@@ -190415,14 +190501,14 @@ class StorageClassAnalyzer {
         // by custom-function-analyzer's direct-properties-mutation). Field-scoped ($properties on
         // globals.field) is exempt.
         MemberExpression: (m, ancestors) => {
-          const info = StorageClassAnalyzer.formPropertiesRead(m, ancestors);
+          const info = StorageClassAnalyzer.formPropertiesRead(m, ancestors, resolve);
           if (!info) return;
           readNames.add(info.key); // a $properties.<key> read counts as consuming the variable
           getSites.push({
             name: info.key,
             file: jsFile.filename,
             line: m.loc?.start.line,
-            fieldScoped: false, // formPropertiesRead already excludes field-scoped access
+            outOfScope: false, // formPropertiesRead already excludes field-scoped / descended-node access
             enclosingFn: StorageClassAnalyzer.enclosingFnName(ancestors),
             access: '$properties',
           });
@@ -190493,7 +190579,7 @@ class StorageClassAnalyzer {
     // member access — both read the same form-level property bag, so the same rules apply.
     const isInitFn = (fnName) => typeof fnName === 'string' && /Init$/.test(fnName);
     for (const site of getSites) {
-      if (site.fieldScoped) continue; // component-owned transient — out of scope
+      if (site.outOfScope) continue; // field-scoped OR descended-node bag — not journey state
       const readExpr = site.access === '$properties'
         ? `$properties.${site.name}`
         : `getVariable('${site.name}')`;
@@ -191585,6 +191671,233 @@ class ContentInCodeAnalyzer {
   }
 }
 
+;// CONCATENATED MODULE: ./src/analyzers/display-format-in-code-analyzer.js
+
+
+
+
+
+
+/**
+ * Display-Format-in-Code Analyzer
+ *
+ * A field's DISPLAY presentation — unit / currency / percent / precision decoration — belongs in the
+ * field's authored `displayFormat` or `displayValueExpression` (a json-formula), NOT baked into a value
+ * built in a rule / fragment function. The AF runtime's `displayValue` getter (afb-runtime.js) applies
+ * `displayValueExpression` first, then `displayFormat`, otherwise returns the raw `value` — so the
+ * model `value` must stay the raw numeric datum and the decoration is layered on at display time.
+ * Formatting in code (`return `${roi.toFixed(2)}%``) writes presentation into the data path: the
+ * payload/export then carries "12.50%" instead of 12.5, and the display can't be re-localised.
+ *
+ * Flags a value flowing to a DISPLAY SINK (a `return`, or `setProperty(<field>, { value: … })`) via two
+ * complementary heuristics:
+ *
+ * H1 — decorated numeric: a `TemplateLiteral` or `+`-concat that combines BOTH:
+ *   (A) a NUMERIC dynamic core — an expression provably numeric: `.toFixed`/`.toLocaleString`,
+ *       `Number`/`parseFloat`/`parseInt`, `Math.*`, an arithmetic `BinaryExpression`, or a
+ *       number-returning helper by name (`format*`, `*Number`, `*Amount`, …); AND
+ *   (B) a STATIC decoration — a non-empty, non-whitespace static chunk (quasi / string-literal operand).
+ *   The decoration CHARACTER is never enumerated — `%`, `₹`, `$`, `€`, `/mo`, ` months` all trip (B)
+ *   structurally. Both (A) and (B) are required, so a bare `return roi.toFixed(2)` (a plain numeric
+ *   string, no decoration) and a `` `LEAD-${id}` `` (no numeric core) are both clean under H1.
+ *
+ * H2 — pure formatting call: the sink value IS (or a ternary branch is) a call whose ENTIRE output is a
+ * presentation string — `x.toLocaleString(…)` (locale grouping / currency / date), or a `format*`-named
+ * helper call (`formatIndianNumber(x)`, `formatDate(d)`, …) — even WITHOUT a glued literal decoration.
+ * Such a value is already a formatted display string, so it belongs in `displayFormat` /
+ * `displayValueExpression`. `.toFixed(…)` alone is NOT H2 (it yields a plain rounded number, a valid
+ * datum); only locale/format-helper output is. Limitation: a `format*` helper that builds non-display
+ * data (e.g. `formatPayload`) can false-positive — accepted as rare on a value/return sink.
+ *
+ * Division of labour with content-in-code (no double-flag): that analyzer owns PROSE decorations
+ * (natural-language copy → a `dynamic-text` template). This one owns NON-PROSE decoration on a numeric
+ * core (→ `displayFormat` / `displayValueExpression`). (B) explicitly SKIPS a prose static chunk (via
+ * the shared `ContentInCodeAnalyzer.isProse`), so the two partition the space cleanly.
+ *
+ * Exemptions (error-safe): `throw new Error(…)` / `console.*` args (developer strings); a bare-variable
+ * interpolation whose core is not provably numeric (`` `${t} months` `` — under-flag, never guess).
+ *
+ * Fragment / custom-fn surface files only. Severity: error.
+ */
+class DisplayFormatInCodeAnalyzer {
+  constructor(config = null) {
+    this.config = config;
+  }
+
+  static calleeName(callee) {
+    if (!callee) return '';
+    if (callee.type === 'Identifier') return callee.name;
+    if (callee.type === 'MemberExpression') return callee.property?.name || '';
+    return '';
+  }
+
+  // Number-returning helper by NAME (heuristic): a call whose callee ends in a numeric noun or starts
+  // with `format`. Keeps (A) from missing the common `₹${formatIndianNumber(x)}` / `${toAmount(x)}`
+  // shapes without a symbol list. Unknown name → not numeric (under-flag, never false-positive).
+  static NUMERIC_HELPER_RE = /(^format)|(?:number|amount|price|total|count|roi|emi|rate|percent|balance|tenure|value)$/i;
+
+  // Is `node` provably a numeric expression? (Conservative — unknown shapes return false.)
+  static isNumericExpr(node) {
+    if (!node) return false;
+    if (node.type === 'Literal') return typeof node.value === 'number';
+    if (node.type === 'UnaryExpression' && (node.operator === '-' || node.operator === '+')) {
+      return DisplayFormatInCodeAnalyzer.isNumericExpr(node.argument);
+    }
+    if (node.type === 'BinaryExpression' && ['*', '/', '-', '%'].includes(node.operator)) return true;
+    if (node.type === 'BinaryExpression' && node.operator === '+') {
+      return DisplayFormatInCodeAnalyzer.isNumericExpr(node.left)
+        || DisplayFormatInCodeAnalyzer.isNumericExpr(node.right);
+    }
+    if (node.type === 'ConditionalExpression') {
+      return DisplayFormatInCodeAnalyzer.isNumericExpr(node.consequent)
+        || DisplayFormatInCodeAnalyzer.isNumericExpr(node.alternate);
+    }
+    if (node.type === 'CallExpression') {
+      const callee = node.callee;
+      // x.toFixed(…) / x.toLocaleString(…) — number-formatting methods
+      if (callee?.type === 'MemberExpression' && ['toFixed', 'toLocaleString'].includes(callee.property?.name)) return true;
+      // Math.*(…)
+      if (callee?.type === 'MemberExpression' && callee.object?.name === 'Math') return true;
+      // Number()/parseFloat()/parseInt()
+      if (callee?.type === 'Identifier' && ['Number', 'parseFloat', 'parseInt'].includes(callee.name)) return true;
+      // number-returning helper by name
+      const name = DisplayFormatInCodeAnalyzer.calleeName(callee);
+      if (name && DisplayFormatInCodeAnalyzer.NUMERIC_HELPER_RE.test(name)) return true;
+    }
+    return false;
+  }
+
+  // A CSS-VALUE string, not a field display value — a `.style.left`/`--var` layout string like
+  // `calc(8px + ...)`. Signalled by `calc(`/`var(`/`url(` or a CSS length/angle/time unit glued to a
+  // number (`px`, `rem`, `em`, `vh`, `vw`, `pt`, `deg`, `ms`, …). NOT `%` alone — percent is a valid
+  // display decoration (`${roi}%`), so it is deliberately excluded from the CSS signal.
+  static CSS_VALUE_RE = /\b(?:calc|var|url|translate[XY]?|rgba?|hsla?)\s*\(|\d\s*(?:px|rem|em|vh|vw|vmin|vmax|pt|pc|ex|ch|fr|deg|rad|turn|ms)\b/i;
+
+  // The COMBINED static text is a format decoration when it has non-whitespace content, is NOT prose,
+  // and is NOT a CSS-value string. Uses the JOINED text (all quasis / all literal operands) — the SAME
+  // unit of analysis as content-in-code's `staticText`/`isProse` — so the two analyzers partition
+  // cleanly: prose static text → content-in-code; non-prose non-CSS static text → here. Never per-chunk
+  // (a chunk of a prose template can look non-prose in isolation and cause a double-flag).
+  static isFormatDecoration(joinedText) {
+    if (typeof joinedText !== 'string') return false;
+    if (joinedText.trim().length === 0) return false;
+    if (DisplayFormatInCodeAnalyzer.CSS_VALUE_RE.test(joinedText)) return false; // a CSS layout string, not a display value
+    return !ContentInCodeAnalyzer.isProse(joinedText);
+  }
+
+  // Flatten a `+`-concat chain into its operands (left-to-right); non-concat node → [node].
+  static concatOperands(node) {
+    if (node?.type === 'BinaryExpression' && node.operator === '+') {
+      return [
+        ...DisplayFormatInCodeAnalyzer.concatOperands(node.left),
+        ...DisplayFormatInCodeAnalyzer.concatOperands(node.right),
+      ];
+    }
+    return [node];
+  }
+
+  // Does `node` combine a numeric core (A) with a non-prose static decoration (B)? Handles a template
+  // literal, a `+`-concat, and a ternary whose branch(es) qualify. Returns true when BOTH hold.
+  static isDisplayFormatLiteral(node) {
+    if (!node) return false;
+    if (node.type === 'ConditionalExpression') {
+      return DisplayFormatInCodeAnalyzer.isDisplayFormatLiteral(node.consequent)
+        || DisplayFormatInCodeAnalyzer.isDisplayFormatLiteral(node.alternate);
+    }
+    if (node.type === 'TemplateLiteral') {
+      const joined = node.quasis.map((q) => q.value.cooked).join(' ');
+      const hasDecoration = DisplayFormatInCodeAnalyzer.isFormatDecoration(joined);
+      const hasNumericCore = node.expressions.some((e) => DisplayFormatInCodeAnalyzer.isNumericExpr(e));
+      return hasDecoration && hasNumericCore;
+    }
+    if (node.type === 'BinaryExpression' && node.operator === '+') {
+      const ops = DisplayFormatInCodeAnalyzer.concatOperands(node);
+      const joined = ops.filter((o) => o?.type === 'Literal' && typeof o.value === 'string').map((o) => o.value).join(' ');
+      const hasDecoration = DisplayFormatInCodeAnalyzer.isFormatDecoration(joined);
+      const hasNumericCore = ops.some((o) => DisplayFormatInCodeAnalyzer.isNumericExpr(o));
+      return hasDecoration && hasNumericCore;
+    }
+    return false;
+  }
+
+  // `format*`-named helper (whole-output presentation string), NOT a numeric noun suffix. Distinct from
+  // NUMERIC_HELPER_RE: here the helper's ENTIRE result is a formatted display string (formatIndianNumber,
+  // formatDate, formatCurrency), so it belongs in displayFormat/displayValueExpression.
+  static FORMAT_HELPER_RE = /^format[A-Z0-9_]/;
+
+  // H2: `node` is a call whose entire output is a presentation string — `x.toLocaleString(…)` or a
+  // `format*(…)` helper. `.toFixed` is intentionally EXCLUDED (plain rounded number = valid datum).
+  // Unwraps a ternary (`cond ? fmt(x) : ''`). Conservative — unknown callee → false.
+  static isPureFormattingCall(node) {
+    if (!node) return false;
+    if (node.type === 'ConditionalExpression') {
+      return DisplayFormatInCodeAnalyzer.isPureFormattingCall(node.consequent)
+        || DisplayFormatInCodeAnalyzer.isPureFormattingCall(node.alternate);
+    }
+    if (node.type !== 'CallExpression') return false;
+    const callee = node.callee;
+    if (callee?.type === 'MemberExpression' && callee.property?.name === 'toLocaleString') return true;
+    const name = DisplayFormatInCodeAnalyzer.calleeName(callee);
+    return !!name && DisplayFormatInCodeAnalyzer.FORMAT_HELPER_RE.test(name);
+  }
+
+  // A sink value is a display-format violation under EITHER heuristic.
+  static isDisplayFormatSink(node) {
+    return DisplayFormatInCodeAnalyzer.isDisplayFormatLiteral(node)
+      || DisplayFormatInCodeAnalyzer.isPureFormattingCall(node);
+  }
+
+  analyze(formJson, jsFiles = []) {
+    const issues = [];
+    const MSG = 'A field\'s display value is FORMATTED in code (a numeric value decorated with a '
+      + 'unit/currency/percent/precision suffix). Keep the model `value` as the raw numeric datum and '
+      + 'move the presentation to the field\'s `displayFormat` or `displayValueExpression` (json-formula) '
+      + '— the runtime applies it via the `displayValue` getter. Formatting in code writes presentation '
+      + 'into the data path (the payload/export carries the decorated string, not the number).\n'
+      + '`displayFormat` uses the Unicode LDML pattern syntax — number/currency/percent patterns: '
+      + 'https://unicode.org/reports/tr35/tr35-numbers.html#Number_Format_Patterns ; date/time patterns: '
+      + 'https://unicode.org/reports/tr35/tr35-dates.html#Date_Format_Patterns';
+
+    for (const jsFile of jsFiles) {
+      if (!isCustomFnSurface(jsFile.filename)) continue;
+      let ast;
+      try {
+        ast = acorn_parse(jsFile.content, { ecmaVersion: 'latest', sourceType: 'module', locations: true });
+      } catch (e) {
+        lib_core.warning(`[DisplayFormatInCode] parse failed for ${jsFile.filename}: ${e.message}`);
+        continue;
+      }
+      const seen = new Set();
+      const flag = (line) => {
+        if (line == null || seen.has(line)) return;
+        seen.add(line);
+        issues.push({ severity: 'error', type: 'display-format-in-code', message: MSG, file: jsFile.filename, line });
+      };
+
+      simple(ast, {
+        ReturnStatement: (r) => {
+          if (DisplayFormatInCodeAnalyzer.isDisplayFormatSink(r.argument)) flag(r.loc?.start.line);
+        },
+        // setProperty(<field>, { value: <formatted> })
+        CallExpression: (c) => {
+          if (DisplayFormatInCodeAnalyzer.calleeName(c.callee) !== 'setProperty') return;
+          const obj = c.arguments?.[1];
+          if (obj?.type !== 'ObjectExpression') return;
+          const valueProp = obj.properties.find((p) => (p.key?.name === 'value' || p.key?.value === 'value'));
+          if (valueProp && DisplayFormatInCodeAnalyzer.isDisplayFormatSink(valueProp.value)) flag(c.loc?.start.line);
+        },
+      });
+    }
+    return { violations: issues.length, issues };
+  }
+
+  compare(before, after) {
+    const b = before?.violations || 0;
+    const a = after?.violations || 0;
+    return { before: b, after: a, delta: a - b, regressed: a > b };
+  }
+}
+
 ;// CONCATENATED MODULE: ./src/pipeline.js
 /**
  * Shared analyzer pipeline
@@ -191601,6 +191914,7 @@ class ContentInCodeAnalyzer {
  * @param {Object} [logger]     - Optional logger: { info, warning, error }. Defaults to console.
  * @returns {Promise<Object>}   - Results object with one key per analyzer
  */
+
 
 
 
@@ -191679,6 +191993,7 @@ async function runAnalysis(beforeData, afterData, jsFiles = [], cssFiles = [], c
   // Needs BOTH fragment JS and its paired JSON; skips a JS file whose JSON isn't in the set.
   const orphanFragmentHandlerResult = new OrphanFragmentHandlerAnalyzer(config).analyze(formJson, jsFiles, jsonFiles);
   const contentInCodeResult        = new ContentInCodeAnalyzer(config).analyze(formJson, jsFiles);
+  const displayFormatInCodeResult  = new DisplayFormatInCodeAnalyzer(config).analyze(formJson, jsFiles);
 
   if (hasFormData) {
     log.info('Running all analyzers in parallel...');
@@ -191792,6 +192107,7 @@ async function runAnalysis(beforeData, afterData, jsFiles = [], cssFiles = [], c
     fragmentRuleFormRef: { after: fragmentRuleFormRefResult, newIssues: fragmentRuleFormRefResult.issues ?? [], resolvedIssues: [] },
     orphanFragmentHandler: { after: orphanFragmentHandlerResult, newIssues: orphanFragmentHandlerResult.issues ?? [], resolvedIssues: [] },
     contentInCode: { after: contentInCodeResult, newIssues: contentInCodeResult.issues ?? [], resolvedIssues: [] },
+    displayFormatInCode: { after: displayFormatInCodeResult, newIssues: displayFormatInCodeResult.issues ?? [], resolvedIssues: [] },
   };
 }
 
@@ -191899,6 +192215,7 @@ const DESIGN_CANON_KEYS = {
   fragmentRuleFormRef: 'fragment rule references the absolute form root $form (breaks standalone / on re-embed)',
   orphanFragmentHandler: 'exported fragment handler wired to no event/rule (forgot to stitch — control does nothing)',
   contentInCode: 'user-facing copy / validation message hardcoded in a fn (author as dynamic-text template / constraintMessages)',
+  displayFormatInCode: 'display value formatted in a fn — numeric decorated with unit/currency/% (use displayFormat / displayValueExpression)',
 };
 
 /**
@@ -193447,6 +193764,20 @@ class FormPRReporter {
 
 
 ;// CONCATENATED MODULE: ./src/reporters/html-reporter.js
+
+
+// Flatten every design-canon analyzer's findings from a results object. Single source of truth is
+// DESIGN_CANON_KEYS — add a new design-canon analyzer there and both reporters stay in sync.
+function collectDesignCanonFindings(results) {
+  const out = [];
+  for (const key of Object.keys(DESIGN_CANON_KEYS)) {
+    for (const i of results?.[key]?.newIssues ?? results?.[key]?.after?.issues ?? []) {
+      if (i && i.type) out.push({ ...i, analyzerKey: key });
+    }
+  }
+  return out;
+}
+
 /**
  * Generates a comprehensive HTML performance report
  * Uploaded as GitHub artifact for detailed analysis
@@ -193798,6 +194129,7 @@ class HTMLReporter {
     ${this.buildCustomFunctionsSection(results)}
     ${this.buildRuntimeCLSSection(results)}
     ${this.buildFormValidationSection(results)}
+    ${this.buildDesignCanonSection(results)}
 
     <footer>
       Generated by <strong>AEM Forms Performance Analyzer</strong><br>
@@ -194461,12 +194793,41 @@ class HTMLReporter {
     </div>`;
   }
 
+  /**
+   * Design-canon findings (ownership / storage-class / rules-vs-code / display-format / …). Renders
+   * every design-canon analyzer via the shared DESIGN_CANON_KEYS map, so a new analyzer added there
+   * shows up here automatically.
+   */
+  buildDesignCanonSection(results) {
+    const findings = collectDesignCanonFindings(results);
+    if (findings.length === 0) {
+      return '<div class="section"><h2>Design Canon</h2><p>No design-canon issues detected</p></div>';
+    }
+    const rows = findings.map(f => {
+      const loc = f.line ? `:${f.line}` : '';
+      const sev = f.severity === 'error' ? 'error' : 'warning';
+      return `
+        <div class="issue-item ${sev}">
+          <strong>${f.type}</strong> <code>${DESIGN_CANON_KEYS[f.analyzerKey] || f.analyzerKey}</code><br>
+          File: <code>${(f.file || 'unknown')}${loc}</code><br>
+          ${f.message || ''}
+        </div>`;
+    }).join('');
+    return `
+    <div class="section">
+      <h2>Design Canon (${findings.length})</h2>
+      <div class="issue-list" style="max-height: 500px; overflow-y: auto;">${rows}</div>
+    </div>`;
+  }
+
   countCriticalIssues(results) {
     let count = 0;
     if (results.formEvents?.after?.apiCallsInInitialize?.length) count += results.formEvents.after.apiCallsInInitialize.length;
     if (results.customFunctions?.after?.httpRequestCount) count += results.customFunctions.after.httpRequestCount;
     if (results.formCSS?.after?.issues?.filter(i => i.severity === 'error').length) count += results.formCSS.after.issues.filter(i => i.severity === 'error').length;
     if (results.ruleCycles?.after?.cycles) count += results.ruleCycles.after.cycles;
+    // design-canon analyzers (error-severity) — same single source of truth as the PR reporter.
+    count += collectDesignCanonFindings(results).filter(i => i.severity === 'error').length;
     return count;
   }
 
