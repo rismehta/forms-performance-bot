@@ -172516,6 +172516,39 @@ async function fromURL(url, options = {}) {
 
 
 /**
+ * Is `obj` an Adaptive Form model container? Keys on the AF SHAPE, never the filename — a form JSON on
+ * disk (e.g. `local-form-json/foo.json`, a CRISPR-converted file, a `.model.json`) has the same shape
+ * the URL path extracts: `fieldType === 'form'`, or a `:type` naming a `/formcontainer`.
+ * @param {*} obj
+ * @returns {boolean}
+ */
+function isFormModel(obj) {
+  return !!obj && typeof obj === 'object'
+    && ((typeof obj[':type'] === 'string' && obj[':type'].includes('/formcontainer'))
+      || obj.fieldType === 'form');
+}
+
+/**
+ * Find the Adaptive Form container inside a parsed JSON — the node itself if it IS the form, else the
+ * first `:items`/`items` descendant that is. Returns null when the JSON is not a form model at all
+ * (so a package.json / config / fragment-piece JSON is correctly rejected).
+ * @param {*} obj - parsed JSON
+ * @returns {Object|null}
+ */
+function findFormModel(obj) {
+  if (!obj || typeof obj !== 'object') return null;
+  if (isFormModel(obj)) return obj;
+  const items = obj[':items'] || obj.items;
+  if (items && typeof items === 'object') {
+    for (const key of Object.keys(items)) {
+      const found = findFormModel(items[key]);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+/**
  * Extracts JSON data from page HTML
  * Supports both EDS forms (div.form > pre) and Core Components forms (model.json)
  */
@@ -182577,6 +182610,10 @@ If you want to optimize development server performance, you can manually bundle 
       orphanFragmentHandler: 'Fragment handler wired to no event/rule (forgot to stitch)',
       contentInCode: 'Copy/validation message hardcoded in code (use dynamic-text / constraintMessages)',
       displayFormatInCode: 'Display value formatted in code (use displayFormat / displayValueExpression)',
+      ruleOrderingRace: 'Rule/event ordering race (dispatch-before-write / async cross-event read)',
+      ootbPropertyShadow: 'Custom property/event duplicates an OOTB one (reuse the built-in)',
+      fragmentPathValidator: 'globals.fragment path not found in the linked fragment JSON hierarchy',
+      componentModelConcern: 'Component view reinvents a model-owned concern (display format / constraint / DOM change)',
     };
 
     const suggestions = [];
@@ -189216,12 +189253,28 @@ class FragmentQualifiedNameAnalyzer {
  * function portable regardless of where the fragment is embedded.
  *
  * Allowed uses of `globals.form` in fragment files:
- *   - `globals.form.$properties.*`   — reading form-level config (intentional)
+ *   - `globals.form.$properties.<OOTB-key>` — reading a genuine form-LEVEL OOTB property that the
+ *     runtime itself owns off `globals.form.properties` (e.g. `queryParams`, and any `fd:*` framework
+ *     key). See afb-runtime.js (`getQueryParameter` reads `globals.form.properties.queryParams`).
  *   - `globals.form` as a plain arg  — e.g. `getVariable('key', globals.form)`,
  *                                      `dispatchEvent(globals.form, ...)` (form-scope vars/events)
  *
- * Everything else (`globals.form.$items`, `globals.form.<fieldName>`, etc.)
- * is flagged as severity: 'critical'.
+ * Flagged (`fragment-form-property-scope`) — a fragment reading `globals.form.$properties.<key>`:
+ *   - `<key>` = `uistate._<name>` (EPHEMERAL) — `_` never persists, so it has no reason to be on the
+ *     FORM; inside a fragment it belongs on `globals.fragment`.
+ *   - `<key>` = a BARE unclassified app key (`assistedFromUrl`) — fragment config with no namespace.
+ *   ALLOWED: OOTB form-level (`queryParams`, `fd:*`) AND PERSISTED namespaced keys (`data.*`, or
+ *   `uistate.<name>` with no leading `_`) — per journey-state-model only FORM-level variables persist
+ *   on resume, so reading persisted state off globals.form is intentional.
+ *   Also resolves a GENERIC accessor (`function readProp(g,key){ return g.form.$properties[key]; }`)
+ *   by evaluating the string-literal key at each call site (this is how the real bug hid — the key
+ *   is a param, so a member-only scan misses it).
+ *   - `globals.form.$items`, `globals.form.<fieldName>`, etc. — traversal (`fragment-globals-form-traversal`).
+ *
+ * NON-OVERLAP with storage-class: storage-class's concern is NAMESPACING (is the key `data.`/`uistate.`
+ * prefixed?) and it treats `globals.form` and `globals.fragment.<root>` as equivalent "form-level". This
+ * analyzer's concern is PORTABILITY (a fragment must not reach the PARENT form) — orthogonal, distinct
+ * finding type, and fires ONLY on `globals.form`-scoped reads (never `globals.fragment`).
  *
  * Fragment file detection:
  *   1. Path segment `/fragment/` present in filename (primary)
@@ -189230,6 +189283,15 @@ class FragmentQualifiedNameAnalyzer {
 class FragmentGlobalsScopeAnalyzer {
   constructor(config = null) {
     this.config = config;
+  }
+
+  // Form-LEVEL OOTB properties the runtime reads off `globals.form.properties` (afb-runtime.js) — these
+  // legitimately come from `globals.form` even inside a fragment. `fd:*` framework keys are allowed by
+  // prefix. Everything else read from `globals.form.$properties` in a fragment is a scope violation.
+  static OOTB_FORM_PROPS = new Set(['queryParams']);
+
+  static isOotbFormProp(key) {
+    return FragmentGlobalsScopeAnalyzer.OOTB_FORM_PROPS.has(key) || /^fd:/.test(key);
   }
 
   /**
@@ -189296,33 +189358,41 @@ class FragmentGlobalsScopeAnalyzer {
   _scanFile(ast, file) {
     const issues = [];
 
+    // First pass: find GENERIC form-$properties accessors — a function whose body reads
+    // `<param>.form.$properties` (directly or `.properties`) and returns it keyed by a parameter.
+    // e.g. `function readProp(globals, key){ return globals.form.$properties[key]; }`. We record the
+    // function name + which param index is the KEY, so call sites can be judged by their literal key.
+    const genericAccessors = this._findFormPropertyAccessors(ast);
+
     ancestor(ast, {
       MemberExpression: (node, _state, ancestors) => {
-        // Only flag the direct child of globals.form (not deeper levels).
-        // This avoids duplicate issues for globals.form.a.b.c chains
-        // since we only care about the first-level access.
         const objPath = this._getMemberPath(node.object);
+
+        // (A) `globals.form.$properties.<key>` read — key-aware scope check. Handles dotted access
+        // (`.queryParams`) AND computed STRING-literal access (`['uistate._x']`, common for namespaced
+        // keys). A computed non-literal (`[key]`) can't be judged here — the readProp pass covers that.
+        if (objPath === 'globals.form.$properties') {
+          let key = null;
+          if (!node.computed && node.property?.type === 'Identifier') key = node.property.name;
+          else if (node.computed && node.property?.type === 'Literal' && typeof node.property.value === 'string') key = node.property.value;
+          if (key != null) { this._checkFormPropKey(key, node, ancestors, file, issues); return; }
+          return; // dynamic computed access — not statically resolvable
+        }
+
+        // (B) traversal: direct child of globals.form other than $properties → portability violation.
         if (objPath !== 'globals.form') return;
-
-        // Computed access (globals.form['x']) — skip, can't reason statically
         if (node.computed) return;
-
         const prop = node.property?.name;
         if (!prop) return;
-
-        // $properties is the only allowed child traversal
-        if (prop === '$properties') return;
+        if (prop === '$properties') return; // its keys are handled in (A)
 
         const fullPath = `globals.form.${prop}`;
-        const line = node.loc?.start.line;
-        const fnName = this._enclosingFunctionName(ancestors);
-
         issues.push({
           severity: 'critical',
           type: 'fragment-globals-form-traversal',
-          functionName: fnName || '(module scope)',
+          functionName: this._enclosingFunctionName(ancestors) || '(module scope)',
           file: file.filename,
-          line,
+          line: node.loc?.start.line,
           path: fullPath,
           message:
             `Fragment file references \`${fullPath}\` — fragment code must not traverse ` +
@@ -189335,9 +189405,117 @@ class FragmentGlobalsScopeAnalyzer {
           cwvImpact: 'Functional (breaks on re-embedded or renamed fragments)',
         });
       },
+
+      // (C) call sites of a generic form-$properties accessor: judge the literal KEY argument.
+      CallExpression: (node, _state, ancestors) => {
+        const callee = node.callee;
+        const fnName = callee?.type === 'Identifier' ? callee.name : null;
+        if (!fnName || !genericAccessors.has(fnName)) return;
+        const keyIdx = genericAccessors.get(fnName);
+        const arg = node.arguments?.[keyIdx];
+        if (arg?.type !== 'Literal' || typeof arg.value !== 'string') return; // non-literal → can't judge
+        this._checkFormPropKey(arg.value, node, ancestors, file, issues, `${fnName}('${arg.value}')`);
+      },
     });
 
     return issues;
+  }
+
+  // Flag a fragment's `globals.form.$properties.<key>` read. Exemptions / rules (per journey-state-model):
+  //  1. OOTB form-level props (`queryParams`, `fd:*`) — runtime owns these off globals.form → ALLOW.
+  //  2. PERSISTED namespaced keys (`data.*`, or `uistate.<name>` with NO leading `_`) — only FORM-level
+  //     variables persist/restore on resume, so reading them off globals.form is intentional → ALLOW.
+  //  3. EPHEMERAL `uistate._<name>` — `_` = never persisted, so it has no reason to live on the form;
+  //     inside a fragment it belongs on `globals.fragment` → FLAG (reason: 'ephemeral').
+  //  4. BARE unclassified key (e.g. `assistedFromUrl`) — fragment config with no namespace reaching the
+  //     parent form → FLAG (reason: 'unclassified').
+  // (Storage-class is orthogonal — it checks NAMESPACING, treats globals.form/globals.fragment as one
+  // "form-level", and emits nothing for these; verified no double-report.)
+  _checkFormPropKey(key, node, ancestors, file, issues, viaLabel) {
+    const bareKey = key.split('.')[0];
+    if (FragmentGlobalsScopeAnalyzer.isOotbFormProp(key) || FragmentGlobalsScopeAnalyzer.isOotbFormProp(bareKey)) {
+      return; // (1) OOTB form-level
+    }
+    let reason = null;
+    const uiMatch = /^uistate\.(.+)$/.exec(key);
+    if (key.startsWith('data.') || (uiMatch && !uiMatch[1].startsWith('_'))) {
+      return; // (2) persisted (data.* / uistate.<non-_>) — intentionally form-level for resume
+    }
+    if (uiMatch && uiMatch[1].startsWith('_')) {
+      reason = 'ephemeral'; // (3) uistate._x on form inside a fragment
+    } else {
+      reason = 'unclassified'; // (4) bare app key
+    }
+
+    const ref = viaLabel || `globals.form.$properties.${key}`;
+    const detail = reason === 'ephemeral'
+      ? `\`${key}\` is ephemeral scratch (\`uistate._\` = never persisted per journey-state-model), so it `
+        + `has no reason to live on the FORM — inside a fragment it belongs on \`globals.fragment\`.`
+      : `\`${key}\` is neither an OOTB form-level property (\`queryParams\`/\`fd:*\`) nor a persisted `
+        + `namespaced key (\`data.*\`/\`uistate.<name>\`), so it is the fragment's own config.`;
+    issues.push({
+      severity: 'critical',
+      type: 'fragment-form-property-scope',
+      functionName: this._enclosingFunctionName(ancestors) || '(module scope)',
+      file: file.filename,
+      line: node.loc?.start.line,
+      path: `globals.form.$properties.${key}`,
+      message:
+        `Fragment reads \`${ref}\` from the PARENT form. ${detail} Read it via `
+        + `\`globals.fragment.$properties.${key}\` — reaching the parent form breaks the fragment on re-embedding.`,
+      recommendation:
+        `Use \`globals.fragment.$properties.${key}\` (and write it with the fragment scope too). Genuine `
+        + `resume-persisted state uses a non-\`_\` \`uistate.<name>\` on the form; OOTB \`queryParams\`/\`fd:*\` `
+        + `may still come from \`globals.form\`.`,
+      cwvImpact: 'Functional (breaks on re-embedded or renamed fragments)',
+    });
+  }
+
+  // Find functions of shape `function f(a, key){ ... a.form.$properties ... [key] ... }` (or arrow /
+  // `.properties`), returning Map(fnName → keyParamIndex). Conservative: requires a `<param>.form`
+  // ($properties|properties) read in the body AND a later use of a param as the lookup key.
+  _findFormPropertyAccessors(ast) {
+    const accessors = new Map();
+    const consider = (fnNode, name) => {
+      if (!name || !fnNode?.params?.length) return;
+      const paramNames = fnNode.params.map((p) => (p.type === 'Identifier' ? p.name : null));
+      let readsFormProps = false;
+      let keyParamIdx = -1;
+      simple(fnNode.body || fnNode, {
+        MemberExpression: (m) => {
+          const p = this._getMemberPath(m.object);
+          // <param>.form.$properties  or  <param>.form.properties
+          if (p && /\.form$/.test(p) && (m.property?.name === '$properties' || m.property?.name === 'properties')) {
+            const root = p.split('.')[0];
+            if (paramNames.includes(root)) readsFormProps = true;
+          }
+          // computed lookup `<props>[key]` where key is one of the params
+          if (m.computed && m.property?.type === 'Identifier') {
+            const idx = paramNames.indexOf(m.property.name);
+            if (idx !== -1) keyParamIdx = idx;
+          }
+        },
+        // `key.split('.').reduce(...)` style — the split receiver is the key param
+        CallExpression: (c) => {
+          if (c.callee?.type === 'MemberExpression' && c.callee.property?.name === 'split'
+            && c.callee.object?.type === 'Identifier') {
+            const idx = paramNames.indexOf(c.callee.object.name);
+            if (idx !== -1) keyParamIdx = idx;
+          }
+        },
+      });
+      if (readsFormProps && keyParamIdx !== -1) accessors.set(name, keyParamIdx);
+    };
+
+    ancestor(ast, {
+      FunctionDeclaration: (n) => consider(n, n.id?.name),
+      VariableDeclarator: (n) => {
+        if (n.init?.type === 'FunctionExpression' || n.init?.type === 'ArrowFunctionExpression') {
+          consider(n.init, n.id?.name);
+        }
+      },
+    });
+    return accessors;
   }
 
   /**
@@ -191671,6 +191849,111 @@ class ContentInCodeAnalyzer {
   }
 }
 
+;// CONCATENATED MODULE: ./src/analyzers/format-detection.js
+
+
+/**
+ * Shared display-format detection — a value expression that BAKES presentation (unit/currency/percent/
+ * precision) into code instead of leaving it to the model's `displayFormat`/`displayValueExpression`.
+ *
+ * Single source of truth for BOTH tiers so the rule never diverges:
+ *   - display-format-in-code (fragment / custom-fn surface) — returned / setProperty({value}) sinks.
+ *   - component-owns-model-concern (component view) — value written to a rendered element.
+ *
+ * Two heuristics (see isDisplayFormatSink):
+ *   H1 `isDisplayFormatLiteral` — a template/`+`-concat combining a NUMERIC core with a non-prose,
+ *      non-CSS static decoration (`₹`, ` months`, `%`, …). Decoration char is never enumerated.
+ *   H2 `isPureFormattingCall`   — a call whose ENTIRE output is a presentation string
+ *      (`x.toLocaleString(…)` or a `format*(…)` helper). `.toFixed` alone is excluded (plain datum).
+ */
+
+const NUMERIC_HELPER_RE = /(^format)|(?:number|amount|price|total|count|roi|emi|rate|percent|balance|tenure|value)$/i;
+const CSS_VALUE_RE = /\b(?:calc|var|url|translate[XY]?|rgba?|hsla?)\s*\(|\d\s*(?:px|rem|em|vh|vw|vmin|vmax|pt|pc|ex|ch|fr|deg|rad|turn|ms)\b/i;
+const FORMAT_HELPER_RE = /^format[A-Z0-9_]/;
+
+function calleeName(callee) {
+  if (!callee) return '';
+  if (callee.type === 'Identifier') return callee.name;
+  if (callee.type === 'MemberExpression') return callee.property?.name || '';
+  return '';
+}
+
+// Is `node` provably a numeric expression? (Conservative — unknown shapes return false.)
+function isNumericExpr(node) {
+  if (!node) return false;
+  if (node.type === 'Literal') return typeof node.value === 'number';
+  if (node.type === 'UnaryExpression' && (node.operator === '-' || node.operator === '+')) {
+    return isNumericExpr(node.argument);
+  }
+  if (node.type === 'BinaryExpression' && ['*', '/', '-', '%'].includes(node.operator)) return true;
+  if (node.type === 'BinaryExpression' && node.operator === '+') {
+    return isNumericExpr(node.left) || isNumericExpr(node.right);
+  }
+  if (node.type === 'ConditionalExpression') {
+    return isNumericExpr(node.consequent) || isNumericExpr(node.alternate);
+  }
+  if (node.type === 'CallExpression') {
+    const callee = node.callee;
+    if (callee?.type === 'MemberExpression' && ['toFixed', 'toLocaleString'].includes(callee.property?.name)) return true;
+    if (callee?.type === 'MemberExpression' && callee.object?.name === 'Math') return true;
+    if (callee?.type === 'Identifier' && ['Number', 'parseFloat', 'parseInt'].includes(callee.name)) return true;
+    const name = calleeName(callee);
+    if (name && NUMERIC_HELPER_RE.test(name)) return true;
+  }
+  return false;
+}
+
+// A non-empty, non-prose, non-CSS static decoration (see class docs on partition with content-in-code).
+function isFormatDecoration(joinedText) {
+  if (typeof joinedText !== 'string') return false;
+  if (joinedText.trim().length === 0) return false;
+  if (CSS_VALUE_RE.test(joinedText)) return false;
+  return !ContentInCodeAnalyzer.isProse(joinedText);
+}
+
+function concatOperands(node) {
+  if (node?.type === 'BinaryExpression' && node.operator === '+') {
+    return [...concatOperands(node.left), ...concatOperands(node.right)];
+  }
+  return [node];
+}
+
+// H1 — numeric core + non-prose static decoration (template / +-concat / ternary branch).
+function isDisplayFormatLiteral(node) {
+  if (!node) return false;
+  if (node.type === 'ConditionalExpression') {
+    return isDisplayFormatLiteral(node.consequent) || isDisplayFormatLiteral(node.alternate);
+  }
+  if (node.type === 'TemplateLiteral') {
+    const joined = node.quasis.map((q) => q.value.cooked).join(' ');
+    return isFormatDecoration(joined) && node.expressions.some((e) => isNumericExpr(e));
+  }
+  if (node.type === 'BinaryExpression' && node.operator === '+') {
+    const ops = concatOperands(node);
+    const joined = ops.filter((o) => o?.type === 'Literal' && typeof o.value === 'string').map((o) => o.value).join(' ');
+    return isFormatDecoration(joined) && ops.some((o) => isNumericExpr(o));
+  }
+  return false;
+}
+
+// H2 — a call whose entire output is a presentation string (toLocaleString / format*()).
+function isPureFormattingCall(node) {
+  if (!node) return false;
+  if (node.type === 'ConditionalExpression') {
+    return isPureFormattingCall(node.consequent) || isPureFormattingCall(node.alternate);
+  }
+  if (node.type !== 'CallExpression') return false;
+  const callee = node.callee;
+  if (callee?.type === 'MemberExpression' && callee.property?.name === 'toLocaleString') return true;
+  const name = calleeName(callee);
+  return !!name && FORMAT_HELPER_RE.test(name);
+}
+
+// A value expression that bakes display formatting under EITHER heuristic.
+function isDisplayFormatSink(node) {
+  return isDisplayFormatLiteral(node) || isPureFormattingCall(node);
+}
+
 ;// CONCATENATED MODULE: ./src/analyzers/display-format-in-code-analyzer.js
 
 
@@ -191724,129 +192007,6 @@ class DisplayFormatInCodeAnalyzer {
     this.config = config;
   }
 
-  static calleeName(callee) {
-    if (!callee) return '';
-    if (callee.type === 'Identifier') return callee.name;
-    if (callee.type === 'MemberExpression') return callee.property?.name || '';
-    return '';
-  }
-
-  // Number-returning helper by NAME (heuristic): a call whose callee ends in a numeric noun or starts
-  // with `format`. Keeps (A) from missing the common `₹${formatIndianNumber(x)}` / `${toAmount(x)}`
-  // shapes without a symbol list. Unknown name → not numeric (under-flag, never false-positive).
-  static NUMERIC_HELPER_RE = /(^format)|(?:number|amount|price|total|count|roi|emi|rate|percent|balance|tenure|value)$/i;
-
-  // Is `node` provably a numeric expression? (Conservative — unknown shapes return false.)
-  static isNumericExpr(node) {
-    if (!node) return false;
-    if (node.type === 'Literal') return typeof node.value === 'number';
-    if (node.type === 'UnaryExpression' && (node.operator === '-' || node.operator === '+')) {
-      return DisplayFormatInCodeAnalyzer.isNumericExpr(node.argument);
-    }
-    if (node.type === 'BinaryExpression' && ['*', '/', '-', '%'].includes(node.operator)) return true;
-    if (node.type === 'BinaryExpression' && node.operator === '+') {
-      return DisplayFormatInCodeAnalyzer.isNumericExpr(node.left)
-        || DisplayFormatInCodeAnalyzer.isNumericExpr(node.right);
-    }
-    if (node.type === 'ConditionalExpression') {
-      return DisplayFormatInCodeAnalyzer.isNumericExpr(node.consequent)
-        || DisplayFormatInCodeAnalyzer.isNumericExpr(node.alternate);
-    }
-    if (node.type === 'CallExpression') {
-      const callee = node.callee;
-      // x.toFixed(…) / x.toLocaleString(…) — number-formatting methods
-      if (callee?.type === 'MemberExpression' && ['toFixed', 'toLocaleString'].includes(callee.property?.name)) return true;
-      // Math.*(…)
-      if (callee?.type === 'MemberExpression' && callee.object?.name === 'Math') return true;
-      // Number()/parseFloat()/parseInt()
-      if (callee?.type === 'Identifier' && ['Number', 'parseFloat', 'parseInt'].includes(callee.name)) return true;
-      // number-returning helper by name
-      const name = DisplayFormatInCodeAnalyzer.calleeName(callee);
-      if (name && DisplayFormatInCodeAnalyzer.NUMERIC_HELPER_RE.test(name)) return true;
-    }
-    return false;
-  }
-
-  // A CSS-VALUE string, not a field display value — a `.style.left`/`--var` layout string like
-  // `calc(8px + ...)`. Signalled by `calc(`/`var(`/`url(` or a CSS length/angle/time unit glued to a
-  // number (`px`, `rem`, `em`, `vh`, `vw`, `pt`, `deg`, `ms`, …). NOT `%` alone — percent is a valid
-  // display decoration (`${roi}%`), so it is deliberately excluded from the CSS signal.
-  static CSS_VALUE_RE = /\b(?:calc|var|url|translate[XY]?|rgba?|hsla?)\s*\(|\d\s*(?:px|rem|em|vh|vw|vmin|vmax|pt|pc|ex|ch|fr|deg|rad|turn|ms)\b/i;
-
-  // The COMBINED static text is a format decoration when it has non-whitespace content, is NOT prose,
-  // and is NOT a CSS-value string. Uses the JOINED text (all quasis / all literal operands) — the SAME
-  // unit of analysis as content-in-code's `staticText`/`isProse` — so the two analyzers partition
-  // cleanly: prose static text → content-in-code; non-prose non-CSS static text → here. Never per-chunk
-  // (a chunk of a prose template can look non-prose in isolation and cause a double-flag).
-  static isFormatDecoration(joinedText) {
-    if (typeof joinedText !== 'string') return false;
-    if (joinedText.trim().length === 0) return false;
-    if (DisplayFormatInCodeAnalyzer.CSS_VALUE_RE.test(joinedText)) return false; // a CSS layout string, not a display value
-    return !ContentInCodeAnalyzer.isProse(joinedText);
-  }
-
-  // Flatten a `+`-concat chain into its operands (left-to-right); non-concat node → [node].
-  static concatOperands(node) {
-    if (node?.type === 'BinaryExpression' && node.operator === '+') {
-      return [
-        ...DisplayFormatInCodeAnalyzer.concatOperands(node.left),
-        ...DisplayFormatInCodeAnalyzer.concatOperands(node.right),
-      ];
-    }
-    return [node];
-  }
-
-  // Does `node` combine a numeric core (A) with a non-prose static decoration (B)? Handles a template
-  // literal, a `+`-concat, and a ternary whose branch(es) qualify. Returns true when BOTH hold.
-  static isDisplayFormatLiteral(node) {
-    if (!node) return false;
-    if (node.type === 'ConditionalExpression') {
-      return DisplayFormatInCodeAnalyzer.isDisplayFormatLiteral(node.consequent)
-        || DisplayFormatInCodeAnalyzer.isDisplayFormatLiteral(node.alternate);
-    }
-    if (node.type === 'TemplateLiteral') {
-      const joined = node.quasis.map((q) => q.value.cooked).join(' ');
-      const hasDecoration = DisplayFormatInCodeAnalyzer.isFormatDecoration(joined);
-      const hasNumericCore = node.expressions.some((e) => DisplayFormatInCodeAnalyzer.isNumericExpr(e));
-      return hasDecoration && hasNumericCore;
-    }
-    if (node.type === 'BinaryExpression' && node.operator === '+') {
-      const ops = DisplayFormatInCodeAnalyzer.concatOperands(node);
-      const joined = ops.filter((o) => o?.type === 'Literal' && typeof o.value === 'string').map((o) => o.value).join(' ');
-      const hasDecoration = DisplayFormatInCodeAnalyzer.isFormatDecoration(joined);
-      const hasNumericCore = ops.some((o) => DisplayFormatInCodeAnalyzer.isNumericExpr(o));
-      return hasDecoration && hasNumericCore;
-    }
-    return false;
-  }
-
-  // `format*`-named helper (whole-output presentation string), NOT a numeric noun suffix. Distinct from
-  // NUMERIC_HELPER_RE: here the helper's ENTIRE result is a formatted display string (formatIndianNumber,
-  // formatDate, formatCurrency), so it belongs in displayFormat/displayValueExpression.
-  static FORMAT_HELPER_RE = /^format[A-Z0-9_]/;
-
-  // H2: `node` is a call whose entire output is a presentation string — `x.toLocaleString(…)` or a
-  // `format*(…)` helper. `.toFixed` is intentionally EXCLUDED (plain rounded number = valid datum).
-  // Unwraps a ternary (`cond ? fmt(x) : ''`). Conservative — unknown callee → false.
-  static isPureFormattingCall(node) {
-    if (!node) return false;
-    if (node.type === 'ConditionalExpression') {
-      return DisplayFormatInCodeAnalyzer.isPureFormattingCall(node.consequent)
-        || DisplayFormatInCodeAnalyzer.isPureFormattingCall(node.alternate);
-    }
-    if (node.type !== 'CallExpression') return false;
-    const callee = node.callee;
-    if (callee?.type === 'MemberExpression' && callee.property?.name === 'toLocaleString') return true;
-    const name = DisplayFormatInCodeAnalyzer.calleeName(callee);
-    return !!name && DisplayFormatInCodeAnalyzer.FORMAT_HELPER_RE.test(name);
-  }
-
-  // A sink value is a display-format violation under EITHER heuristic.
-  static isDisplayFormatSink(node) {
-    return DisplayFormatInCodeAnalyzer.isDisplayFormatLiteral(node)
-      || DisplayFormatInCodeAnalyzer.isPureFormattingCall(node);
-  }
-
   analyze(formJson, jsFiles = []) {
     const issues = [];
     const MSG = 'A field\'s display value is FORMATTED in code (a numeric value decorated with a '
@@ -191876,15 +192036,2050 @@ class DisplayFormatInCodeAnalyzer {
 
       simple(ast, {
         ReturnStatement: (r) => {
-          if (DisplayFormatInCodeAnalyzer.isDisplayFormatSink(r.argument)) flag(r.loc?.start.line);
+          if (isDisplayFormatSink(r.argument)) flag(r.loc?.start.line);
         },
         // setProperty(<field>, { value: <formatted> })
         CallExpression: (c) => {
-          if (DisplayFormatInCodeAnalyzer.calleeName(c.callee) !== 'setProperty') return;
+          if (calleeName(c.callee) !== 'setProperty') return;
           const obj = c.arguments?.[1];
           if (obj?.type !== 'ObjectExpression') return;
           const valueProp = obj.properties.find((p) => (p.key?.name === 'value' || p.key?.value === 'value'));
-          if (valueProp && DisplayFormatInCodeAnalyzer.isDisplayFormatSink(valueProp.value)) flag(c.loc?.start.line);
+          if (valueProp && isDisplayFormatSink(valueProp.value)) flag(c.loc?.start.line);
+        },
+      });
+    }
+    return { violations: issues.length, issues };
+  }
+
+  compare(before, after) {
+    const b = before?.violations || 0;
+    const a = after?.violations || 0;
+    return { before: b, after: a, delta: a - b, regressed: a > b };
+  }
+}
+
+;// CONCATENATED MODULE: ./src/analyzers/event-impact-analyzer.js
+/**
+ * Event Impact Analyzer
+ * Generates impact analysis showing which events affect which fields
+ * Useful for understanding ripple effects when modifying events.
+ *
+ * Also detects RULE-ORDERING RACES in the form's event/rule expressions — the class of bug that
+ * `test/integration/helpers/backend-rewrite.js` patches on the wire (see
+ * docs/test-only-patches-backend-rewrite.md). Two shapes:
+ *
+ *   A. dispatch-before-write (error): a handler array runs `dispatchEvent($form,'custom:E',…)` at
+ *      index i and `setVariable('V',…)` at index j > i in the SAME array, and the `custom:E` handler
+ *      READS `V` (via `getVariable('V')`). The dispatched handler sees the stale/unset `V` → wrong
+ *      branch. This is the `fixDecryptSuccessOrdering` bug. Fix: move the setVariable before the
+ *      dispatch. Confident + local → error.
+ *
+ *   B. async cross-event read-before-write (warning): a handler reads `getVariable('V')` where `V` is
+ *      written ONLY inside a DIFFERENT `custom:*` handler (no synchronous ordering guarantee), so the
+ *      read can race ahead of the async write. This is the `fixRedirectFullName` bug. Static timing
+ *      can't be proven → warning (prefer an atomically-set source, e.g. an OTP-VAL payload field).
+ */
+
+class EventImpactAnalyzer {
+  constructor(config = null) {
+    this.config = config;
+  }
+
+  // Ordered statements of interest in a single handler array. Each entry: {kind, name, index}.
+  // kind: 'dispatch' (custom event name), 'setVar' (variable written), plus we scan reads separately.
+  static parseHandlerStatements(handlerArray) {
+    const stmts = [];
+    handlerArray.forEach((handler, index) => {
+      if (typeof handler !== 'string') return;
+      for (const m of handler.matchAll(/dispatchEvent\s*\(\s*\$?form\s*,\s*(?:\\?['"]|\\u0027)(custom:[a-zA-Z0-9_]+)/g)) {
+        stmts.push({ kind: 'dispatch', name: m[1], index });
+      }
+      for (const m of handler.matchAll(/setVariable\s*\(\s*(?:\\?['"]|\\u0027)([a-zA-Z0-9_]+)/g)) {
+        stmts.push({ kind: 'setVar', name: m[1], index });
+      }
+    });
+    return stmts;
+  }
+
+  // Variable names READ in an expression string via getVariable('V'). (Only the getVariable form is
+  // detected — bare $V / .V property accesses are ambiguous in AF expressions and would false-positive.)
+  static variablesRead(text) {
+    const names = new Set();
+    if (typeof text !== 'string') return names;
+    for (const m of text.matchAll(/getVariable\s*\(\s*(?:\\?['"]|\\u0027)([a-zA-Z0-9_]+)/g)) names.add(m[1]);
+    return names;
+  }
+
+  /**
+   * Generate impact analysis: Event → Fields mapping
+   * Shows which fields are affected when an event fires
+   */
+  analyze(formJson) {
+    const eventImpactMap = {};
+    const fieldEventMap = {}; // Reverse map: field → events that target it
+
+    // Ordering-race bookkeeping:
+    //  handlerArrays: every event handler array seen, with its ordered dispatch/setVar statements +
+    //    a source label + the raw expressions (for read-detection of the dispatched handler).
+    //  varReadsByEvent: custom:event → Set(vars it reads).  varWritesByEvent: custom:event → Set(vars).
+    //  eventExprs: custom:event → concatenated handler text (to check reads).
+    const handlerArrays = [];
+    const eventExprs = {}; // 'custom:E' → joined handler text (last writer wins; concatenated)
+    const varWriteEvents = {}; // varName → Set('custom:E' that writes it)
+    const sourceByEvent = {}; // 'custom:E' → sourceField (for EVERY custom handler, incl. pure readers)
+
+    // Traverse form and extract all events
+    const traverse = (node, path = []) => {
+      if (!node) return;
+      
+      const fieldName = node.name || node.id;
+      // Use "$form" for root-level form node instead of UUID/form name
+      const pathSegment = (path.length === 0 && fieldName) ? '$form' : fieldName;
+      const currentPath = pathSegment ? [...path, pathSegment] : path;
+      const fieldPath = currentPath.join('.');
+      
+      // Process events on this field
+      if (node.events && typeof node.events === 'object') {
+        Object.entries(node.events).forEach(([eventType, handlers]) => {
+          // Skip if no valid field path
+          const sourceField = fieldPath || '(root)';
+          const eventKey = `${sourceField} → ${eventType}`;
+          
+          if (!eventImpactMap[eventKey]) {
+            eventImpactMap[eventKey] = {
+              sourceField,
+              eventType,
+              
+              handlers: [],
+              impactedFields: new Set(),
+              customFunctions: new Set(),
+              hasHTTPCalls: false,
+              hasDOMAccess: false,
+              hasWindowAccess: false,
+            };
+          }
+          
+          const handlerArray = Array.isArray(handlers) ? handlers : [handlers];
+
+          // Ordering-race collection: record this array's ordered statements + index it by the
+          // custom:* event name it defines (eventType is the map key, e.g. 'custom:validatePinCode').
+          const stmts = EventImpactAnalyzer.parseHandlerStatements(handlerArray);
+          if (stmts.length) {
+            handlerArrays.push({ sourceField, eventType, stmts });
+          }
+          if (typeof eventType === 'string' && eventType.startsWith('custom:')) {
+            const joined = handlerArray.filter((h) => typeof h === 'string').join('\n');
+            eventExprs[eventType] = (eventExprs[eventType] || '') + '\n' + joined;
+            // Record the source field for EVERY custom handler — including pure readers with no
+            // dispatch/setVar (e.g. custom:getRedirectionUrl) that never reach handlerArrays.
+            if (!(eventType in sourceByEvent)) sourceByEvent[eventType] = sourceField;
+            for (const s of stmts) {
+              if (s.kind === 'setVar') {
+                (varWriteEvents[s.name] = varWriteEvents[s.name] || new Set()).add(eventType);
+              }
+            }
+          }
+
+          handlerArray.forEach(handler => {
+            if (typeof handler !== 'string') return;
+
+            eventImpactMap[eventKey].handlers.push(handler);
+            
+            // Extract impacted fields from handler
+            this.extractImpactedFields(handler, eventImpactMap[eventKey], fieldEventMap);
+            
+            // Extract custom functions used
+            this.extractCustomFunctions(handler, eventImpactMap[eventKey]);
+            
+            // Detect performance issues
+            if (handler.includes('fetch(') || handler.includes('axios.')) {
+              eventImpactMap[eventKey].hasHTTPCalls = true;
+            }
+            if (handler.includes('document.') || handler.includes('querySelector')) {
+              eventImpactMap[eventKey].hasDOMAccess = true;
+            }
+            if (handler.includes('window.')) {
+              eventImpactMap[eventKey].hasWindowAccess = true;
+            }
+          });
+        });
+      }
+      
+      // Traverse children
+      if (node[':items']) {
+        Object.values(node[':items']).forEach(child => traverse(child, currentPath));
+      }
+      if (node.items && Array.isArray(node.items)) {
+        node.items.forEach(child => traverse(child, currentPath));
+      }
+    };
+    
+    traverse(formJson);
+    
+    // Convert Sets to Arrays for JSON serialization
+    Object.values(eventImpactMap).forEach(event => {
+      event.impactedFields = Array.from(event.impactedFields).sort();
+      event.customFunctions = Array.from(event.customFunctions).sort();
+    });
+    
+    // Create simple JSON mapping: event/rule → impacted fields
+    // This extracts the key data from eventImpactMap for easier consumption
+    const eventOrRuleToImpactedNodes = {};
+    Object.entries(eventImpactMap).forEach(([eventKey, eventData]) => {
+      eventOrRuleToImpactedNodes[eventKey] = eventData.impactedFields;
+    });
+    
+    // Detect duplicates and similar events (PRIMARY USE CASE)
+    const duplicateAnalysis = this.detectDuplicateEvents(eventImpactMap);
+
+    // ── Ordering-race detection (issues stream — surfaced by lint/analyze/Action) ──────────────
+    const issues = this.detectOrderingRaces(handlerArrays, eventExprs, varWriteEvents, sourceByEvent);
+
+    return {
+      totalEvents: Object.keys(eventImpactMap).length,
+      events: eventImpactMap,
+      fieldEventMap, // field → list of events targeting it
+      eventOrRuleToImpactedNodes, // event/rule → fields impacted by that event/rule
+      summary: this.generateSummary(eventImpactMap, fieldEventMap),
+      duplicates: duplicateAnalysis.duplicates,
+      similarEvents: duplicateAnalysis.similar,
+      performanceIssues: this.identifyPerformanceIssues(eventImpactMap),
+      issues, // rule-ordering-race findings (error + warning)
+      violations: issues.length,
+    };
+  }
+
+  /**
+   * Detects the two ordering-race shapes documented in docs/test-only-patches-backend-rewrite.md.
+   * @param {Array<{sourceField,eventType,stmts}>} handlerArrays - ordered dispatch/setVar per handler
+   * @param {Object} eventExprs - custom:event → concatenated handler text
+   * @param {Object} varWriteEvents - varName → Set(custom:event that writes it)
+   * @param {Object} sourceByEvent - custom:event → sourceField (for every custom handler)
+   * @returns {Array<{severity,type,message,file,functionName}>}
+   */
+  detectOrderingRaces(handlerArrays, eventExprs, varWriteEvents, sourceByEvent = {}) {
+    const issues = [];
+    const seen = new Set();
+    const DOC = 'See docs/test-only-patches-backend-rewrite.md.';
+
+    // Pattern A — dispatch('custom:E') at i, setVariable('V') at j>i in the SAME array, and the
+    // custom:E handler reads V → the dispatched handler sees a stale/unset V. Error.
+    for (const { sourceField, eventType, stmts } of handlerArrays) {
+      const dispatches = stmts.filter((s) => s.kind === 'dispatch');
+      const setVars = stmts.filter((s) => s.kind === 'setVar');
+      for (const d of dispatches) {
+        const targetExpr = eventExprs[d.name];
+        if (!targetExpr) continue; // dispatched handler not defined in this form → can't verify
+        const readByTarget = EventImpactAnalyzer.variablesRead(targetExpr);
+        for (const sv of setVars) {
+          if (sv.index <= d.index) continue; // write already ordered before the dispatch → fine
+          if (!readByTarget.has(sv.name)) continue; // target doesn't read this var → not a race
+          const key = `A|${sourceField}|${eventType}|${d.name}|${sv.name}`;
+          if (seen.has(key)) continue; seen.add(key);
+          issues.push({
+            severity: 'error',
+            type: 'rule-ordering-race',
+            message: `Handler '${eventType}' on '${sourceField}' dispatches '${d.name}' BEFORE `
+              + `setVariable('${sv.name}', …), but the '${d.name}' handler reads '${sv.name}' — it runs `
+              + `with a stale/unset '${sv.name}' and takes the wrong branch. Move `
+              + `setVariable('${sv.name}', …) before the dispatchEvent('${d.name}'). ${DOC}`,
+            file: `formJson:${sourceField}`,
+            functionName: eventType,
+          });
+        }
+      }
+    }
+
+    // Pattern B — a handler reads getVariable('V') where V is written ONLY inside a DIFFERENT custom:*
+    // handler (async, no ordering guarantee) → read can race the write. Warning (timing unprovable).
+    // Iterate EVERY custom handler's text (not just ones with dispatch/setVar), since a pure reader
+    // like `custom:getRedirectionUrl` (only a request(...) call) must still be checked.
+    for (const eventType of Object.keys(eventExprs)) {
+      const expr = eventExprs[eventType];
+      const sourceField = sourceByEvent[eventType] || '$form';
+      const reads = EventImpactAnalyzer.variablesRead(expr);
+      for (const v of reads) {
+        const writers = varWriteEvents[v];
+        if (!writers || writers.size === 0) continue; // not written by any custom handler → out of scope
+        if (writers.has(eventType)) continue; // this handler writes it itself → same-tick, fine
+        const key = `B|${eventType}|${v}`;
+        if (seen.has(key)) continue; seen.add(key);
+        issues.push({
+          severity: 'warning',
+          type: 'rule-ordering-race',
+          message: `Handler '${eventType}' on '${sourceField}' reads getVariable('${v}'), but '${v}' is `
+            + `written only by [${[...writers].join(', ')}] — a different custom event with no ordering `
+            + `guarantee. The read can race ahead of the async write and see an empty value. Prefer an `
+            + `atomically-set source (e.g. the OTP-VAL payload) over a var written by another event. ${DOC}`,
+          file: `formJson:${sourceField}`,
+          functionName: eventType,
+        });
+      }
+    }
+
+    return issues;
+  }
+  
+  extractImpactedFields(handler, event, fieldEventMap) {
+    // Match patterns like:
+    // - setProperty($form.field, ...)
+    // - dispatchEvent($form.field, ...)
+    // - field.$value = ...
+    // - globals.functions.setProperty(field, ...)
+    
+    // Safety check
+    if (!event || !event.sourceField || !event.eventType) {
+      return;
+    }
+    
+    const patterns = [
+      /\$form\.([a-zA-Z0-9_.]+)/g,
+      /setProperty\s*\(\s*\$?form\.([a-zA-Z0-9_.]+)/g,
+      /dispatchEvent\s*\(\s*\$?form\.([a-zA-Z0-9_.]+)/g,
+      /([a-zA-Z0-9_.]+)\.\$value/g,
+      /globals\.functions\.setProperty\s*\(\s*([a-zA-Z0-9_.]+)/g,
+    ];
+    
+    patterns.forEach(pattern => {
+      let match;
+      const handlerCopy = handler; // Reset regex state
+      while ((match = pattern.exec(handlerCopy)) !== null) {
+        let fieldPath = match[1].replace(/^\$form\./, '');
+        
+        // Filter out common false positives
+        if (fieldPath && 
+            fieldPath !== 'undefined' && 
+            fieldPath !== 'form' &&
+            fieldPath !== '$form' &&
+            !fieldPath.startsWith('functions.')) {
+          event.impactedFields.add(fieldPath);
+          
+          // Add to reverse map (with safety check)
+          if (fieldEventMap) {
+            if (!fieldEventMap[fieldPath]) {
+              fieldEventMap[fieldPath] = [];
+            }
+            fieldEventMap[fieldPath].push(`${event.sourceField} → ${event.eventType}`);
+          }
+        }
+      }
+    });
+  }
+  
+  extractCustomFunctions(handler, event) {
+    // Match function calls: functionName(...)
+    const functionPattern = /(\w+)\s*\(/g;
+    const jsKeywords = new Set([
+      'if', 'for', 'while', 'setProperty', 'dispatchEvent', 'getVariable',
+      'setVariable', 'length', 'split', 'join', 'map', 'filter', 'includes',
+      'parseInt', 'parseFloat', 'Date', 'Math', 'Array', 'Object', 'String'
+    ]);
+    
+    let match;
+    while ((match = functionPattern.exec(handler)) !== null) {
+      const fnName = match[1];
+      if (!jsKeywords.has(fnName)) {
+        event.customFunctions.add(fnName);
+      }
+    }
+  }
+  
+  generateSummary(eventImpactMap, fieldEventMap) {
+    const fieldImpactCount = {};
+    const eventTypeCount = {};
+    const customFunctionUsage = {};
+    
+    Object.values(eventImpactMap).forEach(event => {
+      // Safety checks
+      if (!event || !event.sourceField || !event.eventType) {
+        return;
+      }
+      
+      // Count by event type
+      eventTypeCount[event.eventType] = (eventTypeCount[event.eventType] || 0) + 1;
+      
+      // Count fields impacted
+      if (event.impactedFields && typeof event.impactedFields.forEach === 'function') {
+        event.impactedFields.forEach(field => {
+          fieldImpactCount[field] = (fieldImpactCount[field] || 0) + 1;
+        });
+      }
+      
+      // Count custom function usage
+      if (event.customFunctions && typeof event.customFunctions.forEach === 'function') {
+        event.customFunctions.forEach(fn => {
+          if (fn && typeof fn === 'string' && fn.length > 0) {
+            // Get or create the usage object
+            let usage = customFunctionUsage[fn];
+            if (!usage) {
+              usage = { count: 0, events: [] };
+              customFunctionUsage[fn] = usage;
+            }
+            // Update the usage
+            usage.count++;
+            if (usage.events && Array.isArray(usage.events)) {
+              usage.events.push(`${event.sourceField} → ${event.eventType}`);
+            }
+          }
+        });
+      }
+    });
+    
+    // Find top impacted fields
+    const topImpactedFields = Object.entries(fieldImpactCount)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 20)
+      .map(([field, count]) => ({ field, impactCount: count }));
+    
+    // Find fields with most incoming events
+    const mostTargetedFields = Object.entries(fieldEventMap)
+      .map(([field, events]) => ({ field, eventCount: events.length }))
+      .sort((a, b) => b.eventCount - a.eventCount)
+      .slice(0, 20);
+    
+    return {
+      totalEventTypes: Object.keys(eventTypeCount).length,
+      eventsByType: eventTypeCount,
+      topImpactedFields, // Fields modified by the most events
+      mostTargetedFields, // Fields that are targets of the most events
+      customFunctionUsage,
+      totalUniqueFieldsImpacted: Object.keys(fieldImpactCount).length,
+    };
+  }
+  
+  /**
+   * Detect duplicate and similar events
+   * PRIMARY USE CASE: Prevent new developers from creating duplicate logic
+   */
+  detectDuplicateEvents(eventImpactMap) {
+    const duplicates = [];
+    const similar = [];
+    const eventsByField = {};
+    
+    // Group events by source field and event type
+    Object.entries(eventImpactMap).forEach(([eventKey, event]) => {
+      const key = `${event.sourceField}::${event.eventType}`;
+      if (!eventsByField[key]) {
+        eventsByField[key] = [];
+      }
+      eventsByField[key].push({ eventKey, event });
+    });
+    
+    // Check for exact duplicates (same field, same event type, multiple handlers)
+    Object.entries(eventsByField).forEach(([key, events]) => {
+      if (events.length > 1) {
+        duplicates.push({
+          field: events[0].event.sourceField,
+          eventType: events[0].event.eventType,
+          count: events.length,
+          handlers: events.map(e => e.event.handlers).flat(),
+          message: `${events.length} handlers defined for same event - may cause unexpected behavior`,
+        });
+      }
+    });
+    
+    // Check for similar events (different events doing similar things)
+    const allEvents = Object.entries(eventImpactMap);
+    for (let i = 0; i < allEvents.length; i++) {
+      for (let j = i + 1; j < allEvents.length; j++) {
+        const [key1, event1] = allEvents[i];
+        const [key2, event2] = allEvents[j];
+        
+        // Skip if same source field (handled by duplicates)
+        if (event1.sourceField === event2.sourceField) continue;
+        
+        // Check if they impact the same fields
+        const commonImpacts = event1.impactedFields.filter(f => 
+          event2.impactedFields.includes(f)
+        );
+        
+        // Check if they use same custom functions
+        const commonFunctions = event1.customFunctions.filter(f =>
+          event2.customFunctions.includes(f)
+        );
+        
+        // If they have significant overlap, they might be doing similar things
+        if (commonImpacts.length >= 3 || commonFunctions.length >= 2) {
+          similar.push({
+            event1: key1,
+            event2: key2,
+            commonImpacts,
+            commonFunctions,
+            message: `These events may have overlapping logic`,
+          });
+        }
+      }
+    }
+    
+    return { duplicates, similar };
+  }
+  
+  /**
+   * Detect performance issues (SECONDARY - not the main goal)
+   */
+  identifyPerformanceIssues(eventImpactMap) {
+    const issues = [];
+    
+    Object.entries(eventImpactMap).forEach(([eventKey, event]) => {
+      if (event.hasHTTPCalls) {
+        issues.push({
+          severity: 'critical',
+          type: 'http-in-event',
+          event: eventKey,
+          message: `Event contains HTTP calls - will block user interaction`,
+        });
+      }
+      
+      if (event.hasDOMAccess) {
+        issues.push({
+          severity: 'warning',
+          type: 'dom-in-event',
+          event: eventKey,
+          message: `Event accesses DOM directly - may cause layout thrashing`,
+        });
+      }
+      
+      if (event.hasWindowAccess) {
+        issues.push({
+          severity: 'warning',
+          type: 'window-in-event',
+          event: eventKey,
+          message: `Event accesses window object directly - may cause unpredictable behavior`,
+        });
+      }
+      
+      if (event.impactedFields.length > 10) {
+        issues.push({
+          severity: 'warning',
+          type: 'high-impact',
+          event: eventKey,
+          message: `Event impacts ${event.impactedFields.length} fields - may cause cascading updates`,
+        });
+      }
+    });
+    
+    return issues;
+  }
+  
+  /**
+   * Generate markdown report for GitHub PR comment or Gist
+   */
+  generateMarkdownReport(analysis) {
+    let markdown = `# 📊 Event Impact Analysis Report\n\n`;
+    markdown += `**Generated:** ${new Date().toISOString()}\n\n`;
+    markdown += `> **Purpose:** Prevent duplicate events, track impact of changes, document current setup\n\n`;
+    
+    markdown += `## 📈 Summary\n\n`;
+    markdown += `| Metric | Value |\n`;
+    markdown += `|--------|-------|\n`;
+    markdown += `| Total Events | ${analysis.totalEvents} |\n`;
+    markdown += `| Event Types | ${analysis.summary.totalEventTypes} |\n`;
+    markdown += `| Unique Fields Impacted | ${analysis.summary.totalUniqueFieldsImpacted} |\n`;
+    markdown += `| **Duplicate Events** | **${analysis.duplicates?.length || 0}** |\n`;
+    markdown += `| **Similar Events** | **${analysis.similarEvents?.length || 0}** |\n`;
+    markdown += `| Performance Issues | ${analysis.performanceIssues.length} |\n\n`;
+    
+    // PRIORITY 1: Duplicate Events (Main use case!)
+    if (analysis.duplicates && analysis.duplicates.length > 0) {
+      markdown += `## 🚨 Duplicate Events Found\n\n`;
+      markdown += `**⚠️ IMPORTANT:** Multiple handlers defined for the same event. This may cause:\n`;
+      markdown += `- Unexpected behavior (which handler runs first?)\n`;
+      markdown += `- Maintenance nightmares (developers don't know about duplicate logic)\n`;
+      markdown += `- Regression bugs (modifying one handler, forgetting the other)\n\n`;
+      
+      analysis.duplicates.forEach((dup, idx) => {
+        markdown += `### ${idx + 1}. \`${dup.field}\` → **${dup.eventType}**\n\n`;
+        markdown += `- **${dup.count} handlers** defined for this event\n`;
+        markdown += `- **Action Required:** Consolidate into single handler or verify this is intentional\n\n`;
+        markdown += `<details>\n<summary>Show All ${dup.count} Handlers</summary>\n\n`;
+        dup.handlers.forEach((handler, i) => {
+          markdown += `**Handler ${i + 1}:**\n\`\`\`javascript\n${handler}\n\`\`\`\n\n`;
+        });
+        markdown += `</details>\n\n`;
+      });
+    }
+    
+    // PRIORITY 2: Similar Events (Potential duplicates)
+    if (analysis.similarEvents && analysis.similarEvents.length > 0) {
+      markdown += `## 🔍 Similar Events Detected\n\n`;
+      markdown += `**Note:** These events are on different fields but do similar things. Consider:\n`;
+      markdown += `- Are they intentionally similar?\n`;
+      markdown += `- Could they share common logic via a custom function?\n`;
+      markdown += `- Is one a copy-paste of the other?\n\n`;
+      
+      analysis.similarEvents.slice(0, 10).forEach((sim, idx) => {
+        markdown += `### ${idx + 1}. Similarity Between:\n`;
+        markdown += `- **Event 1:** \`${sim.event1}\`\n`;
+        markdown += `- **Event 2:** \`${sim.event2}\`\n\n`;
+        
+        if (sim.commonImpacts.length > 0) {
+          markdown += `**Common Fields Modified:** ${sim.commonImpacts.map(f => `\`${f}\``).join(', ')}\n\n`;
+        }
+        if (sim.commonFunctions.length > 0) {
+          markdown += `**Common Functions Used:** ${sim.commonFunctions.map(f => `\`${f}()\``).join(', ')}\n\n`;
+        }
+        markdown += `---\n\n`;
+      });
+      
+      if (analysis.similarEvents.length > 10) {
+        markdown += `*... and ${analysis.similarEvents.length - 10} more similar event pairs*\n\n`;
+      }
+    }
+    
+    // Performance Issues (Secondary - still useful but not main goal)
+    if (analysis.performanceIssues.length > 0) {
+      markdown += `## ⚠️ Performance Issues\n\n`;
+      const critical = analysis.performanceIssues.filter(i => i.severity === 'critical');
+      const warnings = analysis.performanceIssues.filter(i => i.severity === 'warning');
+      
+      if (critical.length > 0) {
+        markdown += `### 🔴 Critical (${critical.length})\n\n`;
+        critical.forEach(issue => {
+          markdown += `- **${issue.event}**\n`;
+          markdown += `  - ${issue.message}\n`;
+        });
+        markdown += `\n`;
+      }
+      
+      if (warnings.length > 0) {
+        markdown += `### 🟡 Warnings (${warnings.length})\n\n`;
+        warnings.forEach(issue => {
+          markdown += `- **${issue.event}**\n`;
+          markdown += `  - ${issue.message}\n`;
+        });
+        markdown += `\n`;
+      }
+    }
+    
+    // Events by Type
+    markdown += `## 📋 Events by Type\n\n`;
+    Object.entries(analysis.summary.eventsByType)
+      .sort((a, b) => b[1] - a[1])
+      .forEach(([type, count]) => {
+        markdown += `- **${type}:** ${count} event(s)\n`;
+      });
+    
+    // Top Impacted Fields
+    markdown += `\n## 🎯 Top Impacted Fields\n\n`;
+    markdown += `These fields are **modified** by the most events:\n\n`;
+    markdown += `| Rank | Field | Times Modified |\n`;
+    markdown += `|------|-------|----------------|\n`;
+    analysis.summary.topImpactedFields.forEach(({ field, impactCount }, idx) => {
+      markdown += `| ${idx + 1} | \`${field}\` | ${impactCount} |\n`;
+    });
+    
+    // Most Targeted Fields
+    markdown += `\n## 🎯 Most Targeted Fields\n\n`;
+    markdown += `These fields are **targets** of the most events:\n\n`;
+    markdown += `| Rank | Field | Incoming Events |\n`;
+    markdown += `|------|-------|----------------|\n`;
+    analysis.summary.mostTargetedFields.forEach(({ field, eventCount }, idx) => {
+      markdown += `| ${idx + 1} | \`${field}\` | ${eventCount} |\n`;
+    });
+    
+    // Custom Function Usage
+    markdown += `\n## 🔧 Custom Function Usage\n\n`;
+    const sortedFunctions = Object.entries(analysis.summary.customFunctionUsage)
+      .sort((a, b) => b[1].count - a[1].count)
+      .slice(0, 15);
+    
+    if (sortedFunctions.length > 0) {
+      markdown += `| Function | Usage Count | Sample Events |\n`;
+      markdown += `|----------|-------------|---------------|\n`;
+      sortedFunctions.forEach(([fn, data]) => {
+        const samples = data.events.slice(0, 2).join('<br>');
+        const more = data.events.length > 2 ? `<br>...+${data.events.length - 2} more` : '';
+        markdown += `| \`${fn}()\` | ${data.count} | ${samples}${more} |\n`;
+      });
+    } else {
+      markdown += `*No custom functions detected in events*\n`;
+    }
+    
+    // Detailed Event Breakdown
+    markdown += `\n## 📖 Detailed Event → Field Mapping\n\n`;
+    markdown += `<details>\n<summary>Click to expand full event details (${analysis.totalEvents} events)</summary>\n\n`;
+    
+    Object.entries(analysis.events)
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .forEach(([eventKey, event]) => {
+        markdown += `### ${eventKey}\n\n`;
+        
+        if (event.impactedFields.length > 0) {
+          markdown += `**🎯 Impacts (${event.impactedFields.length}):** `;
+          markdown += event.impactedFields.map(f => `\`${f}\``).join(', ');
+          markdown += `\n\n`;
+        }
+        
+        if (event.customFunctions.length > 0) {
+          markdown += `**🔧 Uses Functions:** `;
+          markdown += Array.from(event.customFunctions).map(f => `\`${f}()\``).join(', ');
+          markdown += `\n\n`;
+        }
+        
+        if (event.hasHTTPCalls) {
+          markdown += `⚠️ **Contains HTTP calls**\n\n`;
+        }
+        if (event.hasDOMAccess) {
+          markdown += `⚠️ **Accesses DOM**\n\n`;
+        }
+        if (event.hasWindowAccess) {
+          markdown += `⚠️ **Accesses window object**\n\n`;
+        }
+        
+        markdown += `<details>\n<summary>Event Handlers (${event.handlers.length})</summary>\n\n`;
+        event.handlers.forEach((handler, i) => {
+          markdown += `**Handler ${i + 1}:**\n\`\`\`javascript\n${handler}\n\`\`\`\n\n`;
+        });
+        markdown += `</details>\n\n`;
+        markdown += `---\n\n`;
+      });
+    
+    markdown += `</details>\n\n`;
+    
+    // Impact Analysis Tips
+    markdown += `## 💡 How to Use This Report\n\n`;
+    markdown += `### Before Making Changes:\n`;
+    markdown += `1. **Find your target field** in "Most Targeted Fields" to see what events affect it\n`;
+    markdown += `2. **Check dependencies** - modifying an event may have ripple effects\n`;
+    markdown += `3. **Review custom functions** to understand what code will execute\n\n`;
+    
+    markdown += `### Pre-Deployment Validation:\n`;
+    markdown += `1. **Check for performance issues** (HTTP calls, DOM access, window access)\n`;
+    markdown += `2. **Review high-impact events** (>10 fields)\n`;
+    markdown += `3. **Verify custom functions** are still used correctly\n\n`;
+    
+    markdown += `---\n`;
+    markdown += `*Generated by AEM Forms Performance Bot - Event Impact Analyzer*\n`;
+    
+    return markdown;
+  }
+  
+  /**
+   * Generate JSON report for programmatic consumption
+   */
+  generateJSONReport(analysis) {
+    return JSON.stringify(analysis, null, 2);
+  }
+}
+
+
+;// CONCATENATED MODULE: ./src/data/runtime-property-matrix.js
+// AUTO-GENERATED from the agent-kb runtime-property-matrix.json (schemaVersion 2.1.0).
+// Source of truth for what "OOTB" means. Embedded as a .js module so it is inlined by ncc into the
+// released bundle (a runtime .json read via createRequire is NOT bundled). Refresh when schemaVersion bumps.
+/* harmony default export */ const runtime_property_matrix = ({
+  "schemaVersion": "2.1.0",
+  "purpose": "Canonical property-access matrix for Adaptive Form runtime/rules lookups.",
+  "propertyNaming": {
+    "canonicalPropertyNameFormat": "plain",
+    "runtimeAccessPattern": "<elementRef>.$<property>",
+    "elementRefExamples": [
+      "$form.<path>",
+      "$field",
+      "$fragment",
+      "<siblingOrChildElementName>"
+    ]
+  },
+  "accessModel": {
+    "readOnly": "For rule-accessible properties in this matrix, true means read-only in rules; false means writable by rules.",
+    "valueType": "Absent or \"scalar\" = primitive value. \"object\" = structured object; sub-properties listed in \"children\". Only \"label\" is object-typed in AF2."
+  },
+  "sources": [
+    "spec/adaptive_form_object.adoc",
+    "spec/adaptive_form_field_object.adoc",
+    "spec/adaptive_form_panel_object.adoc",
+    "spec/expressions.adoc",
+    "spec/index.adoc"
+  ],
+  "sourceRuntime": {
+    "repo": "adobe-aem-forms/af2-web-runtime",
+    "package": "@aemforms/af-core",
+    "packageVersion": "0.22.176",
+    "commit": "c7ca4ccad142a1339ec45a39ba0cf19479e1a7b0",
+    "verifiedAgainst": [
+      "packages/forms-next-core/src/BaseNode.ts (editableProperties allowlist)",
+      "packages/forms-next-core/src/Field.ts (getter/setter pairs)",
+      "packages/forms-next-core/src/Container.ts (getter/setter pairs)"
+    ],
+    "note": "readOnly values in this matrix are ground-truthed against the editableProperties allowlist in BaseNode.ts as of this commit. When re-syncing, diff editableProperties and the Field.ts/Container.ts/FileUpload.ts getter-setter pairs against this commit rather than re-deriving from scratch."
+  },
+  "properties": {
+    "fieldCommon": [
+      {
+        "name": "dataRef",
+        "readOnly": true
+      },
+      {
+        "name": "default",
+        "readOnly": true
+      },
+      {
+        "name": "description",
+        "readOnly": false
+      },
+      {
+        "name": "displayFormat",
+        "readOnly": true
+      },
+      {
+        "name": "displayValueExpression",
+        "readOnly": true
+      },
+      {
+        "name": "editFormat",
+        "readOnly": true
+      },
+      {
+        "name": "emptyValue",
+        "readOnly": true
+      },
+      {
+        "name": "enabled",
+        "readOnly": false
+      },
+      {
+        "name": "enum",
+        "readOnly": false
+      },
+      {
+        "name": "enumNames",
+        "readOnly": false
+      },
+      {
+        "name": "fieldType",
+        "readOnly": true
+      },
+      {
+        "name": "label",
+        "readOnly": false,
+        "valueType": "object",
+        "children": [
+          "value",
+          "visible",
+          "richText"
+        ]
+      },
+      {
+        "name": "lang",
+        "readOnly": true
+      },
+      {
+        "name": "name",
+        "readOnly": true
+      },
+      {
+        "name": "placeholder",
+        "readOnly": false
+      },
+      {
+        "name": "properties",
+        "readOnly": false
+      },
+      {
+        "name": "readOnly",
+        "readOnly": false
+      },
+      {
+        "name": "screenReaderText",
+        "readOnly": true
+      },
+      {
+        "name": "tooltip",
+        "readOnly": true
+      },
+      {
+        "name": "repeatable",
+        "readOnly": true
+      },
+      {
+        "name": "visible",
+        "readOnly": false
+      }
+    ],
+    "fieldConstraints": [
+      {
+        "name": "accept",
+        "readOnly": true
+      },
+      {
+        "name": "enforceEnum",
+        "readOnly": true
+      },
+      {
+        "name": "exclusiveMaximum",
+        "readOnly": false
+      },
+      {
+        "name": "exclusiveMinimum",
+        "readOnly": false
+      },
+      {
+        "name": "format",
+        "readOnly": true
+      },
+      {
+        "name": "maxFileSize",
+        "readOnly": true
+      },
+      {
+        "name": "maximum",
+        "readOnly": false
+      },
+      {
+        "name": "maxItems",
+        "readOnly": false
+      },
+      {
+        "name": "maxLength",
+        "readOnly": false
+      },
+      {
+        "name": "minimum",
+        "readOnly": false
+      },
+      {
+        "name": "minItems",
+        "readOnly": false
+      },
+      {
+        "name": "minLength",
+        "readOnly": false
+      },
+      {
+        "name": "pattern",
+        "readOnly": false
+      },
+      {
+        "name": "required",
+        "readOnly": false
+      },
+      {
+        "name": "step",
+        "readOnly": false
+      },
+      {
+        "name": "type",
+        "readOnly": true
+      },
+      {
+        "name": "uniqueItems",
+        "readOnly": true
+      }
+    ],
+    "fieldRuntime": [
+      {
+        "name": "value",
+        "readOnly": false
+      },
+      {
+        "name": "valid",
+        "readOnly": false
+      },
+      {
+        "name": "errorMessage",
+        "readOnly": false
+      },
+      {
+        "name": "index",
+        "readOnly": true
+      },
+      {
+        "name": "parent",
+        "readOnly": true
+      },
+      {
+        "name": "qualifiedName",
+        "readOnly": true
+      }
+    ],
+    "panelAdditional": [
+      {
+        "name": "items",
+        "readOnly": true
+      }
+    ],
+    "fieldTypeAdditional": {
+      "checkbox": [
+        {
+          "name": "checked",
+          "readOnly": false
+        }
+      ],
+      "panel": [
+        {
+          "name": "value",
+          "readOnly": true
+        },
+        {
+          "name": "valid",
+          "readOnly": true
+        },
+        {
+          "name": "maxItems",
+          "readOnly": false
+        },
+        {
+          "name": "minItems",
+          "readOnly": false
+        }
+      ]
+    },
+    "form": [
+      {
+        "name": "title",
+        "readOnly": true
+      },
+      {
+        "name": "description",
+        "readOnly": false
+      },
+      {
+        "name": "action",
+        "readOnly": true
+      },
+      {
+        "name": "label",
+        "readOnly": false,
+        "valueType": "object",
+        "children": [
+          "value",
+          "visible",
+          "richText"
+        ]
+      },
+      {
+        "name": "visible",
+        "readOnly": false
+      },
+      {
+        "name": "enabled",
+        "readOnly": false
+      },
+      {
+        "name": "readOnly",
+        "readOnly": false
+      },
+      {
+        "name": "properties",
+        "readOnly": false
+      },
+      {
+        "name": "maxItems",
+        "readOnly": false
+      },
+      {
+        "name": "minItems",
+        "readOnly": false
+      }
+    ]
+  },
+  "fieldTypeProperties": {
+    "text-input": {
+      "includes": [
+        "fieldCommon",
+        "fieldConstraints",
+        "fieldRuntime"
+      ],
+      "excludes": [
+        "accept",
+        "maxFileSize",
+        "maxItems",
+        "minItems"
+      ]
+    },
+    "number-input": {
+      "includes": [
+        "fieldCommon",
+        "fieldConstraints",
+        "fieldRuntime"
+      ],
+      "excludes": [
+        "accept",
+        "format",
+        "maxFileSize",
+        "maxItems",
+        "maxLength",
+        "minItems",
+        "minLength",
+        "pattern"
+      ]
+    },
+    "date-input": {
+      "includes": [
+        "fieldCommon",
+        "fieldConstraints",
+        "fieldRuntime"
+      ],
+      "excludes": [
+        "accept",
+        "maxFileSize",
+        "maxItems",
+        "maxLength",
+        "minItems",
+        "minLength",
+        "pattern"
+      ]
+    },
+    "datetime-input": {
+      "includes": [
+        "fieldCommon",
+        "fieldConstraints",
+        "fieldRuntime"
+      ],
+      "excludes": [
+        "accept",
+        "maxFileSize",
+        "maxItems",
+        "maxLength",
+        "minItems",
+        "minLength",
+        "pattern"
+      ]
+    },
+    "file-input": {
+      "includes": [
+        "fieldCommon",
+        "fieldConstraints",
+        "fieldRuntime"
+      ],
+      "excludes": [
+        "maxItems",
+        "maxLength",
+        "minItems",
+        "minLength",
+        "pattern"
+      ]
+    },
+    "drop-down": {
+      "includes": [
+        "fieldCommon",
+        "fieldConstraints",
+        "fieldRuntime"
+      ],
+      "excludes": [
+        "accept",
+        "format",
+        "maxFileSize",
+        "maxItems",
+        "maxLength",
+        "minItems",
+        "minLength",
+        "pattern"
+      ]
+    },
+    "radio-group": {
+      "includes": [
+        "fieldCommon",
+        "fieldConstraints",
+        "fieldRuntime"
+      ],
+      "excludes": [
+        "accept",
+        "format",
+        "maxFileSize",
+        "maxItems",
+        "maxLength",
+        "minItems",
+        "minLength",
+        "pattern"
+      ]
+    },
+    "checkbox-group": {
+      "includes": [
+        "fieldCommon",
+        "fieldConstraints",
+        "fieldRuntime"
+      ],
+      "excludes": [
+        "accept",
+        "format",
+        "maxFileSize",
+        "maxItems",
+        "maxLength",
+        "minItems",
+        "minLength",
+        "pattern"
+      ]
+    },
+    "plain-text": {
+      "includes": [
+        "fieldCommon",
+        "fieldConstraints",
+        "fieldRuntime"
+      ],
+      "excludes": [
+        "default",
+        "displayFormat",
+        "displayValueExpression",
+        "editFormat",
+        "emptyValue",
+        "enabled",
+        "readOnly",
+        "tooltip",
+        "accept",
+        "enforceEnum",
+        "format",
+        "maxFileSize",
+        "maxItems",
+        "maxLength",
+        "minItems",
+        "minLength",
+        "pattern",
+        "step",
+        "type"
+      ]
+    },
+    "checkbox": {
+      "includes": [
+        "fieldCommon",
+        "fieldConstraints",
+        "fieldRuntime",
+        "fieldTypeAdditional"
+      ],
+      "excludes": [
+        "accept",
+        "format",
+        "maxFileSize",
+        "maxItems",
+        "maxLength",
+        "minItems",
+        "minLength",
+        "pattern"
+      ]
+    },
+    "button": {
+      "includes": [
+        "fieldCommon",
+        "fieldConstraints",
+        "fieldRuntime"
+      ],
+      "excludes": [
+        "readOnly",
+        "accept",
+        "format",
+        "maxFileSize",
+        "maxItems",
+        "maxLength",
+        "minItems",
+        "minLength",
+        "pattern"
+      ]
+    },
+    "multiline-input": {
+      "includes": [
+        "fieldCommon",
+        "fieldConstraints",
+        "fieldRuntime"
+      ],
+      "excludes": [
+        "accept",
+        "format",
+        "maxFileSize",
+        "maxItems",
+        "maxLength",
+        "minItems",
+        "minLength",
+        "pattern"
+      ]
+    },
+    "panel": {
+      "includes": [
+        "fieldCommon",
+        "fieldConstraints",
+        "fieldRuntime",
+        "panelAdditional",
+        "fieldTypeAdditional"
+      ],
+      "excludes": [
+        "default",
+        "displayFormat",
+        "displayValueExpression",
+        "editFormat",
+        "emptyValue",
+        "enum",
+        "enumNames",
+        "placeholder",
+        "tooltip",
+        "accept",
+        "enforceEnum",
+        "exclusiveMaximum",
+        "exclusiveMinimum",
+        "format",
+        "maxFileSize",
+        "maximum",
+        "maxLength",
+        "minimum",
+        "minLength",
+        "pattern",
+        "required",
+        "step",
+        "errorMessage"
+      ]
+    },
+    "image": {
+      "includes": [
+        "fieldCommon",
+        "fieldConstraints",
+        "fieldRuntime"
+      ],
+      "excludes": [
+        "enabled",
+        "readOnly",
+        "accept",
+        "format",
+        "maxFileSize",
+        "maxItems",
+        "maxLength",
+        "minItems",
+        "minLength",
+        "pattern"
+      ]
+    },
+    "email": {
+      "includes": [
+        "fieldCommon",
+        "fieldConstraints",
+        "fieldRuntime"
+      ],
+      "excludes": [
+        "accept",
+        "maxFileSize",
+        "maxItems",
+        "maxLength",
+        "minItems",
+        "minLength",
+        "pattern"
+      ]
+    },
+    "captcha": {
+      "includes": [
+        "fieldCommon",
+        "fieldConstraints",
+        "fieldRuntime"
+      ],
+      "excludes": [
+        "accept",
+        "format",
+        "maxFileSize",
+        "maxItems",
+        "maxLength",
+        "minItems",
+        "minLength",
+        "pattern"
+      ]
+    },
+    "tel": {
+      "includes": [
+        "fieldCommon",
+        "fieldConstraints",
+        "fieldRuntime"
+      ],
+      "excludes": [
+        "accept",
+        "format",
+        "maxFileSize",
+        "maxItems",
+        "maxLength",
+        "minItems",
+        "minLength",
+        "pattern"
+      ]
+    },
+    "password": {
+      "includes": [
+        "fieldCommon",
+        "fieldConstraints",
+        "fieldRuntime"
+      ],
+      "excludes": [
+        "accept",
+        "format",
+        "maxFileSize",
+        "maxItems",
+        "maxLength",
+        "minItems",
+        "minLength",
+        "pattern"
+      ]
+    },
+    "range": {
+      "includes": [
+        "fieldCommon",
+        "fieldConstraints",
+        "fieldRuntime"
+      ],
+      "excludes": [
+        "accept",
+        "format",
+        "maxFileSize",
+        "maxItems",
+        "maxLength",
+        "minItems",
+        "minLength",
+        "pattern"
+      ]
+    }
+  }
+});
+
+;// CONCATENATED MODULE: ./src/analyzers/concept-tokens.js
+/**
+ * Shared concept-token normalization — deterministic (no LLM), the single source of truth used by
+ * BOTH ootb-property-shadow (JSON `properties{}` keys) and component-owns-model-concern (component-view
+ * reinvented constraints). A custom prop name is normalized to OOTB concept tokens so a differently
+ * NAMED prop that means the same OOTB concept is caught (minValue→minimum, maxRepeatedChars→maxLength,
+ * termValues→enum) without a hand-maintained synonym allow-list.
+ */
+
+// raw token → OOTB concept token. Unmapped tokens pass through unchanged.
+const TOKEN_SYNONYM = {
+  min: 'minimum', minimum: 'minimum',
+  max: 'maximum', maximum: 'maximum',
+  len: 'length', length: 'length', char: 'length', chars: 'length', character: 'length', characters: 'length',
+  count: 'items', items: 'items', item: 'items',
+  regex: 'pattern', regexp: 'pattern', pattern: 'pattern',
+  mandatory: 'required', required: 'required',
+  val: 'value', value: 'value',
+  // discrete option set → enum / enumNames (termValues/termLabels/optionValues/optionLabels)
+  term: 'enum', terms: 'enum', option: 'enum', options: 'enum', choice: 'enum', choices: 'enum',
+  values: 'enum', enum: 'enum',
+  labels: 'enumnames', enumnames: 'enumnames',
+};
+
+function concept_tokens_tokenize(name) {
+  return (name.match(/[A-Z]?[a-z]+|[A-Z]+(?=[A-Z]|$)|[0-9]+/g) || []).map((t) => t.toLowerCase());
+}
+
+// Concept-token set of a name after synonym normalization.
+function conceptTokens(name) {
+  return new Set(concept_tokens_tokenize(name).map((t) => TOKEN_SYNONYM[t] || t));
+}
+
+;// CONCATENATED MODULE: ./src/analyzers/ootb-property-shadow-analyzer.js
+// The OOTB property matrix, embedded as a .js module (not .json) so ncc inlines it into the released
+// bundle — a runtime .json read (createRequire / fs) is NOT bundled and breaks the shipped CLI.
+
+
+
+/**
+ * OOTB-Property-Shadow Analyzer
+ *
+ * A custom component must NOT reinvent an OOTB property or constraint-message under a custom name.
+ * OOTB properties live at the TOP LEVEL of a field node (`maxLength`, `pattern`, `required`, `enum`,
+ * `minimum`, …) and OOTB constraint messages under `constraintMessages.<constraint>`; the custom
+ * authoring namespace is the field's `properties{}` bag. So a key inside `properties{}` that maps to
+ * an OOTB concept is a DUPLICATE — two sources of truth. At runtime the OOTB property drives native
+ * validation / DoR / data binding, while the component reads its parallel custom prop, so the built-in
+ * is silently bypassed (the `regex-text-input` bug: custom `regexPattern` shadowing OOTB `pattern`).
+ *
+ * Detection is deterministic (no LLM, no synonym allow-list). The OOTB concept set is derived PURELY
+ * from `src/data/runtime-property-matrix.js` — the source of truth for what "OOTB" means. Each `properties{}`
+ * key is normalized to concept tokens (min→minimum, max→maximum, chars/len/length→length,
+ * count→items, regex→pattern, mandatory→required, val→value) and flagged when its tokens cover an OOTB
+ * constraint/property concept. A trailing message/error suffix retargets the finding to
+ * `constraintMessages.<constraint>` (so `regexPatternMessage` → duplicates constraintMessages.pattern),
+ * while a message whose STEM carries no OOTB token stays clean (`genericErrorMsg`, `expiredOtpMsg`).
+ *
+ * ALSO detects OOTB-event misuse (same analyzer, `ootb-event-misuse` finding):
+ *   - `custom:<ootbName>` — a `custom:` prefix on an OOTB lifecycle event (`custom:initialize`,
+ *     `custom:change`, `custom:click`, …). The runtime never fires it as the lifecycle hook.
+ *   - a bare event key that is neither an OOTB event nor `custom:`-prefixed → a dead handler.
+ *
+ * Framework-namespaced keys (`fd:*`, `afs:*`, `aue*`, layout keys like `colspan`) are never OOTB field
+ * props and are skipped. Severity: error (both finding types).
+ */
+
+// OOTB lifecycle events — a closed vocabulary (KB 05-rule-events-by-scenario).
+const OOTB_EVENTS = new Set([
+  'initialize', 'load', 'change', 'click', 'focus', 'blur',
+  'submit', 'submitSuccess', 'submitError', 'submitFailure', 'addItem', 'removeItem',
+]);
+
+// Framework / layout keys that legitimately live in properties{} but are never OOTB field props.
+const FRAMEWORK_KEY_RE = /^(fd:|afs:|aue|jcr:|sling:|cq:)/;
+const FRAMEWORK_EXACT = new Set(['colspan', 'gridClassNames', 'customFunctionsPath', 'customStylesPath', 'analyticsFilePath']);
+
+// Message/error suffixes — a `properties.<stem>Message` maps to constraintMessages.<constraint(stem)>.
+const MESSAGE_SUFFIX_RE = /(error)?(message|msg)$/i;
+
+class OotbPropertyShadowAnalyzer {
+  constructor(config = null) {
+    this.config = config;
+    this.matrix = (config && config.propertyMatrix) || runtime_property_matrix;
+  }
+
+  // Token helpers delegate to the shared concept-tokens module (single source of truth, reused by the
+  // component analyzer too). Kept as static passthroughs so existing call sites are untouched.
+  static tokenize(name) { return concept_tokens_tokenize(name); }
+
+  static conceptTokens(name) { return conceptTokens(name); }
+
+  // Build the OOTB property-name set for a field type, from the matrix only. A field type entry is
+  // `{ includes: [groupNames], excludes: [propNames] }` — resolve it to the union of those groups'
+  // names minus the excludes, plus any `fieldTypeAdditional[type]`. Each name → its concept-token set.
+  ootbConcepts(fieldType) {
+    const p = this.matrix.properties || {};
+    const groupNames = (grp) => (Array.isArray(p[grp]) ? p[grp] : []).map((it) => it && it.name).filter(Boolean);
+
+    const names = new Set();
+    const typeEntry = (this.matrix.fieldTypeProperties || {})[fieldType];
+    if (typeEntry && Array.isArray(typeEntry.includes)) {
+      for (const grp of typeEntry.includes) for (const n of groupNames(grp)) names.add(n);
+      for (const ex of typeEntry.excludes || []) names.delete(ex);
+    } else {
+      // Unknown/absent type entry → fall back to the common + constraint + runtime baseline.
+      for (const grp of ['fieldCommon', 'fieldConstraints', 'fieldRuntime']) for (const n of groupNames(grp)) names.add(n);
+    }
+    if (fieldType === 'panel') for (const n of groupNames('panelAdditional')) names.add(n);
+    for (const it of (p.fieldTypeAdditional || {})[fieldType] || []) if (it && it.name) names.add(it.name);
+
+    const conceptByName = new Map();
+    for (const n of names) conceptByName.set(n, OotbPropertyShadowAnalyzer.conceptTokens(n));
+    return { names, conceptByName };
+  }
+
+  // Does `keyConcepts` cover the OOTB `nameConcepts` (i.e. every OOTB concept token is present)?
+  static covers(keyConcepts, nameConcepts) {
+    if (nameConcepts.size === 0) return false;
+    for (const t of nameConcepts) if (!keyConcepts.has(t)) return false;
+    return true;
+  }
+
+  // Generic single-token OOTB concepts that must match on EXACT name only (else `minValue`/`maxItems`
+  // false-context). These are matched exactly, never by concept-cover.
+  static GENERIC_EXACT = new Set(['value', 'type', 'name', 'index', 'parent', 'default', 'format', 'lang', 'label', 'description', 'tooltip']);
+
+  analyze(formJson) {
+    const issues = [];
+    if (!formJson || typeof formJson !== 'object') return { violations: 0, issues: [] };
+
+    const seen = new Set();
+    const flag = (o) => {
+      const key = `${o.type}|${o.file}|${o.name}`;
+      if (seen.has(key)) return; seen.add(key);
+      issues.push(o);
+    };
+
+    const traverse = (node) => {
+      if (!node || typeof node !== 'object') return;
+
+      const fieldType = node.fieldType;
+      const nodeLabel = node.name || node.id || '(unnamed)';
+
+      // ── Property shadow ──────────────────────────────────────────────────────────────────────
+      if (fieldType && node.properties && typeof node.properties === 'object') {
+        const { names, conceptByName } = this.ootbConcepts(fieldType);
+        for (const rawKey of Object.keys(node.properties)) {
+          if (FRAMEWORK_KEY_RE.test(rawKey) || FRAMEWORK_EXACT.has(rawKey)) continue;
+
+          const isMessage = MESSAGE_SUFFIX_RE.test(rawKey);
+          const stem = rawKey.replace(MESSAGE_SUFFIX_RE, '') || rawKey;
+          const keyConcepts = OotbPropertyShadowAnalyzer.conceptTokens(stem);
+
+          // 1) exact OOTB name (misplaced OOTB into properties{}) — always flag.
+          let matchedOotb = names.has(rawKey) ? rawKey : (names.has(stem) ? stem : null);
+
+          // 2) concept-cover against each OOTB name's concept set (skip generic-exact-only names).
+          if (!matchedOotb) {
+            for (const [ootbName, nameConcepts] of conceptByName) {
+              if (OotbPropertyShadowAnalyzer.GENERIC_EXACT.has(ootbName)) continue;
+              if (OotbPropertyShadowAnalyzer.covers(keyConcepts, nameConcepts)) { matchedOotb = ootbName; break; }
+            }
+          }
+          if (!matchedOotb) continue;
+
+          const target = isMessage
+            ? `the OOTB constraint message \`constraintMessages.${matchedOotb}\``
+            : `the OOTB property \`${matchedOotb}\``;
+          flag({
+            severity: 'error',
+            type: 'ootb-property-shadow',
+            message: `\`${nodeLabel}\` (${fieldType}) declares custom \`properties.${rawKey}\`, which `
+              + `duplicates ${target} for this field type. Reuse the built-in — a parallel custom prop is `
+              + `a second source of truth that bypasses native validation / DoR / data binding. `
+              + `(OOTB set from src/data/runtime-property-matrix.js.)`,
+            file: `formJson:${nodeLabel}`,
+            name: rawKey,
+            functionName: nodeLabel,
+          });
+        }
+      }
+
+      // ── OOTB-event misuse ────────────────────────────────────────────────────────────────────
+      if (node.events && typeof node.events === 'object') {
+        for (const evt of Object.keys(node.events)) {
+          if (evt.startsWith('custom:')) {
+            const bare = evt.slice('custom:'.length);
+            if (OOTB_EVENTS.has(bare)) {
+              flag({
+                severity: 'error',
+                type: 'ootb-event-misuse',
+                message: `\`${nodeLabel}\` wires \`${evt}\` — a \`custom:\` prefix on the OOTB lifecycle `
+                  + `event \`${bare}\`. The runtime fires \`${bare}\` as a lifecycle hook, never `
+                  + `\`${evt}\`, so this handler is dead. Use the bare OOTB event \`${bare}\`.`,
+                file: `formJson:${nodeLabel}`,
+                name: evt,
+                functionName: nodeLabel,
+              });
+            }
+          } else if (!OOTB_EVENTS.has(evt)) {
+            flag({
+              severity: 'error',
+              type: 'ootb-event-misuse',
+              message: `\`${nodeLabel}\` wires event \`${evt}\`, which is neither an OOTB lifecycle event `
+                + `(${[...OOTB_EVENTS].slice(0, 6).join(', ')}, …) nor a \`custom:\`-prefixed event. A bare `
+                + `non-OOTB event key is a dead handler — prefix it \`custom:${evt}\` or use the correct `
+                + `OOTB event.`,
+              file: `formJson:${nodeLabel}`,
+              name: evt,
+              functionName: nodeLabel,
+            });
+          }
+        }
+      }
+
+      const items = node[':items'] || node.items;
+      if (items && typeof items === 'object') {
+        for (const child of Object.values(items)) traverse(child);
+      }
+    };
+
+    traverse(formJson);
+    return { violations: issues.length, issues };
+  }
+
+  compare(before, after) {
+    const b = before?.violations || 0;
+    const a = after?.violations || 0;
+    return { before: b, after: a, delta: a - b, regressed: a > b };
+  }
+}
+
+;// CONCATENATED MODULE: ./src/analyzers/fragment-path-validator-analyzer.js
+
+
+
+
+/**
+ * Form/Fragment Path-Validator Analyzer
+ *
+ * Form and fragment JS reference their fields by hierarchy — `globals.fragment.<root>.<panel>.<field>`
+ * in a fragment, `globals.form.<panel>.<field>` in a top-level form. That chain must actually EXIST,
+ * in that parent→child order, in the authored JSON. A typo or a stale rename (`loanInputPanel` renamed
+ * in JSON but not JS) resolves to `undefined` at runtime — a silent dead read. This analyzer verifies
+ * each referenced chain against the linked JSON hierarchy.
+ *
+ * ── LINKING (a JSDoc tag names the JSON and implies which accessor root to validate) ─────────────
+ * A file opts in with ONE file-level JSDoc tag naming its JCR/content path (NOT the CRISPR file):
+ *   - `@fragmentPath /content/forms/af/…/loanoffer-a2a`  → validate `globals.fragment.*` chains.
+ *   - `@formPath     /content/forms/af/…/my-journey`     → validate `globals.form.*` chains.
+ *
+ * The JCR path resolves to the on-disk JSON by matching a jsonFiles entry whose path ends with
+ * `<jcrPath>.json` (the CRISPR mirror lives at `local-form-json/<jcrPath>.json`). Without the tag, or
+ * when the linked JSON isn't in the analyzed set, the file is SKIPPED (fail-safe). A file that
+ * references `globals.<root>.*` fields but has NO matching tag emits a single `warning` nudging authors
+ * to add it, never an error.
+ *
+ * Finding `fragment-path-not-in-json` (error): a referenced chain absent from the JSON hierarchy. Only
+ * NODE-NAME segments are checked — tail runtime accessors (`.$value`, `.$properties`, method calls) and
+ * computed access (`globals.fragment[x]`) are ignored.
+ */
+class FragmentPathValidatorAnalyzer {
+  constructor(config = null) {
+    this.config = config;
+  }
+
+  // Tag → the globals accessor root it validates. `@fragmentPath` ⇒ globals.fragment, `@formPath` ⇒ globals.form.
+  static TAGS = [
+    { tag: 'fragmentPath', root: 'fragment' },
+    { tag: 'formPath', root: 'form' },
+  ];
+
+  // Read the FIRST recognized path tag. Returns { jcrPath, root } or null.
+  static readPathTag(content) {
+    for (const { tag, root } of FragmentPathValidatorAnalyzer.TAGS) {
+      const m = new RegExp(`@${tag}\\s+(\\S+)`).exec(content || '');
+      if (m) return { jcrPath: m[1].replace(/\/+$/, ''), root };
+    }
+    return null;
+  }
+
+  // Runtime accessors / non-node tail segments that are NOT JSON hierarchy nodes.
+  static NON_NODE_SEG = new Set(['$value', '$properties', 'properties', '$name', '$qualifiedName', 'value', '$items']);
+
+  // Build the set of valid parent→child name-chains from a form/fragment JSON (dot-joined, root-relative).
+  static jsonPathSet(json) {
+    const paths = new Set();
+    const roots = new Set();
+    const walkNode = (n, prefix) => {
+      if (!n || typeof n !== 'object') return;
+      const nm = typeof n.name === 'string' ? n.name : null;
+      const cur = nm ? [...prefix, nm] : prefix;
+      if (nm) { paths.add(cur.join('.')); if (cur.length === 1) roots.add(nm); }
+      const items = n[':items'] || n.items;
+      if (items && typeof items === 'object') for (const c of Object.values(items)) walkNode(c, cur);
+    };
+    walkNode(json, []);
+    return { paths, roots };
+  }
+
+  // Extract a `globals.<root>.<a>.<b>...` node-name chain (root = 'fragment' | 'form') from a member
+  // expression. Returns the node-name segments after `globals.<root>` (stopping at the first non-node
+  // tail seg), or null if it isn't a static chain on that root.
+  static chainForRoot(node, root) {
+    const segs = [];
+    let cur = node;
+    while (cur && cur.type === 'MemberExpression') {
+      if (cur.computed) return null;
+      if (cur.property?.type !== 'Identifier') return null;
+      segs.unshift(cur.property.name);
+      cur = cur.object;
+    }
+    if (cur?.type !== 'Identifier' || cur.name !== 'globals') return null;
+    if (segs[0] !== root) return null;
+    const after = segs.slice(1);
+    const nodes = [];
+    for (const s of after) {
+      if (FragmentPathValidatorAnalyzer.NON_NODE_SEG.has(s)) break;
+      nodes.push(s);
+    }
+    return nodes;
+  }
+
+  analyze(formJson, jsFiles = [], jsonFiles = []) {
+    const issues = [];
+    if (!Array.isArray(jsFiles) || jsFiles.length === 0) return { violations: 0, issues: [] };
+
+    const jsonByPath = [];
+    for (const jf of Array.isArray(jsonFiles) ? jsonFiles : []) {
+      if (!jf?.filename || jf.content == null) continue;
+      jsonByPath.push({ filename: (jf.filename || '').replace(/\\/g, '/'), content: jf.content });
+    }
+    const resolveJson = (jcrPath) => {
+      const want = `${jcrPath.replace(/^\/+/, '')}.json`;
+      const hit = jsonByPath.find((j) => j.filename.endsWith(want) || j.filename.endsWith(`/${want}`));
+      if (!hit) return null;
+      try { return typeof hit.content === 'string' ? JSON.parse(hit.content) : hit.content; } catch (e) {
+        lib_core.warning(`[FragmentPathValidator] JSON parse failed for ${hit.filename}: ${e.message}`);
+        return null;
+      }
+    };
+
+    for (const file of jsFiles) {
+      if (!file?.filename || file.content == null) continue;
+
+      let ast;
+      try {
+        ast = acorn_parse(file.content, { ecmaVersion: 'latest', sourceType: 'module', locations: true });
+      } catch (e) {
+        lib_core.warning(`[FragmentPathValidator] JS parse failed for ${file.filename}: ${e.message}`);
+        continue;
+      }
+
+      const tag = FragmentPathValidatorAnalyzer.readPathTag(file.content);
+      const root = tag ? tag.root : null;
+
+      // Collect MAXIMAL globals.<root>.* chains (depth >= 2). If no tag, probe BOTH roots to decide
+      // whether to nudge for an annotation. Skip an inner member whose parent extends the same chain.
+      const rootsToScan = root ? [root] : ['fragment', 'form'];
+      const chains = [];
+      let referencesAnyRoot = false;
+      ancestor(ast, {
+        MemberExpression: (m, _state, ancestors) => {
+          const parent = ancestors[ancestors.length - 2];
+          if (parent?.type === 'MemberExpression' && parent.object === m) return; // inner prefix → skip
+          for (const r of rootsToScan) {
+            const nodes = FragmentPathValidatorAnalyzer.chainForRoot(m, r);
+            if (nodes && nodes.length >= 2) {
+              referencesAnyRoot = true;
+              if (root) chains.push({ nodes, line: m.loc?.start.line });
+            }
+          }
+        },
+      });
+
+      if (!root) {
+        if (referencesAnyRoot) {
+          issues.push({
+            severity: 'warning',
+            type: 'fragment-path-missing-annotation',
+            file: file.filename,
+            line: 1,
+            message: `This JS references \`globals.fragment.*\`/\`globals.form.*\` fields but has no `
+              + `\`@fragmentPath\`/\`@formPath\` JSDoc tag naming its JCR content path. Add the matching tag `
+              + `(e.g. \`@fragmentPath /content/forms/af/…/<name>\`) so the field-hierarchy validator can `
+              + `verify these references against the authored JSON.`,
+          });
+        }
+        continue;
+      }
+      if (chains.length === 0) continue;
+
+      const json = resolveJson(tag.jcrPath);
+      if (!json) continue; // linked JSON not in the analyzed set → skip (fail-safe)
+
+      const { paths, roots } = FragmentPathValidatorAnalyzer.jsonPathSet(json);
+      const seen = new Set();
+      for (const { nodes, line } of chains) {
+        const asIs = nodes.join('.');
+        const rootRelative = roots.has(nodes[0]) ? asIs : nodes.slice(1).join('.');
+        if (paths.has(asIs) || (rootRelative && paths.has(rootRelative))) continue;
+
+        let broken = null;
+        for (let i = 2; i <= nodes.length; i += 1) {
+          const sub = nodes.slice(0, i).join('.');
+          const subRel = roots.has(nodes[0]) ? sub : nodes.slice(1, i).join('.');
+          if (!paths.has(sub) && !(subRel && paths.has(subRel))) { broken = nodes[i - 1]; break; }
+        }
+        const key = `${file.filename}|${line}|${asIs}`;
+        if (seen.has(key)) continue; seen.add(key);
+        issues.push({
+          severity: 'error',
+          type: 'fragment-path-not-in-json',
+          file: file.filename,
+          line,
+          path: `globals.${root}.${asIs}`,
+          message: `\`globals.${root}.${asIs}\` does not exist in the ${root === 'form' ? 'form' : 'fragment'} `
+            + `JSON hierarchy (${tag.jcrPath})${broken ? ` — \`${broken}\` is not a child at that level` : ''}. `
+            + `The reference resolves to \`undefined\` at runtime; fix the path or the JSON hierarchy.`,
+        });
+      }
+    }
+
+    return { violations: issues.length, issues };
+  }
+
+  compare(before, after) {
+    const b = before?.violations || 0;
+    const a = after?.violations || 0;
+    return { before: b, after: a, delta: a - b, regressed: a > b };
+  }
+}
+
+;// CONCATENATED MODULE: ./src/analyzers/component-owns-model-concern-analyzer.js
+
+
+
+
+
+
+
+/**
+ * Component-Owns-Model-Concern Analyzer  (C+R contract — the component owns VIEW, the MODEL owns
+ * presentation + constraints)
+ *
+ * Runs ONLY on component-view files (`.../components/<name>/<name>.js`) — the tier the other design-canon
+ * analyzers skip, so view-side reinvention of model-owned concerns has been a blind spot. A component
+ * must render `model.displayValue` and read the OOTB model constraints; it must NOT invent the display
+ * format or duplicate constraints view-side (that can't re-localise, is duplicated per component, and
+ * drifts from the model). Two error findings + one warning:
+ *
+ *  1. `component-formats-display-value` (error): a display string is BUILT in the view and written to a
+ *     rendered element (`<el>.value = …` / `.textContent = …`) — `₹${formatIndianNumber(v)}`,
+ *     `` `${v} months` ``, etc. (via the shared format matcher). Author `displayFormat` /
+ *     `displayValueExpression` on the field and render `fieldModel.displayValue`.
+ *
+ *  2. `component-reinvents-constraint` (error): the view reads a CUSTOM constraint prop
+ *     (`properties.minValue/maxValue/stepValue/termValues/termLabels`) and pushes it to
+ *     `input.min/max/step` or an option set — instead of the OOTB model constraints
+ *     (`minimum`/`maximum`/`step`/`enum`/`enumNames`). Concept-token match (min→minimum, max→maximum,
+ *     step→step, values→enum) so a differently-named custom prop is still caught.
+ *
+ *  3. `component-dispatches-dom-change` (WARNING): the component fires a synthetic DOM `change`/`input`
+ *     event (`input.dispatchEvent(new Event('change'))`) to move a value into the model / sync a second
+ *     input. Warning, not error — a DELIBERATE deferred commit (transient view sync, model committed on
+ *     release/blur) is legitimate and unprovable statically. Message states both sides.
+ */
+class ComponentOwnsModelConcernAnalyzer {
+  constructor(config = null) {
+    this.config = config;
+  }
+
+  // OOTB constraint concepts a custom prop must not duplicate. Concept token (from the SHARED
+  // concept-tokens normalizer — same one ootb-property-shadow uses) → the OOTB name to steer to.
+  static CONSTRAINT_CONCEPT_TO_OOTB = {
+    minimum: 'minimum', maximum: 'maximum', step: 'step', enum: 'enum / enumNames', enumnames: 'enum / enumNames',
+  };
+
+  // A `properties.<key>` read whose key concept-maps to an OOTB CONSTRAINT → { key, ootb } | null.
+  // Uses the shared conceptTokens() (minValue→[minimum,value], termValues→[enum,...], maxRepeatedChars→
+  // [maximum,length,...]), so a differently-named custom prop is caught consistently with the JSON-side
+  // ootb-property-shadow analyzer. Skips message/label companions; requires a qualifier so a bare exact
+  // OOTB name (`properties.minimum`, a misplacement owned by ootb-property-shadow) isn't double-reported.
+  // Bare exact OOTB names (a MISPLACEMENT owned by ootb-property-shadow, not a reinvention) — don't
+  // double-report these here.
+  static EXACT_OOTB = new Set(['minimum', 'maximum', 'step', 'enum', 'enumnames', 'enumNames', 'maxlength', 'minlength', 'maxitems', 'minitems']);
+
+  static reinventedConstraint(key) {
+    if (/message|msg|label|text/i.test(key)) return null;
+    if (ComponentOwnsModelConcernAnalyzer.EXACT_OOTB.has(key.toLowerCase())) return null;
+    const concepts = conceptTokens(key);
+    for (const [concept, ootb] of Object.entries(ComponentOwnsModelConcernAnalyzer.CONSTRAINT_CONCEPT_TO_OOTB)) {
+      if (concepts.has(concept)) return { key, ootb };
+    }
+    return null;
+  }
+
+  // Member path of a node, e.g. globals.field.properties → "globals.field.properties".
+  static memberPath(node) {
+    if (!node) return null;
+    if (node.type === 'Identifier') return node.name;
+    if (node.type === 'MemberExpression') {
+      const o = ComponentOwnsModelConcernAnalyzer.memberPath(node.object);
+      const p = node.computed ? null : node.property?.name;
+      return o && p ? `${o}.${p}` : o;
+    }
+    return null;
+  }
+
+  // A template/concat gluing a non-prose unit decoration to a DOM value core (`<x>.value` / `parseInt(
+  // <x>.value)`). Inside a value-box render sink the core IS the field value, so a `.value` member (a
+  // DOM-string numeric) counts — this catches `` `${input.value} months` `` that the shared numeric
+  // matcher skips (DOM `.value` isn't provably numeric out of context).
+  static hasValueCore(node) {
+    if (!node) return false;
+    if (node.type === 'MemberExpression') return node.property?.name === 'value';
+    if (node.type === 'CallExpression') return node.arguments?.some((a) => ComponentOwnsModelConcernAnalyzer.hasValueCore(a));
+    return false;
+  }
+
+  static isDecoratedValueBox(node) {
+    if (!node) return false;
+    if (node.type === 'ConditionalExpression') {
+      return ComponentOwnsModelConcernAnalyzer.isDecoratedValueBox(node.consequent)
+        || ComponentOwnsModelConcernAnalyzer.isDecoratedValueBox(node.alternate);
+    }
+    if (node.type === 'TemplateLiteral') {
+      const joined = node.quasis.map((q) => q.value.cooked).join(' ').trim();
+      return joined.length > 0 && node.expressions.some((e) => ComponentOwnsModelConcernAnalyzer.hasValueCore(e));
+    }
+    if (node.type === 'BinaryExpression' && node.operator === '+') {
+      const ops = [];
+      const flat = (x) => { if (x?.type === 'BinaryExpression' && x.operator === '+') { flat(x.left); flat(x.right); } else ops.push(x); };
+      flat(node);
+      const hasLiteral = ops.some((o) => o?.type === 'Literal' && typeof o.value === 'string' && o.value.trim());
+      return hasLiteral && ops.some((o) => ComponentOwnsModelConcernAnalyzer.hasValueCore(o));
+    }
+    return false;
+  }
+
+  // Is `node` a write to a RENDERED element's display slot? `<x>.value = …` / `<x>.textContent = …`
+  // where <x> is NOT the model (model.value = is a legit commit). Returns true for a view render sink.
+  static isRenderSink(leftNode) {
+    if (leftNode?.type !== 'MemberExpression') return false;
+    const prop = leftNode.property?.name;
+    if (!['value', 'textContent', 'innerText', 'innerHTML'].includes(prop)) return false;
+    const objPath = ComponentOwnsModelConcernAnalyzer.memberPath(leftNode.object) || '';
+    // exclude the model — model.value = / fieldModel.value = / field.value = are commits, not renders
+    if (/(^|\.)(model|fieldModel|field)$/.test(objPath)) return false;
+    return true;
+  }
+
+  analyze(formJson, jsFiles = []) {
+    const issues = [];
+    for (const file of jsFiles) {
+      if (!file?.filename || file.content == null) continue;
+      if (!isComponentView(file.filename)) continue;
+
+      let ast;
+      try {
+        ast = acorn_parse(file.content, { ecmaVersion: 'latest', sourceType: 'module', locations: true });
+      } catch (e) {
+        lib_core.warning(`[ComponentOwnsModelConcern] parse failed for ${file.filename}: ${e.message}`);
+        continue;
+      }
+
+      const seen = new Set();
+      const flag = (o) => {
+        const key = `${o.type}|${o.line}|${o.name || ''}`;
+        if (seen.has(key)) return; seen.add(key);
+        issues.push({ file: file.filename, ...o });
+      };
+
+      simple(ast, {
+        // 1) display formatting written to a rendered element. Two shapes:
+        //    (a) shared format matcher (`₹${formatIndianNumber(v)}`, `${v.toFixed(2)}%`); OR
+        //    (b) a render-sink write of a template/concat that glues a NON-PROSE unit decoration to a
+        //        `.value`/DOM-numeric core (`` `${input.value} months` ``) — inside a value-box render
+        //        the core is inherently the field value, so a DOM `.value` counts as the numeric core.
+        // 2) constraint reinvention pushed to the native input: `input.min|max|step = <expr>`.
+        AssignmentExpression: (n) => {
+          if (n.operator !== '=') return;
+
+          // (2) input.min / input.max / input.step = … → OOTB constraint reinvented view-side.
+          if (n.left?.type === 'MemberExpression' && ['min', 'max', 'step'].includes(n.left.property?.name)) {
+            const ootb = { min: 'minimum', max: 'maximum', step: 'step' }[n.left.property.name];
+            flag({
+              severity: 'error',
+              type: 'component-reinvents-constraint',
+              name: n.left.property.name,
+              line: n.loc?.start.line,
+              message: `Component sets \`${ComponentOwnsModelConcernAnalyzer.memberPath(n.left)}\` view-side. `
+                + `min/max/step are OOTB model constraints (\`${ootb}\`) — author them on the field so the `
+                + `runtime enforces validation/clamp; the component reads them off the model, not a custom prop.`,
+            });
+            return;
+          }
+
+          if (!ComponentOwnsModelConcernAnalyzer.isRenderSink(n.left)) return;
+          const isFmt = isDisplayFormatSink(n.right)
+            || ComponentOwnsModelConcernAnalyzer.isDecoratedValueBox(n.right);
+          if (isFmt) {
+            flag({
+              severity: 'error',
+              type: 'component-formats-display-value',
+              line: n.loc?.start.line,
+              message: 'Component builds a display string in the view and writes it to a rendered '
+                + 'element. The MODEL owns presentation: author `displayFormat` / `displayValueExpression` '
+                + 'on the field and render `fieldModel.displayValue` — a view-side format cannot re-localise, '
+                + 'is duplicated per component, and drifts from the model value.',
+            });
+          }
+        },
+
+        // 2) reinvented constraint: read of properties.<customConstraintKey>. Flag the READ regardless of
+        //    the immediate sink — the presence of a custom min/max/step/term prop in a component is the
+        //    signal it should be an OOTB model constraint.
+        MemberExpression: (m) => {
+          const path = ComponentOwnsModelConcernAnalyzer.memberPath(m);
+          // match `<...>.properties.<key>` (the custom authoring bag)
+          const pm = /\.properties\.([A-Za-z0-9_]+)$/.exec(path || '');
+          if (!pm) return;
+          const hit = ComponentOwnsModelConcernAnalyzer.reinventedConstraint(pm[1]);
+          if (!hit) return;
+          flag({
+            severity: 'error',
+            type: 'component-reinvents-constraint',
+            name: pm[1],
+            line: m.loc?.start.line,
+            message: `Component reads custom \`properties.${hit.key}\` and applies it as a constraint. `
+              + `Use the OOTB model constraint \`${hit.ootb}\` (number-input / enum props) instead of a `
+              + `parallel custom prop — the runtime enforces OOTB constraints and they survive re-embedding.`,
+          });
+        },
+
+        // 3) synthetic DOM change/input dispatch to move a value into the model (warning).
+        CallExpression: (c) => {
+          if (c.callee?.type !== 'MemberExpression' || c.callee.property?.name !== 'dispatchEvent') return;
+          const arg = c.arguments?.[0];
+          // new Event('change'|'input', …) / new CustomEvent('change'|'input', …)
+          if (arg?.type !== 'NewExpression') return;
+          const ctor = arg.callee?.name;
+          if (ctor !== 'Event' && ctor !== 'CustomEvent') return;
+          const evtArg = arg.arguments?.[0];
+          const evtName = evtArg?.type === 'Literal' ? evtArg.value : null;
+          if (evtName !== 'change' && evtName !== 'input') return;
+          flag({
+            severity: 'warning',
+            type: 'component-dispatches-dom-change',
+            line: c.loc?.start.line,
+            message: `Component fires a DOM \`${evtName}\` event to sync state. If this is to move a value `
+              + 'into the model, set `model.value = <v>` instead — the runtime propagates it to every '
+              + 'element bound to the field (`notifyDependents`), so two inputs on one model stay in sync '
+              + 'without a synthetic event, and it works headless. If you are intentionally DEFERRING the '
+              + 'model commit (transient view-only sync, committing on release/blur), that is fine — ignore '
+              + 'this. Flagged because a synthetic DOM `change`/`input` is often a model-commit workaround.',
+          });
         },
       });
     }
@@ -191943,6 +194138,11 @@ class DisplayFormatInCodeAnalyzer {
 
 
 
+
+
+
+
+
 const DEFAULT_LOGGER = {
   info:    msg => console.log(msg),
   warning: msg => console.warn(msg),
@@ -191951,6 +194151,42 @@ const DEFAULT_LOGGER = {
 
 async function runAnalysis(beforeData, afterData, jsFiles = [], cssFiles = [], config, logger = {}, jsonFiles = []) {
   const log = { ...DEFAULT_LOGGER, ...logger };
+
+  // Fallback: with no URL-derived form JSON, adopt a form model found on disk (any `jsonFiles` entry
+  // whose SHAPE is an Adaptive Form container — `fieldType:'form'` / a `/formcontainer` `:type` — not
+  // keyed on filename, so a local `local-form-json/*.json`, a CRISPR-converted file, or a `.model.json`
+  // all qualify). This lets the JSON-dependent analyzers (hidden-fields, disabled-fields, rule-cycles,
+  // and the custom-function used/unused cross-reference) run offline — in lint, analyze --diff, AND the
+  // Action — without a live URL. URL-derived data always wins; this only fills the gap when it's absent.
+  //
+  // NOTE (single-form scope): each AF fragment renders standalone, so EVERY form-shaped JSON is an
+  // independent form with its OWN customFunctionsPath/field-tree/rule-graph. Merging them would
+  // cross-contaminate the per-form analyzers, so today we drive the JSON-dependent pass with EXACTLY
+  // ONE model (deterministic: first by sorted filename) and LOG the others we skipped — never silently.
+  // A future change can loop the per-form analyzers over all models and aggregate.
+  if (!beforeData?.formJson && !afterData?.formJson && Array.isArray(jsonFiles)) {
+    const models = [];
+    for (const jf of jsonFiles) {
+      let parsed;
+      try { parsed = typeof jf?.content === 'string' ? JSON.parse(jf.content) : jf?.content; } catch { continue; }
+      const model = findFormModel(parsed);
+      if (model) models.push({ filename: jf.filename || '', model });
+    }
+    if (models.length > 0) {
+      models.sort((a, b) => a.filename.localeCompare(b.filename));
+      const chosen = models[0];
+      log.info(`[Pipeline] No URL form JSON — using form model from ${chosen.filename} for JSON-dependent analyzers.`);
+      if (models.length > 1) {
+        log.warning(`[Pipeline] ${models.length} form-shaped JSON files present; analyzing only `
+          + `${chosen.filename} for JSON-dependent analyzers (per-form). Skipped: `
+          + `${models.slice(1).map((m) => m.filename).join(', ')}`);
+      }
+      // Separate objects (not a shared reference) so before/after can't alias — the compare()
+      // paths and analyzers treat them independently. The model itself is only read, never mutated.
+      beforeData = { formJson: chosen.model, html: '' };
+      afterData = { formJson: chosen.model, html: '' };
+    }
+  }
 
   const hasFormData = !!(beforeData?.formJson && afterData?.formJson);
 
@@ -191994,6 +194230,16 @@ async function runAnalysis(beforeData, afterData, jsFiles = [], cssFiles = [], c
   const orphanFragmentHandlerResult = new OrphanFragmentHandlerAnalyzer(config).analyze(formJson, jsFiles, jsonFiles);
   const contentInCodeResult        = new ContentInCodeAnalyzer(config).analyze(formJson, jsFiles);
   const displayFormatInCodeResult  = new DisplayFormatInCodeAnalyzer(config).analyze(formJson, jsFiles);
+  // Rule-ordering races (dispatch-before-write / async cross-event read) — needs the form JSON's
+  // events/rules; a no-op when formJson is absent. See docs/test-only-patches-backend-rewrite.md.
+  const eventImpactResult = formJson ? new EventImpactAnalyzer(config).analyze(formJson) : { issues: [] };
+  // OOTB property/constraint-message shadowing + OOTB-event misuse — reads the form JSON only.
+  const ootbShadowResult = formJson ? new OotbPropertyShadowAnalyzer(config).analyze(formJson) : { issues: [] };
+  // Validate globals.fragment.<path> chains against the linked fragment JSON hierarchy (@fragmentPath).
+  const fragmentPathResult = new FragmentPathValidatorAnalyzer(config).analyze(formJson, jsFiles, jsonFiles);
+  // Component-view tier: view-side reinvention of model-owned concerns (display format, constraints,
+  // synthetic DOM change). Pure JS analysis (component-view files); no form JSON needed.
+  const componentModelResult = new ComponentOwnsModelConcernAnalyzer(config).analyze(formJson, jsFiles);
 
   if (hasFormData) {
     log.info('Running all analyzers in parallel...');
@@ -192108,6 +194354,10 @@ async function runAnalysis(beforeData, afterData, jsFiles = [], cssFiles = [], c
     orphanFragmentHandler: { after: orphanFragmentHandlerResult, newIssues: orphanFragmentHandlerResult.issues ?? [], resolvedIssues: [] },
     contentInCode: { after: contentInCodeResult, newIssues: contentInCodeResult.issues ?? [], resolvedIssues: [] },
     displayFormatInCode: { after: displayFormatInCodeResult, newIssues: displayFormatInCodeResult.issues ?? [], resolvedIssues: [] },
+    ruleOrderingRace: { after: eventImpactResult, newIssues: eventImpactResult.issues ?? [], resolvedIssues: [] },
+    ootbPropertyShadow: { after: ootbShadowResult, newIssues: ootbShadowResult.issues ?? [], resolvedIssues: [] },
+    fragmentPathValidator: { after: fragmentPathResult, newIssues: fragmentPathResult.issues ?? [], resolvedIssues: [] },
+    componentModelConcern: { after: componentModelResult, newIssues: componentModelResult.issues ?? [], resolvedIssues: [] },
   };
 }
 
@@ -192216,6 +194466,10 @@ const DESIGN_CANON_KEYS = {
   orphanFragmentHandler: 'exported fragment handler wired to no event/rule (forgot to stitch — control does nothing)',
   contentInCode: 'user-facing copy / validation message hardcoded in a fn (author as dynamic-text template / constraintMessages)',
   displayFormatInCode: 'display value formatted in a fn — numeric decorated with unit/currency/% (use displayFormat / displayValueExpression)',
+  ruleOrderingRace: 'rule/event ordering race — dispatch-before-write, or a read of a var written async by another event (reorder / use an atomic source)',
+  ootbPropertyShadow: 'custom property/constraint-message or event duplicates an OOTB one (reuse the built-in; OOTB set from src/data/runtime-property-matrix.js)',
+  fragmentPathValidator: 'globals.fragment.<path> reference does not exist in the linked fragment JSON hierarchy (@fragmentPath) — resolves to undefined',
+  componentModelConcern: 'component view reinvents a model-owned concern — display format / OOTB constraint hardcoded, or a synthetic DOM change event (set model.value)',
 };
 
 /**
