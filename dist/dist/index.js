@@ -185905,13 +185905,21 @@ class RulePerformanceAnalyzer {
       const runtimeErrors = [];
       if (functionFailures && functionFailures.size > 0) {
         for (const [fnName, failure] of functionFailures.entries()) {
+          // failure.errors holds JSON-stringified { message, stack, name }. Surface the distinct
+          // thrown-error messages in `message` — without it the finding renders blank in lint output.
+          const errorList = Array.from(failure.errors);
+          const distinctMsgs = [...new Set(errorList.map((e) => {
+            try { return JSON.parse(e).message; } catch { return e; }
+          }).filter(Boolean))];
+          const detail = distinctMsgs.length ? ` Error${distinctMsgs.length > 1 ? 's' : ''}: ${distinctMsgs.join('; ')}.` : '';
           runtimeErrors.push({
             functionName: fnName,
             file: customFunctionsFilePath, // Add the actual file path (e.g., eds-li/blocks/form/functions.js)
             errorCount: failure.count,
-            errors: Array.from(failure.errors),
+            errors: errorList,
             severity: 'error', // Critical in PR mode (must fix), warning in scheduled mode
             type: 'runtime-error-in-custom-function',
+            message: `Custom function "${fnName}" threw during execution (${failure.count}×).${detail} Handle missing/null values (e.g. guard globals.form / field lookups) so it can't throw at runtime.`,
             recommendation: `Function "${fnName}" throws errors during execution. Review function logic to handle missing or null values gracefully.`
           });
         }
@@ -189587,7 +189595,7 @@ class FragmentGlobalsScopeAnalyzer {
  * Analyzes EDS block-component decorator JS files for anti-patterns
  * that bypass the form runtime model.
  *
- * Scope: files matching /blocks/form/components/<name>/<name>.js
+ * Scope: files matching .../components/<name>/<name>.js (any layout)
  *        (Core Component setups have no equivalent files — analyzer no-ops.)
  *
  * Rule:
@@ -189597,14 +189605,17 @@ class FragmentGlobalsScopeAnalyzer {
  *     DOM and runtime model desync — submission may send the original value.
  */
 
-const BLOCK_DECORATOR_PATH = /\/blocks\/form\/components\/([^/]+)\/([^/]+)\.js$/;
+// Layout-agnostic: a component view is `.../components/<name>/<name>.js` (dir === basename), in ANY
+// layout (blocks/form/components/…, journeys/<j>/components/…, or a consumer's own tree) — NOT tied to
+// a `blocks/form` prefix. Matches how form-file-tiers.isComponentView anchors on `components/`.
+const BLOCK_DECORATOR_PATH = /(?:^|\/)components\/([^/]+)\/([^/]+)\.js$/;
 const KEYSTROKE_EVENTS = new Set(['input', 'keydown', 'keyup']);
 // Conventional event-arg names accepted in addition to the handler's first param.
 const EVENT_ALIASES = new Set(['event', 'e', 'evt', 'ev']);
 
 /**
  * Returns true only for the EDS decorator entrypoint convention:
- *   .../blocks/form/components/<name>/<name>.js
+ *   ....../components/<name>/<name>.js (any layout)
  * Sibling files in the same folder (helper.js, constants.js, etc.) are excluded.
  */
 function isBlockDecoratorPath(filename) {
@@ -191708,7 +191719,22 @@ class OrphanFragmentHandlerAnalyzer {
   }
 }
 
+;// CONCATENATED MODULE: ./src/analyzers/text-predicates.js
+/**
+ * Tiny pure text predicates shared across analyzers (and the ESLint plugin). Kept dependency-free
+ * (no acorn / @actions/core) so a lightweight consumer — e.g. an ESLint rule — can import the shared
+ * format/prose logic without dragging the full analyzer.
+ */
+
+// "Prose" = natural-language copy: at least two runs of >=2 letters separated by whitespace. Used to
+// partition display-format (non-prose decoration) from content-in-code (prose copy).
+function isProse(text) {
+  if (typeof text !== 'string') return false;
+  return /[A-Za-z]{2,}\s+\S*[A-Za-z]{2,}/.test(text.trim());
+}
+
 ;// CONCATENATED MODULE: ./src/analyzers/content-in-code-analyzer.js
+
 
 
 
@@ -191767,10 +191793,7 @@ class ContentInCodeAnalyzer {
 
   // "Prose" = the static text has at least two runs of >=2 letters separated by whitespace — i.e.
   // natural language, not a single token / technical string / a currency-formatting fragment.
-  static isProse(text) {
-    if (typeof text !== 'string') return false;
-    return /[A-Za-z]{2,}\s+\S*[A-Za-z]{2,}/.test(text.trim());
-  }
+  static isProse(text) { return isProse(text); }
 
   // A node that is (or resolves to) a prose string/template literal. Handles literal, template,
   // literal-concat, and a ternary whose branch(es) are prose (`cond ? 'A prose' : 'B prose'`).
@@ -191908,7 +191931,7 @@ function isFormatDecoration(joinedText) {
   if (typeof joinedText !== 'string') return false;
   if (joinedText.trim().length === 0) return false;
   if (CSS_VALUE_RE.test(joinedText)) return false;
-  return !ContentInCodeAnalyzer.isProse(joinedText);
+  return !isProse(joinedText);
 }
 
 function concatOperands(node) {
@@ -193695,11 +193718,17 @@ class FragmentPathValidatorAnalyzer {
     { tag: 'formPath', root: 'form' },
   ];
 
-  // Read the FIRST recognized path tag. Returns { jcrPath, root } or null.
+  // Read the FIRST recognized path tag. Returns { jcrPath, root } or null. The jcrPath is a LOGICAL
+  // JCR identity (e.g. /content/forms/af/…/loanoffer), not a filesystem path — so reject anything that
+  // could escape the form-JSON root when resolved to disk: `..` segments, a URL scheme, or a Windows
+  // drive/backslash. A malformed tag is treated as absent (null) rather than trusted.
   static readPathTag(content) {
     for (const { tag, root } of FragmentPathValidatorAnalyzer.TAGS) {
       const m = new RegExp(`@${tag}\\s+(\\S+)`).exec(content || '');
-      if (m) return { jcrPath: m[1].replace(/\/+$/, ''), root };
+      if (!m) continue;
+      const jcrPath = m[1].replace(/\/+$/, '');
+      if (/(^|\/)\.\.(\/|$)/.test(jcrPath) || /^[a-z]+:/i.test(jcrPath) || /[\\]/.test(jcrPath)) return null;
+      return { jcrPath, root };
     }
     return null;
   }

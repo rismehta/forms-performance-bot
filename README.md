@@ -1,13 +1,13 @@
 # Performance Bot
 
-Static analyzer for AEM Adaptive Forms. Runs as a **GitHub Action** (before/after URL comparison on a PR), a **standalone CLI** (`analyze` report), and a **design-canon linter** (`lint` gate). All three share one analyzer pipeline (`src/pipeline.js`).
+Static analyzer for AEM Adaptive Forms. Runs as a **GitHub Action** (before/after URL comparison on a PR), a **standalone CLI** (`analyze` report + `lint` gate), and an **ESLint plugin** (`eslint-plugin-aem-forms`, for the JS-anchored rules — live editor feedback). The Action + CLI share one analyzer pipeline (`src/pipeline.js`); the plugin reuses the same matcher modules. Findings are suppressible inline with ESLint's `// eslint-disable` directive across all surfaces.
 
 ## What it checks
 
 Two families of analyzers, all defined in `src/pipeline.js` (the single source of truth):
 
 - **Performance / CWV** – form structure & nesting, blocking API calls in `initialize`, unnecessary hidden & disabled fields, circular/slow rules, DOM/`window`/HTTP in custom functions, runtime CLS, HTML (lazy-load, dimensions, blocking scripts, iframes), CSS (background-image, data URIs, `@import`, deep/duplicate selectors, `!important`, hardcoded colors).
-- **Design canon** – ownership & storage-class rules from the AEM Forms design canon: field-writes-sibling, foreign-fragment-root, dispatch-on-form-not-field, rules-vs-code, storage-class namespacing, content-in-code, display-format-in-code (use `displayFormat`/`displayValueExpression`), and more.
+- **Design canon** – ownership & storage-class rules from the AEM Forms design canon: field-writes-sibling, foreign-fragment-root, dispatch-on-form-not-field, rules-vs-code, storage-class namespacing, content-in-code, display-format-in-code (use `displayFormat`/`displayValueExpression`), ootb-property-shadow (custom prop/event duplicating an OOTB one), rule-ordering-race, fragment-form-property-scope (`globals.form` reach inside a fragment), fragment-path-validator (`globals.fragment.<path>` vs the linked JSON hierarchy), component-owns-model-concern (view reinventing model presentation/constraints), and more.
 
 Optional **AI auto-fix** (Azure OpenAI) can open a PR with CSS fixes and JS suggestions.
 
@@ -128,6 +128,40 @@ blocks/form/scripts/fragment/loanoffer10sec.js
 
 `--json` emits `{ findings: [{ severity, type, message, file, line, analyzer }], errors, warnings }` for tooling/editor integration.
 
+### Suppressing a finding (false positives)
+
+Use ESLint's own directive syntax — the **same comment works in the bot CLI and in the editor** (via the ESLint plugin below). Name the **rule id** (the ESLint rule name, e.g. `aem-forms/component-owns-model-concern`); the bot maps it to all of that analyzer's finding types, so it suppresses the same findings the ESLint rule does. The `aem-forms/` prefix is optional, and a bare finding `type` works too.
+
+```js
+// eslint-disable-next-line aem-forms/display-format-in-code
+return `₹${formatIndianNumber(amount)}`;              // suppressed on the next line
+
+const s = `${v} months`; // eslint-disable-line aem-forms/component-owns-model-concern   ← same line
+
+// eslint-disable-next-line                            // bare = suppress ALL rules on the next line
+input.dispatchEvent(new Event('change'));
+```
+
+- Honored by both `lint` **and** `analyze --fail-on` (a suppressed finding never fails the gate).
+- Works for **every** analyzer — including the whole-form / runtime ones the ESLint plugin can't host.
+- To silence a whole file or path instead, use `--exclude '<regex>'` (repeatable); generated bundles, `node_modules`, `*.test.js`/`*.spec.js`, and the vendored `afb-runtime.js` are excluded automatically.
+
+### ESLint plugin — editor integration
+
+The **JS-anchored** design-canon rules (display-format, content-in-code, field-writes-sibling, should-be-component, component-owns-model-concern) also ship as `eslint-plugin-aem-forms` for live in-editor squigglies + one-click `eslint-disable`. It **reuses the bot's matcher modules**, so a rule's verdict is identical in the editor and in CI.
+
+```js
+// eslint.config.js (flat config, ESLint 9 / 8.57+)
+import aemForms from 'eslint-plugin-aem-forms';
+export default [
+  aemForms.configs.recommended,
+  { files: ['**/components/**/*.js'],
+    rules: { 'aem-forms/component-owns-model-concern': 'error' } },
+];
+```
+
+The plugin covers the ~12 single-file rules; the **bot still runs the full set** in CI (the cross-file, whole-form, and runtime analyzers — `storage-class`, `ootb-property-shadow`, `rule-performance`, etc. — cannot be ESLint rules). See [issue #30](https://github.com/adobe-aem-forms/performance-bot/issues/30) for which analyzers live where and why.
+
 ### `analyze` vs `lint` — when to use which
 
 Both run the **same full analyzer pipeline** (all analyzers, including the design-canon checks). They differ only in how they're driven and what they do with the results:
@@ -246,15 +280,23 @@ src/
 ├── pipeline.js        ← Shared analyzer pipeline (single source of truth)
 ├── cli/
 │   ├── analyze.js     ← CLI entry: default `analyze` report + `lint` subcommand dispatch
-│   ├── lint.js        ← Design-canon linter (runLintMain, collectFindings)
-│   └── file-loaders.js← Shared file/diff loaders (breaks the analyze↔lint import cycle)
+│   ├── lint.js        ← forms linter (runLintMain, collectFindings, isGating)
+│   ├── suppressions.js← inline `// eslint-disable[-next-line] aem-forms/<rule>` handling
+│   └── file-loaders.js← shared file/diff loaders + isAuthoredSource (non-authored exclusion)
 ├── analyzers/         ← one file per analyzer (perf + design-canon)
+│   ├── format-detection.js   ← shared display-format matcher (bot + ESLint plugin)
+│   ├── concept-tokens.js     ← shared OOTB concept-token normalizer (bot + plugin)
+│   ├── text-predicates.js    ← shared isProse (dependency-free)
+│   └── form-file-tiers.js    ← component/fragment/form tier classification
+├── data/
+│   └── runtime-property-matrix.js  ← OOTB property matrix (.js so ncc inlines it)
 ├── reporters/
 │   └── pr-reporter-form.js   ← report rendering + DESIGN_CANON_KEYS
-└── utils/
-    ├── config-loader.js
-    ├── git-changed-files.js
-    └── github-helper.js
+└── utils/ …
+
+eslint-plugin/         ← eslint-plugin-aem-forms (JS-anchored rules; reuses src/analyzers matchers)
+├── index.js           ← plugin + `recommended` flat-config preset
+└── rules/*.js         ← one rule per Group-A analyzer
 ```
 
 ### Adding a new analyzer
@@ -271,7 +313,9 @@ src/
 
 4. **Add tests** — `test/test-design-canon.js` for a design-canon analyzer (bad/good fixtures + a dedicated block), or `test/test-all-analyzers.js` for a perf analyzer.
 
-That's it. The Action, both CLI modes, and the release bundle pick up the change through the shared pipeline.
+5. **(Optional) expose it as an ESLint rule** — if the analyzer is single-JS-file (Group A), add a rule under `eslint-plugin/rules/` that **imports the analyzer's matcher/statics** (never re-implements them), register it in `eslint-plugin/index.js` + the `recommended` preset, and cover it in `test/test-eslint-plugin.js`. Cross-file / whole-form / runtime analyzers stay bot-only.
+
+That's it. The Action, both CLI modes, and the release bundle pick up the change through the shared pipeline; inline `// eslint-disable aem-forms/<type>` suppression works automatically (keyed on the finding `type`).
 
 ## Performance checks (what the bot enforces)
 
