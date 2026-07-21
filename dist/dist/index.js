@@ -194002,25 +194002,15 @@ class ComponentOwnsModelConcernAnalyzer {
         //    (b) a render-sink write of a template/concat that glues a NON-PROSE unit decoration to a
         //        `.value`/DOM-numeric core (`` `${input.value} months` ``) — inside a value-box render
         //        the core is inherently the field value, so a DOM `.value` counts as the numeric core.
-        // 2) constraint reinvention pushed to the native input: `input.min|max|step = <expr>`.
+        //
+        // NOTE: `input.min|max|step = <v>` is deliberately NOT flagged. OOTB `setConstraints`
+        // (blocks/form/util.js) applies min/max/step from the model ONCE at decorate and is never re-run on change;
+        // these sliders receive their bounds at RUNTIME (offer payload / per-tenure reconfigure), so the
+        // component MUST re-set the native input's min/max/step then — a forced, legitimate pattern with
+        // no OOTB re-apply path. The real violation is the CUSTOM constraint PROP existing
+        // (`properties.minValue` vs OOTB `minimum`), caught by the MemberExpression read below.
         AssignmentExpression: (n) => {
           if (n.operator !== '=') return;
-
-          // (2) input.min / input.max / input.step = … → OOTB constraint reinvented view-side.
-          if (n.left?.type === 'MemberExpression' && ['min', 'max', 'step'].includes(n.left.property?.name)) {
-            const ootb = { min: 'minimum', max: 'maximum', step: 'step' }[n.left.property.name];
-            flag({
-              severity: 'error',
-              type: 'component-reinvents-constraint',
-              name: n.left.property.name,
-              line: n.loc?.start.line,
-              message: `Component sets \`${ComponentOwnsModelConcernAnalyzer.memberPath(n.left)}\` view-side. `
-                + `min/max/step are OOTB model constraints (\`${ootb}\`) — author them on the field so the `
-                + `runtime enforces validation/clamp; the component reads them off the model, not a custom prop.`,
-            });
-            return;
-          }
-
           if (!ComponentOwnsModelConcernAnalyzer.isRenderSink(n.left)) return;
           const isFmt = isDisplayFormatSink(n.right)
             || ComponentOwnsModelConcernAnalyzer.isDecoratedValueBox(n.right);
@@ -194037,9 +194027,11 @@ class ComponentOwnsModelConcernAnalyzer {
           }
         },
 
-        // 2) reinvented constraint: read of properties.<customConstraintKey>. Flag the READ regardless of
-        //    the immediate sink — the presence of a custom min/max/step/term prop in a component is the
-        //    signal it should be an OOTB model constraint.
+        // 2) reinvented constraint: read of a CUSTOM `properties.<key>` that concept-maps to an OOTB
+        //    constraint (minValue→minimum, termValues→enum, …). The smell is the PARALLEL AUTHORING PROP
+        //    existing, not the component honoring it at runtime — the component is forced to push the
+        //    bound to the native input (OOTB `setConstraints` in blocks/form/util.js is decorate-only). Fix is upstream: author
+        //    the value as the OOTB model constraint so it rides the model, not a custom prop.
         MemberExpression: (m) => {
           const path = ComponentOwnsModelConcernAnalyzer.memberPath(m);
           // match `<...>.properties.<key>` (the custom authoring bag)
@@ -194052,9 +194044,11 @@ class ComponentOwnsModelConcernAnalyzer {
             type: 'component-reinvents-constraint',
             name: pm[1],
             line: m.loc?.start.line,
-            message: `Component reads custom \`properties.${hit.key}\` and applies it as a constraint. `
-              + `Use the OOTB model constraint \`${hit.ootb}\` (number-input / enum props) instead of a `
-              + `parallel custom prop — the runtime enforces OOTB constraints and they survive re-embedding.`,
+            message: `Component reads custom \`properties.${hit.key}\` — a parallel authoring prop that `
+              + `duplicates the OOTB model constraint \`${hit.ootb}\`. Author the value as \`${hit.ootb}\` on `
+              + `the field (number-input / enum props) so it rides the model; the component still re-applies `
+              + `it to the native input at runtime, but reads it off the model, not a custom prop. `
+              + `(Setting \`input.min/max/step\` at runtime is fine — OOTB setConstraints (blocks/form/util.js) runs only at decorate.)`,
           });
         },
 
