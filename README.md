@@ -140,10 +140,20 @@ const s = `${v} months`; // eslint-disable-line aem-forms/component-owns-model-c
 
 // eslint-disable-next-line                            // bare = suppress ALL rules on the next line
 input.dispatchEvent(new Event('change'));
+
+// eslint-disable aem-forms/rule-performance           // no -line/-next-line = WHOLE FILE
+```
+
+```css
+/* CSS has no `//` — use a block comment; both -line and -next-line work */
+/* eslint-disable-next-line aem-forms/css-import-blocking */
+@import url('./assisted-by-bank.css');
 ```
 
 - Honored by both `lint` **and** `analyze --fail-on` (a suppressed finding never fails the gate).
 - Works for **every** analyzer — including the whole-form / runtime ones the ESLint plugin can't host.
+- **CSS:** use the `/* … */` block-comment form (CSS has no `//`); both `-line` and `-next-line` are honored.
+- **Line-less findings** (runtime findings that carry no source line, e.g. `runtime-error-in-custom-function`) can only be silenced by the **file-wide** form — a bare `eslint-disable` (optionally with a rule list), with no `-line`/`-next-line`. Placed anywhere in the file, it applies to the whole file.
 - To silence a whole file or path instead, use `--exclude '<regex>'` (repeatable); generated bundles, `node_modules`, `*.test.js`/`*.spec.js`, and the vendored `afb-runtime.js` are excluded automatically.
 
 ### ESLint plugin — editor integration

@@ -187406,13 +187406,15 @@ class FormCSSAnalyzer {
    * Handles both standard CSS and preprocessor (//) comments and HTML comments <!-- -->
    */
   stripComments(content) {
-    // Remove /* ... */ style comments (standard CSS)
-    let cleaned = content.replace(/\/\*[\s\S]*?\*\//g, '');
-    
+    // Remove /* ... */ style comments (standard CSS). Blank out the comment in place — keep its
+    // newlines — so every subsequent line keeps its original number (findings + inline suppression
+    // directives both anchor on line, so a multi-line header comment must not shift the file up).
+    let cleaned = content.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '));
+
     // Remove // style comments (SCSS/LESS/SASS)
     // Match // to end of line, but preserve the newline for accurate line numbers
     cleaned = cleaned.replace(/\/\/.*$/gm, '');
-    
+
     return cleaned;
   }
 
