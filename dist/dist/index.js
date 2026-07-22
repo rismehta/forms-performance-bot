@@ -3466,11 +3466,16 @@ exports.editableProperties = [
     'properties',
     'exclusiveMinimum',
     'exclusiveMaximum',
+    'maxLength',
     'maximum',
     'maxItems',
+    'minLength',
     'minimum',
     'minItems',
-    'checked'
+    'pattern',
+    'checked',
+    'step',
+    'placeholder'
 ];
 exports.dynamicProps = [
     ...exports.editableProperties,
@@ -3559,6 +3564,7 @@ class BaseNode {
         this._options = _options;
         this._lang = '';
         this._callbacks = {};
+        this._pendingViewEvents = {};
         this._dependents = [];
         this._tokens = [];
         this._eventSource = index_1.EventSource.CODE;
@@ -3582,6 +3588,14 @@ class BaseNode {
     }
     get fragment() {
         return this._fragment;
+    }
+    getFragmentRuleNode() {
+        var _a;
+        if (this.fragment === '$form') {
+            return this.form.getRuleNode();
+        }
+        const fragmentContainer = this.form.resolveQualifiedName(this.fragment);
+        return (_a = fragmentContainer === null || fragmentContainer === void 0 ? void 0 : fragmentContainer.getRuleNode()) !== null && _a !== void 0 ? _a : this.form.getRuleNode();
     }
     setupRuleNode() {
         const self = this;
@@ -3724,7 +3738,7 @@ class BaseNode {
                 minOccur: this.parent.minItems,
                 maxOccur: this.parent.maxItems
             } : {})), { ':type': this[':type'] }), (forRestore ? {
-                _dependents: this._dependents.length ? this.getDependents() : undefined,
+                _dependents: this._dependents.length ? this.getDependents() : this._jsonModel._dependents,
                 allowedComponents: undefined,
                 columnClassNames: undefined,
                 columnCount: undefined,
@@ -3732,22 +3746,41 @@ class BaseNode {
             } : {}));
         });
     }
-    subscribe(callback, eventName = 'change') {
+    subscribe(callback, eventName = 'change', dependentType = 'view') {
         this._callbacks[eventName] = this._callbacks[eventName] || [];
-        this._callbacks[eventName].push(callback);
+        const isViewSubscriber = dependentType === 'view';
+        const hasExistingViewSubscriber = this._callbacks[eventName].some((x) => x.dependentType === 'view' || x.dependentType == null);
+        const entry = { callback, dependentType };
+        this._callbacks[eventName].push(entry);
+        if (isViewSubscriber && !hasExistingViewSubscriber) {
+            const pending = this._pendingViewEvents[eventName];
+            if (pending === null || pending === void 0 ? void 0 : pending.length) {
+                delete this._pendingViewEvents[eventName];
+                pending.forEach((action) => {
+                    this.withDependencyTrackingControl(true, () => {
+                        callback(new ActionImplWithTarget(action, this));
+                    });
+                });
+            }
+        }
         return {
             unsubscribe: () => {
-                this._callbacks[eventName] = this._callbacks[eventName].filter(x => x !== callback);
+                this._callbacks[eventName] = this._callbacks[eventName].filter(x => x.callback !== callback);
             }
         };
     }
     _addDependent(dependent, propertyName) {
         const existingDependency = this._dependents.find(({ node, propertyName: existingProp }) => {
-            let isExistingDependent = node === dependent;
-            if (isExistingDependent && propertyName && propertyName.startsWith('properties.')) {
-                isExistingDependent = existingProp === propertyName;
+            if (node !== dependent) {
+                return false;
             }
-            return isExistingDependent;
+            if (propertyName && this.form.propDependencyBehaviour === 'strict') {
+                return existingProp === propertyName;
+            }
+            if (propertyName && propertyName.startsWith('properties.')) {
+                return existingProp === propertyName;
+            }
+            return true;
         });
         if (existingDependency === undefined) {
             const subscription = this.subscribe((change) => {
@@ -3755,6 +3788,9 @@ class BaseNode {
                 const propsToLook = [...exports.dynamicProps, 'items'];
                 const isPropChanged = changes.findIndex(x => {
                     const changedPropertyName = x.propertyName;
+                    if (propertyName && this.form.propDependencyBehaviour === 'strict') {
+                        return changedPropertyName === propertyName;
+                    }
                     return propsToLook.includes(changedPropertyName) || (changedPropertyName.startsWith('properties.') && propertyName === changedPropertyName);
                 }) > -1;
                 if (isPropChanged) {
@@ -3765,22 +3801,27 @@ class BaseNode {
                         dependent.dispatch(new Events_1.ExecuteRule());
                     }
                 }
-            });
+            }, 'change', 'model');
             this._dependents.push({ node: dependent, propertyName, subscription });
         }
     }
     removeDependent(dependent) {
-        const index = this._dependents.findIndex(({ node }) => node === dependent);
-        if (index > -1) {
-            this._dependents[index].subscription.unsubscribe();
-            this._dependents.splice(index, 1);
-        }
+        const toRemove = this._dependents.filter(({ node }) => node === dependent);
+        toRemove.forEach(dep => dep.subscription.unsubscribe());
+        this._dependents = this._dependents.filter(({ node }) => node !== dependent);
     }
     queueEvent(action) {
+        if (this._onlyViewNotify) {
+            return;
+        }
         const actionWithTarget = new ActionImplWithTarget(action, this);
         this.form.getEventQueue().queue(this, actionWithTarget, ['valid', 'invalid'].indexOf(actionWithTarget.type) > -1);
     }
     dispatch(action) {
+        if (this._onlyViewNotify) {
+            this.notifyDependents(new ActionImplWithTarget(action, this));
+            return;
+        }
         this.queueEvent(action);
         this.form.getEventQueue().runPendingQueue();
     }
@@ -3810,10 +3851,18 @@ class BaseNode {
             });
             this._jsonModel._dependents = undefined;
         }
-        const handlers = this._callbacks[action.type] || [];
-        handlers.forEach(x => {
+        const onlyView = this._onlyViewNotify;
+        const entries = this._callbacks[action.type] || [];
+        const toRun = onlyView
+            ? entries.filter(e => e.dependentType === 'view' || e.dependentType === undefined)
+            : entries;
+        if (entries.length === 0 && !onlyView && action.isCustomEvent) {
+            this._pendingViewEvents[action.type] = this._pendingViewEvents[action.type] || [];
+            this._pendingViewEvents[action.type].push(action);
+        }
+        toRun.forEach(({ callback }) => {
             this.withDependencyTrackingControl(true, () => {
-                x(new ActionImplWithTarget(action, this));
+                callback(new ActionImplWithTarget(action, this));
             });
         });
     }
@@ -3821,6 +3870,7 @@ class BaseNode {
         return value === undefined || value === null || value === '';
     }
     _setProperty(prop, newValue, notify = true, notifyChildren = (action) => { }) {
+        var _a, _b;
         const oldValue = this._jsonModel[prop];
         let isValueSame = false;
         if (newValue !== null && oldValue !== null &&
@@ -3837,8 +3887,8 @@ class BaseNode {
                 this.notifyDependents(changeAction);
             }
             notifyChildren.call(this, changeAction);
-            if (ValidationUtils_1.validationConstraintsList.includes(prop)) {
-                if (this.hasValueBeenSet === undefined || this.hasValueBeenSet) {
+            if (ValidationUtils_1.revalidationTriggerProps.includes(prop)) {
+                if (this.hasValueBeenSet === undefined || this.hasValueBeenSet || ((_b = (_a = this._jsonModel) === null || _a === void 0 ? void 0 : _a.validity) === null || _b === void 0 ? void 0 : _b.valid) === false) {
                     this.validate();
                 }
             }
@@ -3913,6 +3963,12 @@ class BaseNode {
         }
         if (_data) {
             if (!this.isContainer && _parent !== EmptyDataValue_1.default && _data !== EmptyDataValue_1.default) {
+                if (_data.$isDataGroup && _data.$_fields.length > 0) {
+                    console.error(`Data binding conflict: non-container field "${this._jsonModel.name || this.id}" ` +
+                        `with dataRef "${dataRef}" points to a DataGroup already bound by a container. ` +
+                        'This would destroy existing child data. The data of this field will not be exported.');
+                    return this._data;
+                }
                 _data = _data === null || _data === void 0 ? void 0 : _data.$convertToDataValue();
                 _parent.$addDataNode(_key, _data, true);
             }
@@ -4611,6 +4667,9 @@ class Container extends Scriptable_1.default {
             x.reset();
         });
     }
+    get valid() {
+        return this.items.every((item) => item.valid);
+    }
     validate() {
         return this.items.flatMap(x => {
             return x.validate();
@@ -4621,25 +4680,26 @@ class Container extends Scriptable_1.default {
     }
     importData(dataModel) {
         var _a;
-        if (typeof this._data !== 'undefined' && this.type === 'array' && Array.isArray(dataModel)) {
-            const dataGroup = new DataGroup_1.default(this._data.$name, dataModel, this._data.$type, this._data.parent);
-            try {
-                (_a = this._data.parent) === null || _a === void 0 ? void 0 : _a.$addDataNode(dataGroup.$name, dataGroup, true);
-            }
-            catch (e) {
-                this.form.logger.error(`unable to setItems for ${this.qualifiedName} : ${e}`);
-                return;
-            }
-            this._data = dataGroup;
-            this.syncDataAndFormModel(dataGroup);
-            const newLength = this.items.length;
-            for (let i = 0; i < newLength; i += 1) {
-                this._children[i].dispatch(new Events_1.ExecuteRule());
-            }
-        }
-        else if (typeof this._data === 'undefined') {
+        if (typeof this._data === 'undefined') {
             console.warn(`Data node is null, hence importData did not work for panel "${this.name}". Check if parent has a dataRef set to null.`);
+            return;
         }
+        const isArrayPanel = this.type === 'array' && Array.isArray(dataModel);
+        const isObjectPanel = this.type === 'object' && typeof dataModel === 'object' && dataModel !== null && !Array.isArray(dataModel);
+        if (!isArrayPanel && !isObjectPanel) {
+            return;
+        }
+        const dataGroup = new DataGroup_1.default(this._data.$name, dataModel, this._data.$type, this._data.parent);
+        try {
+            (_a = this._data.parent) === null || _a === void 0 ? void 0 : _a.$addDataNode(dataGroup.$name, dataGroup, true);
+        }
+        catch (e) {
+            this.form.logger.error(`unable to importData for ${this.qualifiedName} : ${e}`);
+            return;
+        }
+        this._data = dataGroup;
+        this.syncDataAndFormModel(dataGroup);
+        this._children.forEach((child) => child.dispatch(new Events_1.ExecuteRule()));
     }
     syncDataAndFormModel(contextualDataModel) {
         const result = {
@@ -4752,6 +4812,9 @@ __decorate([
 ], Container.prototype, "minItems", null);
 __decorate([
     (0, BaseNode_1.dependencyTracked)()
+], Container.prototype, "valid", null);
+__decorate([
+    (0, BaseNode_1.dependencyTracked)()
 ], Container.prototype, "activeChild", null);
 exports["default"] = Container;
 
@@ -4774,6 +4837,20 @@ var _DateField_instances, _DateField_convertNumberToDate;
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 const Field_1 = __importDefault(__nccwpck_require__(70494));
 const af_formatters_1 = __nccwpck_require__(43126);
+const warnedPatterns = new Set();
+function normalizeDatePattern(pattern) {
+    if (!pattern || typeof pattern !== 'string') {
+        return pattern;
+    }
+    const normalized = pattern
+        .replace(/DD/g, 'dd')
+        .replace(/YYYY/g, 'yyyy');
+    if (normalized !== pattern && !warnedPatterns.has(pattern)) {
+        warnedPatterns.add(pattern);
+        console.warn(`[AEM Forms] Date field pattern "${pattern}" uses deprecated format. Auto-corrected to "${normalized}". Please update to use lowercase 'y' for year and 'd' for day.`);
+    }
+    return normalized;
+}
 class DateField extends Field_1.default {
     constructor() {
         super(...arguments);
@@ -4786,8 +4863,12 @@ class DateField extends Field_1.default {
         if (!this._jsonModel.editFormat) {
             this._jsonModel.editFormat = 'short';
         }
+        this._jsonModel.editFormat = normalizeDatePattern(this._jsonModel.editFormat);
         if (!this._jsonModel.displayFormat) {
             this._jsonModel.displayFormat = this._jsonModel.editFormat;
+        }
+        else {
+            this._jsonModel.displayFormat = normalizeDatePattern(this._jsonModel.displayFormat);
         }
         if (!this._jsonModel.placeholder) {
             this._jsonModel.placeholder = (0, af_formatters_1.parseDateSkeleton)(this._jsonModel.editFormat, this.locale);
@@ -5124,6 +5205,9 @@ class Field extends Scriptable_1.default {
     get placeholder() {
         return this._jsonModel.placeholder;
     }
+    set placeholder(value) {
+        this._setProperty('placeholder', value);
+    }
     get readOnly() {
         if (this.parent.readOnly !== undefined) {
             return this.parent.readOnly === true ? true : this._jsonModel.readOnly;
@@ -5223,8 +5307,9 @@ class Field extends Scriptable_1.default {
         return df;
     }
     get editValue() {
+        var _a;
         const df = this.editFormat;
-        if (df && this.isNotEmpty(this.value) && this.valid !== false) {
+        if (df && this.isNotEmpty(this.value) && ((_a = this === null || this === void 0 ? void 0 : this.validity) === null || _a === void 0 ? void 0 : _a.typeMismatch) !== true) {
             try {
                 return (0, af_formatters_1.format)(this.value, this.lang, df);
             }
@@ -5312,7 +5397,12 @@ class Field extends Scriptable_1.default {
             if (updates.valid) {
                 this.triggerValidationEvent(updates);
             }
-            const changeAction = new Events_1.Change({ changes: changes.concat(Object.values(updates)), eventSource: this._eventSource });
+            const allChanges = changes.concat(Object.values(updates));
+            const changesWithCurrentState = allChanges.map((change) => {
+                const valueToUse = change.propertyName === 'value' ? this._jsonModel.value : change.currentValue;
+                return Object.assign(Object.assign({}, change), { currentValue: valueToUse });
+            });
+            const changeAction = new Events_1.Change({ changes: changesWithCurrentState, eventSource: this._eventSource });
             this.dispatch(changeAction);
         }
     }
@@ -5381,10 +5471,32 @@ class Field extends Scriptable_1.default {
         const afConstraintKey = constraint;
         const html5ConstraintType = types_1.constraintKeys[afConstraintKey];
         const constraintTypeMessages = (0, types_1.getConstraintTypeMessages)();
-        return ((_a = this._jsonModel.constraintMessages) === null || _a === void 0 ? void 0 : _a[afConstraintKey === 'exclusiveMaximum' ? 'maximum' :
+        const customMessage = (_a = this._jsonModel.constraintMessages) === null || _a === void 0 ? void 0 : _a[afConstraintKey === 'exclusiveMaximum' ? 'maximum' :
             afConstraintKey === 'exclusiveMinimum' ? 'minimum' :
-                afConstraintKey])
-            || (0, FormUtils_1.replaceTemplatePlaceholders)(constraintTypeMessages[html5ConstraintType], [this._jsonModel[afConstraintKey]]);
+                afConstraintKey];
+        if (customMessage) {
+            const stepValues = constraint === 'step' ? this._getStepMessageValues() : [this._jsonModel[afConstraintKey]];
+            return (0, FormUtils_1.replaceTemplatePlaceholders)(customMessage, stepValues.length === 2 ? stepValues : [this._jsonModel.step]);
+        }
+        if (constraint === 'step') {
+            const stepValues = this._getStepMessageValues();
+            if (stepValues.length === 2) {
+                return (0, FormUtils_1.replaceTemplatePlaceholders)(constraintTypeMessages[html5ConstraintType], stepValues);
+            }
+            return 'Please enter a valid value.';
+        }
+        return (0, FormUtils_1.replaceTemplatePlaceholders)(constraintTypeMessages[html5ConstraintType], [this._jsonModel[afConstraintKey]]);
+    }
+    _getStepMessageValues() {
+        const result = this.checkStep();
+        if (!result.valid
+            && result.prev != null
+            && result.next != null
+            && Number.isFinite(result.prev)
+            && Number.isFinite(result.next)) {
+            return [result.prev, result.next];
+        }
+        return [];
     }
     get errorMessage() {
         return this._jsonModel.errorMessage;
@@ -5405,6 +5517,9 @@ class Field extends Scriptable_1.default {
             const updatedConstraintMessages = Object.assign(Object.assign({}, this._jsonModel.constraintMessages), { [constraint.type]: constraint.message });
             this._setProperty('constraintMessages', updatedConstraintMessages);
         }
+    }
+    get constraintMessages() {
+        return this._jsonModel.constraintMessages;
     }
     _getConstraintObject() {
         return ValidationUtils_1.Constraints;
@@ -5440,7 +5555,7 @@ class Field extends Scriptable_1.default {
             let next, prev;
             if (!valid) {
                 next = (Math.ceil(qt) * fStep + fIVal) / factor;
-                prev = (next - fStep) / factor;
+                prev = next - step;
             }
             return {
                 valid,
@@ -5511,15 +5626,29 @@ class Field extends Scriptable_1.default {
     get maxLength() {
         return this._jsonModel.maxLength;
     }
+    set maxLength(m) {
+        this._setProperty('maxLength', m);
+    }
     get minLength() {
         return this._jsonModel.minLength;
+    }
+    set minLength(m) {
+        this._setProperty('minLength', m);
     }
     get pattern() {
         return this._jsonModel.pattern;
     }
+    set pattern(p) {
+        this._setProperty('pattern', p);
+    }
     get step() {
-        if (this.type === 'number' || this.format === 'date') {
+        if (this.type === 'number' || this.type === 'integer' || this.format === 'date') {
             return this._jsonModel.step;
+        }
+    }
+    set step(s) {
+        if (this.type === 'number' || this.type === 'integer' || this.format === 'date') {
+            this._setProperty('step', s);
         }
     }
     get exclusiveMinimum() {
@@ -5591,7 +5720,7 @@ class Field extends Scriptable_1.default {
             else {
                 valid = this.checkEnum(value, Constraints);
                 constraint = 'enum';
-                if (valid && this.type === 'number') {
+                if (valid && (this.type === 'number' || this.type === 'integer')) {
                     valid = this.checkStep().valid;
                     constraint = 'step';
                 }
@@ -5635,6 +5764,7 @@ class Field extends Scriptable_1.default {
             const changeAction = (0, Events_1.propertyChange)('value', dataNode.$value, this._jsonModel.value);
             this._jsonModel.value = dataNode.$value;
             this.queueEvent(changeAction);
+            this.evaluateConstraints();
         }
     }
     defaultDataModel(name) {
@@ -6052,6 +6182,9 @@ class Form extends Container_1.default {
     get changeEventBehaviour() {
         return this.properties['fd:changeEventBehaviour'] === 'deps' ? 'deps' : 'self';
     }
+    get propDependencyBehaviour() {
+        return this.properties['fd:propDependencyBehaviour'] === 'strict' ? 'strict' : 'any';
+    }
     get metaData() {
         const metaData = this._jsonModel.metadata || {};
         return new FormMetaData_1.default(metaData);
@@ -6221,13 +6354,13 @@ class Form extends Container_1.default {
             if (this._invalidFields.indexOf(action.target.id) === -1) {
                 this._invalidFields.push(action.target.id);
             }
-        }, 'invalid');
+        }, 'invalid', 'model');
         field.subscribe((action) => {
             const index = this._invalidFields.indexOf(action.target.id);
             if (index > -1) {
                 this._invalidFields.splice(index, 1);
             }
-        }, 'valid');
+        }, 'valid', 'model');
         field.subscribe((action) => {
             const field = action.target.getState();
             if (action.payload.changes.length > 0 && field) {
@@ -6252,7 +6385,7 @@ class Form extends Container_1.default {
                 const fieldChangedAction = new Events_1.FieldChanged(changes, field, action.payload.eventSource);
                 this.notifyDependents(fieldChangedAction);
             }
-        });
+        }, 'change', 'model');
     }
     visit(callBack) {
         this.traverseChild(this, callBack);
@@ -6749,10 +6882,11 @@ class PropertiesManager {
             parentObj = parentObj[parts[i]];
         }
         const finalProp = parts[parts.length - 1];
-        const oldValue = parentObj[finalProp];
         parentObj[finalProp] = value;
+        const oldTopValue = properties[topLevelProp];
+        const newTopValue = updatedProperties[topLevelProp];
         this.host._jsonModel.properties = updatedProperties;
-        const changeAction = (0, Events_1.propertyChange)(`properties.${propertyPath}`, value, oldValue);
+        const changeAction = (0, Events_1.propertyChange)(`properties.${topLevelProp}`, newTopValue, oldTopValue);
         this.host.notifyDependents(changeAction);
     }
     updateSimpleProperty(propertyName, value) {
@@ -6771,7 +6905,6 @@ exports.PropertiesManager = PropertiesManager;
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 const BaseNode_1 = __nccwpck_require__(91709);
-const FormUtils_1 = __nccwpck_require__(2288);
 const Events_1 = __nccwpck_require__(30290);
 class Scriptable extends BaseNode_1.BaseNode {
     constructor() {
@@ -6789,8 +6922,7 @@ class Scriptable extends BaseNode_1.BaseNode {
                 let updatedRule = eString;
                 try {
                     if (this.fragment !== '$form') {
-                        const sanitizedFragment = (0, FormUtils_1.sanitizeName)(this.fragment);
-                        updatedRule = eString.replaceAll('$form', sanitizedFragment);
+                        updatedRule = eString.replaceAll('$form', '$fragment');
                     }
                     this._rules[eName] = this.ruleEngine.compileRule(updatedRule, this.lang);
                 }
@@ -6817,6 +6949,9 @@ class Scriptable extends BaseNode_1.BaseNode {
         var _a;
         if (!(eName in this._events)) {
             let eString = (_a = this._jsonModel.events) === null || _a === void 0 ? void 0 : _a[eName];
+            if (eName === 'custom:setProperty' && typeof eString === 'undefined') {
+                eString = ['$event.payload'];
+            }
             if (typeof eString === 'string' && eString.length > 0) {
                 eString = [eString];
             }
@@ -6825,8 +6960,7 @@ class Scriptable extends BaseNode_1.BaseNode {
                     let updatedExpr = x;
                     try {
                         if (this.fragment !== '$form') {
-                            const sanitizedFragment = (0, FormUtils_1.sanitizeName)(this.fragment);
-                            updatedExpr = x.replaceAll('$form', sanitizedFragment);
+                            updatedExpr = x.replaceAll('$form', '$fragment');
                         }
                         return this.ruleEngine.compileRule(updatedExpr, this.lang);
                     }
@@ -6848,10 +6982,19 @@ class Scriptable extends BaseNode_1.BaseNode {
         }
         return this._events[eName] || [];
     }
+    getState(forRestore = false) {
+        const state = super.getState(forRestore);
+        state.events = state.events || {};
+        return state;
+    }
     applyUpdates(updates) {
         if (typeof updates === 'object') {
             if (updates !== null) {
                 Object.entries(updates).forEach(([key, value]) => {
+                    if (key.startsWith('properties.')) {
+                        this.applyPropertiesTarget(key, value);
+                        return;
+                    }
                     if (key in BaseNode_1.editableProperties || (key in this && typeof this[key] !== 'function')) {
                         try {
                             this[key] = value;
@@ -6867,6 +7010,22 @@ class Scriptable extends BaseNode_1.BaseNode {
             this.value = updates;
         }
     }
+    applyPropertiesTarget(prop, value) {
+        const path = prop.slice('properties.'.length);
+        const segments = path.split('.');
+        const unsafe = segments.some(s => s === '' || s === '__proto__' || s === 'constructor' || s === 'prototype');
+        if (unsafe) {
+            this.form.logger.warn(`${prop} is not a valid properties path.`);
+            return;
+        }
+        const pm = this.getPropertiesManager();
+        if (segments.length === 1) {
+            pm.updateSimpleProperty(path, value);
+        }
+        else {
+            pm.updateNestedProperty(path, value);
+        }
+    }
     executeAllRules(context) {
         const entries = Object.entries(this.getRules());
         if (entries.length > 0) {
@@ -6875,7 +7034,10 @@ class Scriptable extends BaseNode_1.BaseNode {
                 const node = this.getCompiledRule(prop, rule);
                 if (node) {
                     const newVal = this.ruleEngine.execute(node, scope, context, true, rule);
-                    if (BaseNode_1.editableProperties.indexOf(prop) > -1) {
+                    if (prop.startsWith('properties.')) {
+                        this.applyPropertiesTarget(prop, newVal);
+                    }
+                    else if (BaseNode_1.editableProperties.indexOf(prop) > -1) {
                         const oldAndNewValueAreEmpty = this.isEmpty() && this.isEmpty(newVal) && prop === 'value';
                         if (!oldAndNewValueAreEmpty) {
                             this[prop] = newVal;
@@ -6951,7 +7113,8 @@ class Scriptable extends BaseNode_1.BaseNode {
             'form': this.form,
             '$form': this.form.getRuleNode(),
             '$field': this.getRuleNode(),
-            'field': this
+            'field': this,
+            '$fragment': this.getFragmentRuleNode()
         };
         const node = this.ruleEngine.compileRule(expr, this.lang);
         return this.ruleEngine.execute(node, this.getExpressionScope(), ruleContext, false, expr);
@@ -6968,6 +7131,7 @@ class Scriptable extends BaseNode_1.BaseNode {
             '$form': this.form.getRuleNode(),
             '$field': this.getRuleNode(),
             'field': this,
+            '$fragment': this.getFragmentRuleNode(),
             '$event': {
                 type: action.type,
                 payload: action.payload,
@@ -7044,7 +7208,16 @@ class EventNode {
         return that !== null && that !== undefined && this._node == that._node && this._event.type == that._event.type;
     }
     toString() {
-        return this._node.id + '__' + this.event.type;
+        var _a;
+        const base = this._node.id + '__' + this._event.type;
+        if (this._event.type === 'change' && ((_a = this._event.payload) === null || _a === void 0 ? void 0 : _a.changes)) {
+            const sig = this._event.payload.changes
+                .map((c) => c.propertyName)
+                .sort()
+                .join(',');
+            return base + '__' + sig;
+        }
+        return base;
     }
     valueOf() {
         return this.toString();
@@ -7763,6 +7936,9 @@ const request = (context, uri, httpVerb, payload, success, error, headers) => __
     if (payload.body && payload.headers) {
         encryptOutput = Object.assign({}, payload);
         headers = Object.assign({}, payload.headers);
+        if (payload.options && typeof payload.options === 'object') {
+            Object.assign(requestOptions, payload.options);
+        }
         payload = payload.body;
         cryptoMetadata = payload.cryptoMetadata;
         inputPayload = payload;
@@ -7971,10 +8147,12 @@ class FunctionRuntimeImpl {
             if (typeof funcDef === 'function') {
                 finalFunction = {
                     _func: (args, data, interpreter) => {
+                        var _a;
                         const globals = {
                             form: interpreter.globals.$form,
                             field: interpreter.globals.$field,
                             event: interpreter.globals.$event,
+                            fragment: (_a = interpreter.globals.$fragment) !== null && _a !== void 0 ? _a : interpreter.globals.$form,
                             functions: {
                                 setProperty: (target, payload) => {
                                     const eventName = 'custom:setProperty';
@@ -8042,6 +8220,59 @@ class FunctionRuntimeImpl {
                                         filesMap[qualifiedName] = field.serialize();
                                     }
                                     return filesMap;
+                                },
+                                setVariable: (variableName, variableValue, target) => {
+                                    const args = [variableName, variableValue, target];
+                                    return FunctionRuntimeImpl.getInstance().getFunctions().setVariable._func.call(undefined, args, data, interpreter);
+                                },
+                                getVariable: (variableName, target) => {
+                                    const args = [variableName, target];
+                                    return FunctionRuntimeImpl.getInstance().getFunctions().getVariable._func.call(undefined, args, data, interpreter);
+                                },
+                                request: (options) => __awaiter(this, void 0, void 0, function* () {
+                                    const { url, method = 'GET', body: requestBody = {}, headers = { 'Content-Type': 'application/json' }, options: fetchOptions } = options;
+                                    const funcs = FunctionRuntimeImpl.getInstance().getFunctions();
+                                    const externalizedUrl = funcs.externalize._func.call(undefined, [url], data, interpreter);
+                                    const random = Math.floor(Math.random() * 1000000);
+                                    const now = Date.now();
+                                    const internalSuccess = `custom:__internalSuccess_${random}_${now}`;
+                                    const internalError = `custom:__internalError_${random}_${now}`;
+                                    const encryptPayload = { body: requestBody, headers };
+                                    if (fetchOptions) {
+                                        encryptPayload.options = fetchOptions;
+                                    }
+                                    const payload = yield funcs.encrypt._func.call(undefined, [encryptPayload], data, interpreter);
+                                    const requestArgs = [externalizedUrl, method, payload, internalSuccess, internalError];
+                                    const requestFn = funcs.requestWithRetry._func.call(undefined, requestArgs, data, interpreter);
+                                    const response = yield funcs.retryHandler._func.call(undefined, [requestFn], data, interpreter);
+                                    const isSuccess = (response === null || response === void 0 ? void 0 : response.status) >= 200 && (response === null || response === void 0 ? void 0 : response.status) <= 299;
+                                    if (isSuccess && (response === null || response === void 0 ? void 0 : response.body)) {
+                                        const decryptedBody = yield funcs.decrypt._func.call(undefined, [response.body, response.originalRequest], data, interpreter);
+                                        return {
+                                            ok: true,
+                                            status: response.status,
+                                            body: decryptedBody,
+                                            headers: response.headers
+                                        };
+                                    }
+                                    return {
+                                        ok: isSuccess,
+                                        status: response === null || response === void 0 ? void 0 : response.status,
+                                        body: response === null || response === void 0 ? void 0 : response.body,
+                                        headers: response === null || response === void 0 ? void 0 : response.headers
+                                    };
+                                }),
+                                addInstance: (element, index) => {
+                                    const args = index !== undefined ? [element, index] : [element];
+                                    return FunctionRuntimeImpl.getInstance().getFunctions().addInstance._func.call(undefined, args, data, interpreter);
+                                },
+                                removeInstance: (element, index) => {
+                                    const args = index !== undefined ? [element, index] : [element];
+                                    return FunctionRuntimeImpl.getInstance().getFunctions().removeInstance._func.call(undefined, args, data, interpreter);
+                                },
+                                getQueryParameter: (param) => {
+                                    const args = [param];
+                                    return FunctionRuntimeImpl.getInstance().getFunctions().getQueryParameter._func.call(undefined, args, data, interpreter);
                                 }
                             }
                         };
@@ -8360,6 +8591,13 @@ class FunctionRuntimeImpl {
                 },
                 _signature: []
             },
+            externalize: {
+                _func: (args, data, interpreter) => {
+                    const url = toString(args[0]);
+                    return url;
+                },
+                _signature: []
+            },
             awaitFn: {
                 _func: (args, data, interpreter) => __awaiter(this, void 0, void 0, function* () {
                     const success = args[1];
@@ -8411,8 +8649,8 @@ class FunctionRuntimeImpl {
             dispatchEvent: {
                 _func: (args, data, interpreter) => {
                     const element = args[0];
-                    if (element === null && typeof interpreter !== 'string') {
-                        interpreter.debug.push('Invalid argument passed in dispatchEvent. An element is expected');
+                    if (element == null && typeof interpreter !== 'string') {
+                        interpreter.globals.form.logger.error(`dispatchEvent: target element is null or undefined. Event "${valueOf(args[1])}" was skipped.`);
                         return {};
                     }
                     let eventName = valueOf(args[1]);
@@ -8661,7 +8899,8 @@ class RuleEngine {
         this._globalNames = [
             '$form',
             '$field',
-            '$event'
+            '$event',
+            '$fragment'
         ];
         this.debugInfo = [];
         this.dependencyTracking = true;
@@ -8672,18 +8911,25 @@ class RuleEngine {
         return { formula, ast: formula.compile(rule, this._globalNames) };
     }
     execute(node, data, globals, useValueOf = false, eString) {
-        var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o;
+        var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s, _t, _u, _v;
         const { formula, ast } = node;
         const oldContext = this._context;
         this._context = globals;
         let res = undefined;
         try {
+            (_c = (_b = (_a = this._context) === null || _a === void 0 ? void 0 : _a.form) === null || _b === void 0 ? void 0 : _b.logger) === null || _c === void 0 ? void 0 : _c.info({
+                message: 'Executing rule',
+                expression: eString,
+                fieldName: (_d = this._context.field) === null || _d === void 0 ? void 0 : _d.name,
+                fieldId: (_e = this._context.field) === null || _e === void 0 ? void 0 : _e.id,
+                eventType: (_g = (_f = this._context) === null || _f === void 0 ? void 0 : _f.$event) === null || _g === void 0 ? void 0 : _g.type
+            });
             res = formula.run(ast, data, 'en-US', globals);
         }
         catch (err) {
-            (_c = (_b = (_a = this._context) === null || _a === void 0 ? void 0 : _a.form) === null || _b === void 0 ? void 0 : _b.logger) === null || _c === void 0 ? void 0 : _c.error(err);
-            if ((_d = this._context) === null || _d === void 0 ? void 0 : _d.form) {
-                const field = (_e = this._context) === null || _e === void 0 ? void 0 : _e.field;
+            (_k = (_j = (_h = this._context) === null || _h === void 0 ? void 0 : _h.form) === null || _j === void 0 ? void 0 : _j.logger) === null || _k === void 0 ? void 0 : _k.error(err);
+            if ((_l = this._context) === null || _l === void 0 ? void 0 : _l.form) {
+                const field = (_m = this._context) === null || _m === void 0 ? void 0 : _m.field;
                 const fieldName = field === null || field === void 0 ? void 0 : field.name;
                 const errorMsg = err instanceof Error ? err.message : String(err);
                 const fullError = fieldName
@@ -8692,7 +8938,7 @@ class RuleEngine {
                 const errorPayload = {
                     name: fieldName,
                     error: fullError,
-                    event: (_g = (_f = this._context) === null || _f === void 0 ? void 0 : _f.$event) === null || _g === void 0 ? void 0 : _g.type,
+                    event: (_p = (_o = this._context) === null || _o === void 0 ? void 0 : _o.$event) === null || _p === void 0 ? void 0 : _p.type,
                     rule: eString,
                     stack: err instanceof Error ? err.stack : undefined
                 };
@@ -8700,9 +8946,9 @@ class RuleEngine {
             }
         }
         if (this.debugInfo.length) {
-            (_k = (_j = (_h = this._context) === null || _h === void 0 ? void 0 : _h.form) === null || _j === void 0 ? void 0 : _j.logger) === null || _k === void 0 ? void 0 : _k.warn(`Form rule expression string: ${eString}`);
+            (_s = (_r = (_q = this._context) === null || _q === void 0 ? void 0 : _q.form) === null || _r === void 0 ? void 0 : _r.logger) === null || _s === void 0 ? void 0 : _s.warn(`Form rule expression string: ${eString}`);
             while (this.debugInfo.length > 0) {
-                (_o = (_m = (_l = this._context) === null || _l === void 0 ? void 0 : _l.form) === null || _m === void 0 ? void 0 : _m.logger) === null || _o === void 0 ? void 0 : _o.warn(this.debugInfo.pop());
+                (_v = (_u = (_t = this._context) === null || _t === void 0 ? void 0 : _t.form) === null || _u === void 0 ? void 0 : _u.logger) === null || _v === void 0 ? void 0 : _v.warn(this.debugInfo.pop());
             }
         }
         let finalRes = res;
@@ -8792,7 +9038,7 @@ const defaultConstraintTypeMessages = Object.freeze({
     [exports.ConstraintType.RANGE_UNDERFLOW]: 'Value must be greater than or equal to ${0}.',
     [exports.ConstraintType.TYPE_MISMATCH]: 'Please enter a valid value.',
     [exports.ConstraintType.VALUE_MISSING]: 'Please fill in this field.',
-    [exports.ConstraintType.STEP_MISMATCH]: 'Please enter a valid value.',
+    [exports.ConstraintType.STEP_MISMATCH]: 'Please enter a valid value. The two nearest valid values are ${0} and ${1}.',
     [exports.ConstraintType.FORMAT_MISMATCH]: 'Specify the value in allowed format : ${0}.',
     [exports.ConstraintType.ACCEPT_MISMATCH]: 'The specified file type not supported.',
     [exports.ConstraintType.FILE_SIZE_MISMATCH]: 'File too large. Reduce size and try again.',
@@ -8978,7 +9224,7 @@ const isAlphaNum = function (ch) {
     return (ch >= 'a' && ch <= 'z')
         || (ch >= 'A' && ch <= 'Z')
         || (ch >= '0' && ch <= '9')
-        || ch === '_';
+        || ch === '_' || ch === '-';
 };
 const isGlobal = (prev, stream, pos) => {
     return prev === null && stream[pos] === globalStartToken;
@@ -8993,7 +9239,7 @@ const isIdentifier = (stream, pos) => {
     }
     return (ch >= 'a' && ch <= 'z')
         || (ch >= 'A' && ch <= 'Z')
-        || ch === '_';
+        || ch === '_' || ch === '-';
 };
 const isNum = (ch) => {
     return (ch >= '0' && ch <= '9');
@@ -10030,7 +10276,7 @@ exports.createTranslationObject = createTranslationObject;
 
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.Constraints = exports.validationConstraintsList = exports.ValidConstraints = exports.coerceType = void 0;
+exports.Constraints = exports.revalidationTriggerProps = exports.validationConstraintsList = exports.ValidConstraints = exports.coerceType = void 0;
 const FormUtils_1 = __nccwpck_require__(2288);
 const FileObject_1 = __nccwpck_require__(46477);
 const dateRegex = /^(\d{4})-(\d{1,2})-(\d{1,2})$/;
@@ -10151,6 +10397,7 @@ exports.ValidConstraints = {
 };
 exports.validationConstraintsList = ['type', 'format', 'minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'minItems',
     'maxItems', 'uniqueItems', 'minLength', 'maxLength', 'pattern', 'required', 'enum', 'accept', 'maxFileSize'];
+exports.revalidationTriggerProps = [...exports.validationConstraintsList, 'step'];
 exports.Constraints = {
     type: (constraint, inputVal) => {
         let value = inputVal;
@@ -10893,6 +11140,20 @@ function parseDate(dateString, language, skeleton, timeZone) {
     const [element, func] = lookups[index];
     dateObj[element] = func(m, dateObj);
   });
+  /**
+   * Validates that JavaScript's Date constructor didn't auto-correct the date
+   * (e.g., Feb 30 -> Mar 2, Month 13 -> Jan of next year)
+   * @param date The JavaScript Date object to validate
+   * @param expectedDateObj The expected date components {year, month, day}
+   * @param calendar The calendar type
+   * @returns true if date is valid, false if auto-correction occurred
+   */
+
+  const isValidDate = (date, expectedDateObj, calendar) => {
+    if (calendar !== 'gregory') return true;
+    return date.getMonth() === expectedDateObj.month && date.getDate() === expectedDateObj.day && date.getFullYear() === expectedDateObj.year;
+  };
+
   if (hourCycle === 'h24' && dateObj.hour === 24) dateObj.hour = 0;
   if (hourCycle === 'h12' && dateObj.hour === 12) dateObj.hour = 0;
 
@@ -10910,6 +11171,11 @@ function parseDate(dateString, language, skeleton, timeZone) {
 
   if (_setFullYear) {
     jsDate.setFullYear(dateObj.year);
+  } // Verify the date wasn't auto-corrected by JavaScript
+
+
+  if (!isValidDate(jsDate, dateObj, calendar)) {
+    return null;
   }
 
   return timeZone == null ? jsDate : adjustTimeZone(jsDate, timeZone);
@@ -23220,6 +23486,75 @@ Object.assign(namedTypes_1.namedTypes, n);
 
 /***/ }),
 
+/***/ 59380:
+/***/ ((module) => {
+
+
+module.exports = balanced;
+function balanced(a, b, str) {
+  if (a instanceof RegExp) a = maybeMatch(a, str);
+  if (b instanceof RegExp) b = maybeMatch(b, str);
+
+  var r = range(a, b, str);
+
+  return r && {
+    start: r[0],
+    end: r[1],
+    pre: str.slice(0, r[0]),
+    body: str.slice(r[0] + a.length, r[1]),
+    post: str.slice(r[1] + b.length)
+  };
+}
+
+function maybeMatch(reg, str) {
+  var m = str.match(reg);
+  return m ? m[0] : null;
+}
+
+balanced.range = range;
+function range(a, b, str) {
+  var begs, beg, left, right, result;
+  var ai = str.indexOf(a);
+  var bi = str.indexOf(b, ai + 1);
+  var i = ai;
+
+  if (ai >= 0 && bi > 0) {
+    if(a===b) {
+      return [ai, bi];
+    }
+    begs = [];
+    left = str.length;
+
+    while (i >= 0 && !result) {
+      if (i == ai) {
+        begs.push(i);
+        ai = str.indexOf(a, i + 1);
+      } else if (begs.length == 1) {
+        result = [ begs.pop(), bi ];
+      } else {
+        beg = begs.pop();
+        if (beg < left) {
+          left = beg;
+          right = bi;
+        }
+
+        bi = str.indexOf(b, i + 1);
+      }
+
+      i = ai < bi && ai >= 0 ? ai : bi;
+    }
+
+    if (begs.length) {
+      result = [ left, right ];
+    }
+  }
+
+  return result;
+}
+
+
+/***/ }),
+
 /***/ 43663:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -25763,6 +26098,214 @@ module.exports = {
 		return false;
 	}
 };
+
+/***/ }),
+
+/***/ 94691:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+var concatMap = __nccwpck_require__(97087);
+var balanced = __nccwpck_require__(59380);
+
+module.exports = expandTop;
+
+var escSlash = '\0SLASH'+Math.random()+'\0';
+var escOpen = '\0OPEN'+Math.random()+'\0';
+var escClose = '\0CLOSE'+Math.random()+'\0';
+var escComma = '\0COMMA'+Math.random()+'\0';
+var escPeriod = '\0PERIOD'+Math.random()+'\0';
+
+function numeric(str) {
+  return parseInt(str, 10) == str
+    ? parseInt(str, 10)
+    : str.charCodeAt(0);
+}
+
+function escapeBraces(str) {
+  return str.split('\\\\').join(escSlash)
+            .split('\\{').join(escOpen)
+            .split('\\}').join(escClose)
+            .split('\\,').join(escComma)
+            .split('\\.').join(escPeriod);
+}
+
+function unescapeBraces(str) {
+  return str.split(escSlash).join('\\')
+            .split(escOpen).join('{')
+            .split(escClose).join('}')
+            .split(escComma).join(',')
+            .split(escPeriod).join('.');
+}
+
+
+// Basically just str.split(","), but handling cases
+// where we have nested braced sections, which should be
+// treated as individual members, like {a,{b,c},d}
+function parseCommaParts(str) {
+  if (!str)
+    return [''];
+
+  var parts = [];
+  var m = balanced('{', '}', str);
+
+  if (!m)
+    return str.split(',');
+
+  var pre = m.pre;
+  var body = m.body;
+  var post = m.post;
+  var p = pre.split(',');
+
+  p[p.length-1] += '{' + body + '}';
+  var postParts = parseCommaParts(post);
+  if (post.length) {
+    p[p.length-1] += postParts.shift();
+    p.push.apply(p, postParts);
+  }
+
+  parts.push.apply(parts, p);
+
+  return parts;
+}
+
+function expandTop(str) {
+  if (!str)
+    return [];
+
+  // I don't know why Bash 4.3 does this, but it does.
+  // Anything starting with {} will have the first two bytes preserved
+  // but *only* at the top level, so {},a}b will not expand to anything,
+  // but a{},b}c will be expanded to [a}c,abc].
+  // One could argue that this is a bug in Bash, but since the goal of
+  // this module is to match Bash's rules, we escape a leading {}
+  if (str.substr(0, 2) === '{}') {
+    str = '\\{\\}' + str.substr(2);
+  }
+
+  return expand(escapeBraces(str), true).map(unescapeBraces);
+}
+
+function identity(e) {
+  return e;
+}
+
+function embrace(str) {
+  return '{' + str + '}';
+}
+function isPadded(el) {
+  return /^-?0\d/.test(el);
+}
+
+function lte(i, y) {
+  return i <= y;
+}
+function gte(i, y) {
+  return i >= y;
+}
+
+function expand(str, isTop) {
+  var expansions = [];
+
+  var m = balanced('{', '}', str);
+  if (!m || /\$$/.test(m.pre)) return [str];
+
+  var isNumericSequence = /^-?\d+\.\.-?\d+(?:\.\.-?\d+)?$/.test(m.body);
+  var isAlphaSequence = /^[a-zA-Z]\.\.[a-zA-Z](?:\.\.-?\d+)?$/.test(m.body);
+  var isSequence = isNumericSequence || isAlphaSequence;
+  var isOptions = m.body.indexOf(',') >= 0;
+  if (!isSequence && !isOptions) {
+    // {a},b}
+    if (m.post.match(/,(?!,).*\}/)) {
+      str = m.pre + '{' + m.body + escClose + m.post;
+      return expand(str);
+    }
+    return [str];
+  }
+
+  var n;
+  if (isSequence) {
+    n = m.body.split(/\.\./);
+  } else {
+    n = parseCommaParts(m.body);
+    if (n.length === 1) {
+      // x{{a,b}}y ==> x{a}y x{b}y
+      n = expand(n[0], false).map(embrace);
+      if (n.length === 1) {
+        var post = m.post.length
+          ? expand(m.post, false)
+          : [''];
+        return post.map(function(p) {
+          return m.pre + n[0] + p;
+        });
+      }
+    }
+  }
+
+  // at this point, n is the parts, and we know it's not a comma set
+  // with a single entry.
+
+  // no need to expand pre, since it is guaranteed to be free of brace-sets
+  var pre = m.pre;
+  var post = m.post.length
+    ? expand(m.post, false)
+    : [''];
+
+  var N;
+
+  if (isSequence) {
+    var x = numeric(n[0]);
+    var y = numeric(n[1]);
+    var width = Math.max(n[0].length, n[1].length)
+    var incr = n.length == 3
+      ? Math.abs(numeric(n[2]))
+      : 1;
+    var test = lte;
+    var reverse = y < x;
+    if (reverse) {
+      incr *= -1;
+      test = gte;
+    }
+    var pad = n.some(isPadded);
+
+    N = [];
+
+    for (var i = x; test(i, y); i += incr) {
+      var c;
+      if (isAlphaSequence) {
+        c = String.fromCharCode(i);
+        if (c === '\\')
+          c = '';
+      } else {
+        c = String(i);
+        if (pad) {
+          var need = width - c.length;
+          if (need > 0) {
+            var z = new Array(need + 1).join('0');
+            if (i < 0)
+              c = '-' + z + c.slice(1);
+            else
+              c = z + c;
+          }
+        }
+      }
+      N.push(c);
+    }
+  } else {
+    N = concatMap(n, function(el) { return expand(el, false) });
+  }
+
+  for (var j = 0; j < N.length; j++) {
+    for (var k = 0; k < post.length; k++) {
+      var expansion = pre + N[j] + post[k];
+      if (!isTop || isSequence || expansion)
+        expansions.push(expansion);
+    }
+  }
+
+  return expansions;
+}
+
+
 
 /***/ }),
 
@@ -59319,6 +59862,26 @@ module.exports = {
 
 /***/ }),
 
+/***/ 97087:
+/***/ ((module) => {
+
+module.exports = function (xs, fn) {
+    var res = [];
+    for (var i = 0; i < xs.length; i++) {
+        var x = fn(xs[i], i);
+        if (isArray(x)) res.push.apply(res, x);
+        else res.push(x);
+    }
+    return res;
+};
+
+var isArray = Array.isArray || function (xs) {
+    return Object.prototype.toString.call(xs) === '[object Array]';
+};
+
+
+/***/ }),
+
 /***/ 75667:
 /***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
 
@@ -77654,6 +78217,960 @@ function possibleElisions(elidedGroups, moreLeft, moreRight) {
     return groupPossibilities(possibilities);
 }
 //# sourceMappingURL=regular-expressions.js.map
+
+/***/ }),
+
+/***/ 43772:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+module.exports = minimatch
+minimatch.Minimatch = Minimatch
+
+var path = (function () { try { return __nccwpck_require__(16928) } catch (e) {}}()) || {
+  sep: '/'
+}
+minimatch.sep = path.sep
+
+var GLOBSTAR = minimatch.GLOBSTAR = Minimatch.GLOBSTAR = {}
+var expand = __nccwpck_require__(94691)
+
+var plTypes = {
+  '!': { open: '(?:(?!(?:', close: '))[^/]*?)'},
+  '?': { open: '(?:', close: ')?' },
+  '+': { open: '(?:', close: ')+' },
+  '*': { open: '(?:', close: ')*' },
+  '@': { open: '(?:', close: ')' }
+}
+
+// any single thing other than /
+// don't need to escape / when using new RegExp()
+var qmark = '[^/]'
+
+// * => any number of characters
+var star = qmark + '*?'
+
+// ** when dots are allowed.  Anything goes, except .. and .
+// not (^ or / followed by one or two dots followed by $ or /),
+// followed by anything, any number of times.
+var twoStarDot = '(?:(?!(?:\\\/|^)(?:\\.{1,2})($|\\\/)).)*?'
+
+// not a ^ or / followed by a dot,
+// followed by anything, any number of times.
+var twoStarNoDot = '(?:(?!(?:\\\/|^)\\.).)*?'
+
+// characters that need to be escaped in RegExp.
+var reSpecials = charSet('().*{}+?[]^$\\!')
+
+// "abc" -> { a:true, b:true, c:true }
+function charSet (s) {
+  return s.split('').reduce(function (set, c) {
+    set[c] = true
+    return set
+  }, {})
+}
+
+// normalizes slashes.
+var slashSplit = /\/+/
+
+minimatch.filter = filter
+function filter (pattern, options) {
+  options = options || {}
+  return function (p, i, list) {
+    return minimatch(p, pattern, options)
+  }
+}
+
+function ext (a, b) {
+  b = b || {}
+  var t = {}
+  Object.keys(a).forEach(function (k) {
+    t[k] = a[k]
+  })
+  Object.keys(b).forEach(function (k) {
+    t[k] = b[k]
+  })
+  return t
+}
+
+minimatch.defaults = function (def) {
+  if (!def || typeof def !== 'object' || !Object.keys(def).length) {
+    return minimatch
+  }
+
+  var orig = minimatch
+
+  var m = function minimatch (p, pattern, options) {
+    return orig(p, pattern, ext(def, options))
+  }
+
+  m.Minimatch = function Minimatch (pattern, options) {
+    return new orig.Minimatch(pattern, ext(def, options))
+  }
+  m.Minimatch.defaults = function defaults (options) {
+    return orig.defaults(ext(def, options)).Minimatch
+  }
+
+  m.filter = function filter (pattern, options) {
+    return orig.filter(pattern, ext(def, options))
+  }
+
+  m.defaults = function defaults (options) {
+    return orig.defaults(ext(def, options))
+  }
+
+  m.makeRe = function makeRe (pattern, options) {
+    return orig.makeRe(pattern, ext(def, options))
+  }
+
+  m.braceExpand = function braceExpand (pattern, options) {
+    return orig.braceExpand(pattern, ext(def, options))
+  }
+
+  m.match = function (list, pattern, options) {
+    return orig.match(list, pattern, ext(def, options))
+  }
+
+  return m
+}
+
+Minimatch.defaults = function (def) {
+  return minimatch.defaults(def).Minimatch
+}
+
+function minimatch (p, pattern, options) {
+  assertValidPattern(pattern)
+
+  if (!options) options = {}
+
+  // shortcut: comments match nothing.
+  if (!options.nocomment && pattern.charAt(0) === '#') {
+    return false
+  }
+
+  return new Minimatch(pattern, options).match(p)
+}
+
+function Minimatch (pattern, options) {
+  if (!(this instanceof Minimatch)) {
+    return new Minimatch(pattern, options)
+  }
+
+  assertValidPattern(pattern)
+
+  if (!options) options = {}
+
+  pattern = pattern.trim()
+
+  // windows support: need to use /, not \
+  if (!options.allowWindowsEscape && path.sep !== '/') {
+    pattern = pattern.split(path.sep).join('/')
+  }
+
+  this.options = options
+  this.set = []
+  this.pattern = pattern
+  this.regexp = null
+  this.negate = false
+  this.comment = false
+  this.empty = false
+  this.partial = !!options.partial
+
+  // make the set of regexps etc.
+  this.make()
+}
+
+Minimatch.prototype.debug = function () {}
+
+Minimatch.prototype.make = make
+function make () {
+  var pattern = this.pattern
+  var options = this.options
+
+  // empty patterns and comments match nothing.
+  if (!options.nocomment && pattern.charAt(0) === '#') {
+    this.comment = true
+    return
+  }
+  if (!pattern) {
+    this.empty = true
+    return
+  }
+
+  // step 1: figure out negation, etc.
+  this.parseNegate()
+
+  // step 2: expand braces
+  var set = this.globSet = this.braceExpand()
+
+  if (options.debug) this.debug = function debug() { console.error.apply(console, arguments) }
+
+  this.debug(this.pattern, set)
+
+  // step 3: now we have a set, so turn each one into a series of path-portion
+  // matching patterns.
+  // These will be regexps, except in the case of "**", which is
+  // set to the GLOBSTAR object for globstar behavior,
+  // and will not contain any / characters
+  set = this.globParts = set.map(function (s) {
+    return s.split(slashSplit)
+  })
+
+  this.debug(this.pattern, set)
+
+  // glob --> regexps
+  set = set.map(function (s, si, set) {
+    return s.map(this.parse, this)
+  }, this)
+
+  this.debug(this.pattern, set)
+
+  // filter out everything that didn't compile properly.
+  set = set.filter(function (s) {
+    return s.indexOf(false) === -1
+  })
+
+  this.debug(this.pattern, set)
+
+  this.set = set
+}
+
+Minimatch.prototype.parseNegate = parseNegate
+function parseNegate () {
+  var pattern = this.pattern
+  var negate = false
+  var options = this.options
+  var negateOffset = 0
+
+  if (options.nonegate) return
+
+  for (var i = 0, l = pattern.length
+    ; i < l && pattern.charAt(i) === '!'
+    ; i++) {
+    negate = !negate
+    negateOffset++
+  }
+
+  if (negateOffset) this.pattern = pattern.substr(negateOffset)
+  this.negate = negate
+}
+
+// Brace expansion:
+// a{b,c}d -> abd acd
+// a{b,}c -> abc ac
+// a{0..3}d -> a0d a1d a2d a3d
+// a{b,c{d,e}f}g -> abg acdfg acefg
+// a{b,c}d{e,f}g -> abdeg acdeg abdeg abdfg
+//
+// Invalid sets are not expanded.
+// a{2..}b -> a{2..}b
+// a{b}c -> a{b}c
+minimatch.braceExpand = function (pattern, options) {
+  return braceExpand(pattern, options)
+}
+
+Minimatch.prototype.braceExpand = braceExpand
+
+function braceExpand (pattern, options) {
+  if (!options) {
+    if (this instanceof Minimatch) {
+      options = this.options
+    } else {
+      options = {}
+    }
+  }
+
+  pattern = typeof pattern === 'undefined'
+    ? this.pattern : pattern
+
+  assertValidPattern(pattern)
+
+  // Thanks to Yeting Li <https://github.com/yetingli> for
+  // improving this regexp to avoid a ReDOS vulnerability.
+  if (options.nobrace || !/\{(?:(?!\{).)*\}/.test(pattern)) {
+    // shortcut. no need to expand.
+    return [pattern]
+  }
+
+  return expand(pattern)
+}
+
+var MAX_PATTERN_LENGTH = 1024 * 64
+var assertValidPattern = function (pattern) {
+  if (typeof pattern !== 'string') {
+    throw new TypeError('invalid pattern')
+  }
+
+  if (pattern.length > MAX_PATTERN_LENGTH) {
+    throw new TypeError('pattern is too long')
+  }
+}
+
+// parse a component of the expanded set.
+// At this point, no pattern may contain "/" in it
+// so we're going to return a 2d array, where each entry is the full
+// pattern, split on '/', and then turned into a regular expression.
+// A regexp is made at the end which joins each array with an
+// escaped /, and another full one which joins each regexp with |.
+//
+// Following the lead of Bash 4.1, note that "**" only has special meaning
+// when it is the *only* thing in a path portion.  Otherwise, any series
+// of * is equivalent to a single *.  Globstar behavior is enabled by
+// default, and can be disabled by setting options.noglobstar.
+Minimatch.prototype.parse = parse
+var SUBPARSE = {}
+function parse (pattern, isSub) {
+  assertValidPattern(pattern)
+
+  var options = this.options
+
+  // shortcuts
+  if (pattern === '**') {
+    if (!options.noglobstar)
+      return GLOBSTAR
+    else
+      pattern = '*'
+  }
+  if (pattern === '') return ''
+
+  var re = ''
+  var hasMagic = !!options.nocase
+  var escaping = false
+  // ? => one single character
+  var patternListStack = []
+  var negativeLists = []
+  var stateChar
+  var inClass = false
+  var reClassStart = -1
+  var classStart = -1
+  // . and .. never match anything that doesn't start with .,
+  // even when options.dot is set.
+  var patternStart = pattern.charAt(0) === '.' ? '' // anything
+  // not (start or / followed by . or .. followed by / or end)
+  : options.dot ? '(?!(?:^|\\\/)\\.{1,2}(?:$|\\\/))'
+  : '(?!\\.)'
+  var self = this
+
+  function clearStateChar () {
+    if (stateChar) {
+      // we had some state-tracking character
+      // that wasn't consumed by this pass.
+      switch (stateChar) {
+        case '*':
+          re += star
+          hasMagic = true
+        break
+        case '?':
+          re += qmark
+          hasMagic = true
+        break
+        default:
+          re += '\\' + stateChar
+        break
+      }
+      self.debug('clearStateChar %j %j', stateChar, re)
+      stateChar = false
+    }
+  }
+
+  for (var i = 0, len = pattern.length, c
+    ; (i < len) && (c = pattern.charAt(i))
+    ; i++) {
+    this.debug('%s\t%s %s %j', pattern, i, re, c)
+
+    // skip over any that are escaped.
+    if (escaping && reSpecials[c]) {
+      re += '\\' + c
+      escaping = false
+      continue
+    }
+
+    switch (c) {
+      /* istanbul ignore next */
+      case '/': {
+        // completely not allowed, even escaped.
+        // Should already be path-split by now.
+        return false
+      }
+
+      case '\\':
+        clearStateChar()
+        escaping = true
+      continue
+
+      // the various stateChar values
+      // for the "extglob" stuff.
+      case '?':
+      case '*':
+      case '+':
+      case '@':
+      case '!':
+        this.debug('%s\t%s %s %j <-- stateChar', pattern, i, re, c)
+
+        // all of those are literals inside a class, except that
+        // the glob [!a] means [^a] in regexp
+        if (inClass) {
+          this.debug('  in class')
+          if (c === '!' && i === classStart + 1) c = '^'
+          re += c
+          continue
+        }
+
+        // if we already have a stateChar, then it means
+        // that there was something like ** or +? in there.
+        // Handle the stateChar, then proceed with this one.
+        self.debug('call clearStateChar %j', stateChar)
+        clearStateChar()
+        stateChar = c
+        // if extglob is disabled, then +(asdf|foo) isn't a thing.
+        // just clear the statechar *now*, rather than even diving into
+        // the patternList stuff.
+        if (options.noext) clearStateChar()
+      continue
+
+      case '(':
+        if (inClass) {
+          re += '('
+          continue
+        }
+
+        if (!stateChar) {
+          re += '\\('
+          continue
+        }
+
+        patternListStack.push({
+          type: stateChar,
+          start: i - 1,
+          reStart: re.length,
+          open: plTypes[stateChar].open,
+          close: plTypes[stateChar].close
+        })
+        // negation is (?:(?!js)[^/]*)
+        re += stateChar === '!' ? '(?:(?!(?:' : '(?:'
+        this.debug('plType %j %j', stateChar, re)
+        stateChar = false
+      continue
+
+      case ')':
+        if (inClass || !patternListStack.length) {
+          re += '\\)'
+          continue
+        }
+
+        clearStateChar()
+        hasMagic = true
+        var pl = patternListStack.pop()
+        // negation is (?:(?!js)[^/]*)
+        // The others are (?:<pattern>)<type>
+        re += pl.close
+        if (pl.type === '!') {
+          negativeLists.push(pl)
+        }
+        pl.reEnd = re.length
+      continue
+
+      case '|':
+        if (inClass || !patternListStack.length || escaping) {
+          re += '\\|'
+          escaping = false
+          continue
+        }
+
+        clearStateChar()
+        re += '|'
+      continue
+
+      // these are mostly the same in regexp and glob
+      case '[':
+        // swallow any state-tracking char before the [
+        clearStateChar()
+
+        if (inClass) {
+          re += '\\' + c
+          continue
+        }
+
+        inClass = true
+        classStart = i
+        reClassStart = re.length
+        re += c
+      continue
+
+      case ']':
+        //  a right bracket shall lose its special
+        //  meaning and represent itself in
+        //  a bracket expression if it occurs
+        //  first in the list.  -- POSIX.2 2.8.3.2
+        if (i === classStart + 1 || !inClass) {
+          re += '\\' + c
+          escaping = false
+          continue
+        }
+
+        // handle the case where we left a class open.
+        // "[z-a]" is valid, equivalent to "\[z-a\]"
+        // split where the last [ was, make sure we don't have
+        // an invalid re. if so, re-walk the contents of the
+        // would-be class to re-translate any characters that
+        // were passed through as-is
+        // TODO: It would probably be faster to determine this
+        // without a try/catch and a new RegExp, but it's tricky
+        // to do safely.  For now, this is safe and works.
+        var cs = pattern.substring(classStart + 1, i)
+        try {
+          RegExp('[' + cs + ']')
+        } catch (er) {
+          // not a valid class!
+          var sp = this.parse(cs, SUBPARSE)
+          re = re.substr(0, reClassStart) + '\\[' + sp[0] + '\\]'
+          hasMagic = hasMagic || sp[1]
+          inClass = false
+          continue
+        }
+
+        // finish up the class.
+        hasMagic = true
+        inClass = false
+        re += c
+      continue
+
+      default:
+        // swallow any state char that wasn't consumed
+        clearStateChar()
+
+        if (escaping) {
+          // no need
+          escaping = false
+        } else if (reSpecials[c]
+          && !(c === '^' && inClass)) {
+          re += '\\'
+        }
+
+        re += c
+
+    } // switch
+  } // for
+
+  // handle the case where we left a class open.
+  // "[abc" is valid, equivalent to "\[abc"
+  if (inClass) {
+    // split where the last [ was, and escape it
+    // this is a huge pita.  We now have to re-walk
+    // the contents of the would-be class to re-translate
+    // any characters that were passed through as-is
+    cs = pattern.substr(classStart + 1)
+    sp = this.parse(cs, SUBPARSE)
+    re = re.substr(0, reClassStart) + '\\[' + sp[0]
+    hasMagic = hasMagic || sp[1]
+  }
+
+  // handle the case where we had a +( thing at the *end*
+  // of the pattern.
+  // each pattern list stack adds 3 chars, and we need to go through
+  // and escape any | chars that were passed through as-is for the regexp.
+  // Go through and escape them, taking care not to double-escape any
+  // | chars that were already escaped.
+  for (pl = patternListStack.pop(); pl; pl = patternListStack.pop()) {
+    var tail = re.slice(pl.reStart + pl.open.length)
+    this.debug('setting tail', re, pl)
+    // maybe some even number of \, then maybe 1 \, followed by a |
+    tail = tail.replace(/((?:\\{2}){0,64})(\\?)\|/g, function (_, $1, $2) {
+      if (!$2) {
+        // the | isn't already escaped, so escape it.
+        $2 = '\\'
+      }
+
+      // need to escape all those slashes *again*, without escaping the
+      // one that we need for escaping the | character.  As it works out,
+      // escaping an even number of slashes can be done by simply repeating
+      // it exactly after itself.  That's why this trick works.
+      //
+      // I am sorry that you have to see this.
+      return $1 + $1 + $2 + '|'
+    })
+
+    this.debug('tail=%j\n   %s', tail, tail, pl, re)
+    var t = pl.type === '*' ? star
+      : pl.type === '?' ? qmark
+      : '\\' + pl.type
+
+    hasMagic = true
+    re = re.slice(0, pl.reStart) + t + '\\(' + tail
+  }
+
+  // handle trailing things that only matter at the very end.
+  clearStateChar()
+  if (escaping) {
+    // trailing \\
+    re += '\\\\'
+  }
+
+  // only need to apply the nodot start if the re starts with
+  // something that could conceivably capture a dot
+  var addPatternStart = false
+  switch (re.charAt(0)) {
+    case '[': case '.': case '(': addPatternStart = true
+  }
+
+  // Hack to work around lack of negative lookbehind in JS
+  // A pattern like: *.!(x).!(y|z) needs to ensure that a name
+  // like 'a.xyz.yz' doesn't match.  So, the first negative
+  // lookahead, has to look ALL the way ahead, to the end of
+  // the pattern.
+  for (var n = negativeLists.length - 1; n > -1; n--) {
+    var nl = negativeLists[n]
+
+    var nlBefore = re.slice(0, nl.reStart)
+    var nlFirst = re.slice(nl.reStart, nl.reEnd - 8)
+    var nlLast = re.slice(nl.reEnd - 8, nl.reEnd)
+    var nlAfter = re.slice(nl.reEnd)
+
+    nlLast += nlAfter
+
+    // Handle nested stuff like *(*.js|!(*.json)), where open parens
+    // mean that we should *not* include the ) in the bit that is considered
+    // "after" the negated section.
+    var openParensBefore = nlBefore.split('(').length - 1
+    var cleanAfter = nlAfter
+    for (i = 0; i < openParensBefore; i++) {
+      cleanAfter = cleanAfter.replace(/\)[+*?]?/, '')
+    }
+    nlAfter = cleanAfter
+
+    var dollar = ''
+    if (nlAfter === '' && isSub !== SUBPARSE) {
+      dollar = '$'
+    }
+    var newRe = nlBefore + nlFirst + nlAfter + dollar + nlLast
+    re = newRe
+  }
+
+  // if the re is not "" at this point, then we need to make sure
+  // it doesn't match against an empty path part.
+  // Otherwise a/* will match a/, which it should not.
+  if (re !== '' && hasMagic) {
+    re = '(?=.)' + re
+  }
+
+  if (addPatternStart) {
+    re = patternStart + re
+  }
+
+  // parsing just a piece of a larger pattern.
+  if (isSub === SUBPARSE) {
+    return [re, hasMagic]
+  }
+
+  // skip the regexp for non-magical patterns
+  // unescape anything in it, though, so that it'll be
+  // an exact match against a file etc.
+  if (!hasMagic) {
+    return globUnescape(pattern)
+  }
+
+  var flags = options.nocase ? 'i' : ''
+  try {
+    var regExp = new RegExp('^' + re + '$', flags)
+  } catch (er) /* istanbul ignore next - should be impossible */ {
+    // If it was an invalid regular expression, then it can't match
+    // anything.  This trick looks for a character after the end of
+    // the string, which is of course impossible, except in multi-line
+    // mode, but it's not a /m regex.
+    return new RegExp('$.')
+  }
+
+  regExp._glob = pattern
+  regExp._src = re
+
+  return regExp
+}
+
+minimatch.makeRe = function (pattern, options) {
+  return new Minimatch(pattern, options || {}).makeRe()
+}
+
+Minimatch.prototype.makeRe = makeRe
+function makeRe () {
+  if (this.regexp || this.regexp === false) return this.regexp
+
+  // at this point, this.set is a 2d array of partial
+  // pattern strings, or "**".
+  //
+  // It's better to use .match().  This function shouldn't
+  // be used, really, but it's pretty convenient sometimes,
+  // when you just want to work with a regex.
+  var set = this.set
+
+  if (!set.length) {
+    this.regexp = false
+    return this.regexp
+  }
+  var options = this.options
+
+  var twoStar = options.noglobstar ? star
+    : options.dot ? twoStarDot
+    : twoStarNoDot
+  var flags = options.nocase ? 'i' : ''
+
+  var re = set.map(function (pattern) {
+    return pattern.map(function (p) {
+      return (p === GLOBSTAR) ? twoStar
+      : (typeof p === 'string') ? regExpEscape(p)
+      : p._src
+    }).join('\\\/')
+  }).join('|')
+
+  // must match entire pattern
+  // ending in a * or ** will make it less strict.
+  re = '^(?:' + re + ')$'
+
+  // can match anything, as long as it's not this.
+  if (this.negate) re = '^(?!' + re + ').*$'
+
+  try {
+    this.regexp = new RegExp(re, flags)
+  } catch (ex) /* istanbul ignore next - should be impossible */ {
+    this.regexp = false
+  }
+  return this.regexp
+}
+
+minimatch.match = function (list, pattern, options) {
+  options = options || {}
+  var mm = new Minimatch(pattern, options)
+  list = list.filter(function (f) {
+    return mm.match(f)
+  })
+  if (mm.options.nonull && !list.length) {
+    list.push(pattern)
+  }
+  return list
+}
+
+Minimatch.prototype.match = function match (f, partial) {
+  if (typeof partial === 'undefined') partial = this.partial
+  this.debug('match', f, this.pattern)
+  // short-circuit in the case of busted things.
+  // comments, etc.
+  if (this.comment) return false
+  if (this.empty) return f === ''
+
+  if (f === '/' && partial) return true
+
+  var options = this.options
+
+  // windows: need to use /, not \
+  if (path.sep !== '/') {
+    f = f.split(path.sep).join('/')
+  }
+
+  // treat the test path as a set of pathparts.
+  f = f.split(slashSplit)
+  this.debug(this.pattern, 'split', f)
+
+  // just ONE of the pattern sets in this.set needs to match
+  // in order for it to be valid.  If negating, then just one
+  // match means that we have failed.
+  // Either way, return on the first hit.
+
+  var set = this.set
+  this.debug(this.pattern, 'set', set)
+
+  // Find the basename of the path by looking for the last non-empty segment
+  var filename
+  var i
+  for (i = f.length - 1; i >= 0; i--) {
+    filename = f[i]
+    if (filename) break
+  }
+
+  for (i = 0; i < set.length; i++) {
+    var pattern = set[i]
+    var file = f
+    if (options.matchBase && pattern.length === 1) {
+      file = [filename]
+    }
+    var hit = this.matchOne(file, pattern, partial)
+    if (hit) {
+      if (options.flipNegate) return true
+      return !this.negate
+    }
+  }
+
+  // didn't get any hits.  this is success if it's a negative
+  // pattern, failure otherwise.
+  if (options.flipNegate) return false
+  return this.negate
+}
+
+// set partial to true to test if, for example,
+// "/a/b" matches the start of "/*/b/*/d"
+// Partial means, if you run out of file before you run
+// out of pattern, then that's fine, as long as all
+// the parts match.
+Minimatch.prototype.matchOne = function (file, pattern, partial) {
+  var options = this.options
+
+  this.debug('matchOne',
+    { 'this': this, file: file, pattern: pattern })
+
+  this.debug('matchOne', file.length, pattern.length)
+
+  for (var fi = 0,
+      pi = 0,
+      fl = file.length,
+      pl = pattern.length
+      ; (fi < fl) && (pi < pl)
+      ; fi++, pi++) {
+    this.debug('matchOne loop')
+    var p = pattern[pi]
+    var f = file[fi]
+
+    this.debug(pattern, p, f)
+
+    // should be impossible.
+    // some invalid regexp stuff in the set.
+    /* istanbul ignore if */
+    if (p === false) return false
+
+    if (p === GLOBSTAR) {
+      this.debug('GLOBSTAR', [pattern, p, f])
+
+      // "**"
+      // a/**/b/**/c would match the following:
+      // a/b/x/y/z/c
+      // a/x/y/z/b/c
+      // a/b/x/b/x/c
+      // a/b/c
+      // To do this, take the rest of the pattern after
+      // the **, and see if it would match the file remainder.
+      // If so, return success.
+      // If not, the ** "swallows" a segment, and try again.
+      // This is recursively awful.
+      //
+      // a/**/b/**/c matching a/b/x/y/z/c
+      // - a matches a
+      // - doublestar
+      //   - matchOne(b/x/y/z/c, b/**/c)
+      //     - b matches b
+      //     - doublestar
+      //       - matchOne(x/y/z/c, c) -> no
+      //       - matchOne(y/z/c, c) -> no
+      //       - matchOne(z/c, c) -> no
+      //       - matchOne(c, c) yes, hit
+      var fr = fi
+      var pr = pi + 1
+      if (pr === pl) {
+        this.debug('** at the end')
+        // a ** at the end will just swallow the rest.
+        // We have found a match.
+        // however, it will not swallow /.x, unless
+        // options.dot is set.
+        // . and .. are *never* matched by **, for explosively
+        // exponential reasons.
+        for (; fi < fl; fi++) {
+          if (file[fi] === '.' || file[fi] === '..' ||
+            (!options.dot && file[fi].charAt(0) === '.')) return false
+        }
+        return true
+      }
+
+      // ok, let's see if we can swallow whatever we can.
+      while (fr < fl) {
+        var swallowee = file[fr]
+
+        this.debug('\nglobstar while', file, fr, pattern, pr, swallowee)
+
+        // XXX remove this slice.  Just pass the start index.
+        if (this.matchOne(file.slice(fr), pattern.slice(pr), partial)) {
+          this.debug('globstar found match!', fr, fl, swallowee)
+          // found a match.
+          return true
+        } else {
+          // can't swallow "." or ".." ever.
+          // can only swallow ".foo" when explicitly asked.
+          if (swallowee === '.' || swallowee === '..' ||
+            (!options.dot && swallowee.charAt(0) === '.')) {
+            this.debug('dot detected!', file, fr, pattern, pr)
+            break
+          }
+
+          // ** swallows a segment, and continue.
+          this.debug('globstar swallow a segment, and continue')
+          fr++
+        }
+      }
+
+      // no match was found.
+      // However, in partial mode, we can't say this is necessarily over.
+      // If there's more *pattern* left, then
+      /* istanbul ignore if */
+      if (partial) {
+        // ran out of file
+        this.debug('\n>>> no match, partial?', file, fr, pattern, pr)
+        if (fr === fl) return true
+      }
+      return false
+    }
+
+    // something other than **
+    // non-magic patterns just have to match exactly
+    // patterns with magic have been turned into regexps.
+    var hit
+    if (typeof p === 'string') {
+      hit = f === p
+      this.debug('string match', p, f, hit)
+    } else {
+      hit = f.match(p)
+      this.debug('pattern match', p, f, hit)
+    }
+
+    if (!hit) return false
+  }
+
+  // Note: ending in / means that we'll get a final ""
+  // at the end of the pattern.  This can only match a
+  // corresponding "" at the end of the file.
+  // If the file ends in /, then it can only match a
+  // a pattern that ends in /, unless the pattern just
+  // doesn't have any more for it. But, a/b/ should *not*
+  // match "a/b/*", even though "" matches against the
+  // [^/]*? pattern, except in partial mode, where it might
+  // simply not be reached yet.
+  // However, a/b/ should still satisfy a/*
+
+  // now either we fell off the end of the pattern, or we're done.
+  if (fi === fl && pi === pl) {
+    // ran out of pattern and filename at the same time.
+    // an exact hit!
+    return true
+  } else if (fi === fl) {
+    // ran out of file, but still had pattern left.
+    // this is ok if we're doing the match as part of
+    // a glob fs traversal.
+    return partial
+  } else /* istanbul ignore else */ if (pi === pl) {
+    // ran out of pattern, still have file left.
+    // this is only acceptable if we're on the very last
+    // empty segment of a file with a trailing slash.
+    // a/* should match a/b/
+    return (fi === fl - 1) && (file[fi] === '')
+  }
+
+  // should be unreachable.
+  /* istanbul ignore next */
+  throw new Error('wtf?')
+}
+
+// replace stuff like \* with *
+function globUnescape (s) {
+  return s.replace(/\\(.)/g, '$1')
+}
+
+function regExpEscape (s) {
+  return s.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&')
+}
+
 
 /***/ }),
 
@@ -116829,6 +118346,25 @@ module.exports = eval("require")("utf-8-validate");
 
 /***/ }),
 
+/***/ 19869:
+/***/ ((module) => {
+
+function webpackEmptyAsyncContext(req) {
+	// Here Promise.resolve().then() is used instead of new Promise() to prevent
+	// uncaught exception popping up in devtools
+	return Promise.resolve().then(() => {
+		var e = new Error("Cannot find module '" + req + "'");
+		e.code = 'MODULE_NOT_FOUND';
+		throw e;
+	});
+}
+webpackEmptyAsyncContext.keys = () => ([]);
+webpackEmptyAsyncContext.resolve = webpackEmptyAsyncContext;
+webpackEmptyAsyncContext.id = 19869;
+module.exports = webpackEmptyAsyncContext;
+
+/***/ }),
+
 /***/ 42613:
 /***/ ((module) => {
 
@@ -117078,6 +118614,13 @@ module.exports = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:timers"
 /***/ ((module) => {
 
 module.exports = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:tls");
+
+/***/ }),
+
+/***/ 73136:
+/***/ ((module) => {
+
+module.exports = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:url");
 
 /***/ }),
 
@@ -124398,7 +125941,7 @@ function jsonFormula(
 
 /***/ }),
 
-/***/ 50948:
+/***/ 54030:
 /***/ ((__unused_webpack___webpack_module__, __webpack_exports__, __nccwpck_require__) => {
 
 
@@ -124504,8 +126047,8 @@ var semver = __nccwpck_require__(62088);
 var external_node_http_ = __nccwpck_require__(37067);
 ;// CONCATENATED MODULE: external "node:https"
 const external_node_https_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:https");
-;// CONCATENATED MODULE: external "node:url"
-const external_node_url_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:url");
+// EXTERNAL MODULE: external "node:url"
+var external_node_url_ = __nccwpck_require__(73136);
 // EXTERNAL MODULE: ./node_modules/proxy-agent/dist/index.js
 var dist = __nccwpck_require__(75273);
 ;// CONCATENATED MODULE: ./node_modules/@puppeteer/browsers/lib/esm/httpUtil.js
@@ -124539,7 +126082,7 @@ function httpRequest(url, method, response, keepAlive = true) {
         path: url.pathname + url.search,
         method,
         headers: keepAlive ? { Connection: 'keep-alive' } : undefined,
-        auth: (0,external_node_url_namespaceObject.urlToHttpOptions)(url).auth,
+        auth: (0,external_node_url_.urlToHttpOptions)(url).auth,
         agent: new dist.ProxyAgent(),
     };
     const requestCallback = (res) => {
@@ -124547,7 +126090,7 @@ function httpRequest(url, method, response, keepAlive = true) {
             res.statusCode >= 300 &&
             res.statusCode < 400 &&
             res.headers.location) {
-            httpRequest(new external_node_url_namespaceObject.URL(res.headers.location), method, response);
+            httpRequest(new external_node_url_.URL(res.headers.location), method, response);
             // consume response data to free up memory
             // And prevents the connection from being kept alive
             res.resume();
@@ -127165,7 +128708,7 @@ class CLI {
 /* harmony export */ __nccwpck_require__.d(__webpack_exports__, {
 /* harmony export */   convertPuppeteerChannelToBrowsersChannel: () => (/* binding */ convertPuppeteerChannelToBrowsersChannel)
 /* harmony export */ });
-/* harmony import */ var _puppeteer_browsers__WEBPACK_IMPORTED_MODULE_0__ = __nccwpck_require__(50948);
+/* harmony import */ var _puppeteer_browsers__WEBPACK_IMPORTED_MODULE_0__ = __nccwpck_require__(54030);
 /**
  * @license
  * Copyright 2020 Google Inc.
@@ -151028,7 +152571,7 @@ async function getConnectionTransport(options) {
         };
     }
     else if (options.channel && isNode) {
-        const { detectBrowserPlatform, resolveDefaultUserDataDir, Browser } = await Promise.resolve(/* import() */).then(__nccwpck_require__.bind(__nccwpck_require__, 50948));
+        const { detectBrowserPlatform, resolveDefaultUserDataDir, Browser } = await Promise.resolve(/* import() */).then(__nccwpck_require__.bind(__nccwpck_require__, 54030));
         const platform = detectBrowserPlatform();
         if (!platform) {
             throw new Error('Could not detect required browser platform');
@@ -151274,8 +152817,8 @@ var promises_ = __nccwpck_require__(51455);
 var external_node_os_ = __nccwpck_require__(48161);
 // EXTERNAL MODULE: external "node:path"
 var external_node_path_ = __nccwpck_require__(76760);
-// EXTERNAL MODULE: ./node_modules/@puppeteer/browsers/lib/esm/main.js + 19 modules
-var main = __nccwpck_require__(50948);
+// EXTERNAL MODULE: ./node_modules/@puppeteer/browsers/lib/esm/main.js + 18 modules
+var main = __nccwpck_require__(54030);
 // EXTERNAL MODULE: external "node:fs"
 var external_node_fs_ = __nccwpck_require__(73024);
 // EXTERNAL MODULE: ./node_modules/puppeteer-core/lib/esm/puppeteer/node/NodeWebSocketTransport.js + 1 modules
@@ -182614,6 +184157,7 @@ If you want to optimize development server performance, you can manually bundle 
       ootbPropertyShadow: 'Custom property/event duplicates an OOTB one (reuse the built-in)',
       fragmentPathValidator: 'globals.fragment path not found in the linked fragment JSON hierarchy',
       componentModelConcern: 'Component view reinvents a model-owned concern (display format / constraint / DOM change)',
+      componentModelDrift: 'Component model duplicates an OOTB prop, or the view reads a properties.<key> the model never declares',
     };
 
     const suggestions = [];
@@ -190268,8 +191812,14 @@ class RuleVsCodeAnalyzer {
         severity: 'error',
         type: 'value-visibility-logic-in-js',
         message: `Function '${fnName}' only sets value/visible/enabled on the model (no async/DOM/`
-          + 'request). Author it as a value/visibility RULE (fd:rules expression) — component JS is '
-          + 'web-only; value→derived mapping belongs in authored rules.',
+          + 'request). If this is a DERIVED value (recomputes from other fields), author it as a '
+          + 'value/visibility RULE (fd:rules expression) — component JS is web-only and a rule rides '
+          + 'the model. EXCEPTION — keep it imperative if this is a ONE-SHOT SEED of user-editable '
+          + 'data (e.g. prefilling an address/name from a goldenRecord snapshot at init): that value is '
+          + 'Class-1 dataRef data, restored via importData on resume and editable by the user. A value '
+          + 'rule would reclassify it as derived (Class-2) and RE-FIRE on every input change — '
+          + "overwriting the user's edit / the restored value on resume. If that's the case, this is a "
+          + 'false positive; suppress it with `// eslint-disable-next-line aem-forms/rule-vs-code`.',
         file,
         line: setLine,
       });
@@ -190928,7 +192478,271 @@ class CustomFnCorrectnessAnalyzer {
   }
 }
 
+;// CONCATENATED MODULE: ./src/analyzers/fragment-path-validator-analyzer.js
+
+
+
+
+/**
+ * Form/Fragment Path-Validator Analyzer
+ *
+ * Form and fragment JS reference their fields by hierarchy — `globals.fragment.<root>.<panel>.<field>`
+ * in a fragment, `globals.form.<panel>.<field>` in a top-level form. That chain must actually EXIST,
+ * in that parent→child order, in the authored JSON. A typo or a stale rename (`loanInputPanel` renamed
+ * in JSON but not JS) resolves to `undefined` at runtime — a silent dead read. This analyzer verifies
+ * each referenced chain against the linked JSON hierarchy.
+ *
+ * ── LINKING (a JSDoc tag names the JSON and implies which accessor root to validate) ─────────────
+ * A file opts in with ONE file-level JSDoc tag naming its JCR/content path (NOT the CRISPR file):
+ *   - `@fragmentPath /content/forms/af/…/loanoffer-a2a`  → validate `globals.fragment.*` chains.
+ *   - `@formPath     /content/forms/af/…/my-journey`     → validate `globals.form.*` chains.
+ *
+ * The JCR path resolves to the on-disk JSON by matching a jsonFiles entry whose path ends with
+ * `<jcrPath>.json` (the CRISPR mirror lives at `local-form-json/<jcrPath>.json`). Without the tag, or
+ * when the linked JSON isn't in the analyzed set, the file is SKIPPED (fail-safe). A file that
+ * references `globals.<root>.*` fields but has NO matching tag emits a single `warning` nudging authors
+ * to add it, never an error.
+ *
+ * Finding `fragment-path-not-in-json` (error): a referenced chain absent from the JSON hierarchy. Only
+ * NODE-NAME segments are checked — tail runtime accessors (`.$value`, `.$properties`, method calls) and
+ * computed access (`globals.fragment[x]`) are ignored.
+ *
+ * Finding `nested-fragment-boundary-reach` (error): the chain DESCENDS past a node marked with a
+ * `fragmentPath` (CRISPR's nested-fragment marker) — i.e. the parent reaches into a child fragment's
+ * fields. That path exists in the flat JSON (the hierarchy walk goes through the boundary), so it's a
+ * distinct ownership violation, not a broken path: broadcast an event and let the child fill its own
+ * fields. Reading the boundary node itself is allowed; only a reach strictly BELOW it is flagged.
+ */
+class FragmentPathValidatorAnalyzer {
+  constructor(config = null) {
+    this.config = config;
+  }
+
+  // Tag → the globals accessor root it validates. `@fragmentPath` ⇒ globals.fragment, `@formPath` ⇒ globals.form.
+  static TAGS = [
+    { tag: 'fragmentPath', root: 'fragment' },
+    { tag: 'formPath', root: 'form' },
+  ];
+
+  // Read the FIRST recognized path tag. Returns { jcrPath, root } or null. The jcrPath is a LOGICAL
+  // JCR identity (e.g. /content/forms/af/…/loanoffer), not a filesystem path — so reject anything that
+  // could escape the form-JSON root when resolved to disk: `..` segments, a URL scheme, or a Windows
+  // drive/backslash. A malformed tag is treated as absent (null) rather than trusted.
+  static readPathTag(content) {
+    for (const { tag, root } of FragmentPathValidatorAnalyzer.TAGS) {
+      const m = new RegExp(`@${tag}\\s+(\\S+)`).exec(content || '');
+      if (!m) continue;
+      const jcrPath = m[1].replace(/\/+$/, '');
+      if (/(^|\/)\.\.(\/|$)/.test(jcrPath) || /^[a-z]+:/i.test(jcrPath) || /[\\]/.test(jcrPath)) return null;
+      return { jcrPath, root };
+    }
+    return null;
+  }
+
+  // Runtime accessors / non-node tail segments that are NOT JSON hierarchy nodes.
+  static NON_NODE_SEG = new Set(['$value', '$properties', 'properties', '$name', '$qualifiedName', 'value', '$items']);
+
+  // Build the set of valid parent→child name-chains from a form/fragment JSON (dot-joined, root-relative).
+  // Also records NESTED-FRAGMENT BOUNDARIES: a node carrying a `fragmentPath` property is a nested
+  // fragment (CRISPR marks an embedded fragment this way, e.g. `assistedByBankFragment` inside
+  // `loanoffer-a2a`). Everything under such a node belongs to the CHILD fragment, not this one — so we
+  // record the boundary's dot-path + its fragmentPath so a reach that DESCENDS past it can be flagged.
+  static jsonPathSet(json) {
+    const paths = new Set();
+    const roots = new Set();
+    const boundaries = []; // { path: 'loanOfferRoot.assistedByBankFragment', fragmentPath: '/…/assisted-by-bank' }
+    const walkNode = (n, prefix) => {
+      if (!n || typeof n !== 'object') return;
+      const nm = typeof n.name === 'string' ? n.name : null;
+      const cur = nm ? [...prefix, nm] : prefix;
+      if (nm) { paths.add(cur.join('.')); if (cur.length === 1) roots.add(nm); }
+      // A named node with a TOP-LEVEL `fragmentPath` = a nested fragment. (This is CRISPR's unique
+      // embedded-fragment marker — exactly one per embed. NOT `properties['fd:path']`, which is the JCR
+      // path present on EVERY node and would flag the whole tree.)
+      if (nm && typeof n.fragmentPath === 'string' && n.fragmentPath && cur.length >= 1) {
+        boundaries.push({ path: cur.join('.'), fragmentPath: n.fragmentPath });
+      }
+      const items = n[':items'] || n.items;
+      if (items && typeof items === 'object') for (const c of Object.values(items)) walkNode(c, cur);
+    };
+    walkNode(json, []);
+    return { paths, roots, boundaries };
+  }
+
+  // Extract a `globals.<root>.<a>.<b>...` node-name chain (root = 'fragment' | 'form') from a member
+  // expression. Returns the node-name segments after `globals.<root>` (stopping at the first non-node
+  // tail seg), or null if it isn't a static chain on that root.
+  static chainForRoot(node, root) {
+    const segs = [];
+    let cur = node;
+    while (cur && cur.type === 'MemberExpression') {
+      if (cur.computed) return null;
+      if (cur.property?.type !== 'Identifier') return null;
+      segs.unshift(cur.property.name);
+      cur = cur.object;
+    }
+    if (cur?.type !== 'Identifier' || cur.name !== 'globals') return null;
+    if (segs[0] !== root) return null;
+    const after = segs.slice(1);
+    const nodes = [];
+    for (const s of after) {
+      if (FragmentPathValidatorAnalyzer.NON_NODE_SEG.has(s)) break;
+      nodes.push(s);
+    }
+    return nodes;
+  }
+
+  analyze(formJson, jsFiles = [], jsonFiles = []) {
+    const issues = [];
+    if (!Array.isArray(jsFiles) || jsFiles.length === 0) return { violations: 0, issues: [] };
+
+    const jsonByPath = [];
+    for (const jf of Array.isArray(jsonFiles) ? jsonFiles : []) {
+      if (!jf?.filename || jf.content == null) continue;
+      jsonByPath.push({ filename: (jf.filename || '').replace(/\\/g, '/'), content: jf.content });
+    }
+    const resolveJson = (jcrPath) => {
+      const want = `${jcrPath.replace(/^\/+/, '')}.json`;
+      const hit = jsonByPath.find((j) => j.filename.endsWith(want) || j.filename.endsWith(`/${want}`));
+      if (!hit) return null;
+      try { return typeof hit.content === 'string' ? JSON.parse(hit.content) : hit.content; } catch (e) {
+        lib_core.warning(`[FragmentPathValidator] JSON parse failed for ${hit.filename}: ${e.message}`);
+        return null;
+      }
+    };
+
+    for (const file of jsFiles) {
+      if (!file?.filename || file.content == null) continue;
+
+      let ast;
+      try {
+        ast = acorn_parse(file.content, { ecmaVersion: 'latest', sourceType: 'module', locations: true });
+      } catch (e) {
+        lib_core.warning(`[FragmentPathValidator] JS parse failed for ${file.filename}: ${e.message}`);
+        continue;
+      }
+
+      const tag = FragmentPathValidatorAnalyzer.readPathTag(file.content);
+      const root = tag ? tag.root : null;
+
+      // Collect MAXIMAL globals.<root>.* chains (depth >= 2). If no tag, probe BOTH roots to decide
+      // whether to nudge for an annotation. Skip an inner member whose parent extends the same chain.
+      const rootsToScan = root ? [root] : ['fragment', 'form'];
+      const chains = [];
+      let referencesAnyRoot = false;
+      ancestor(ast, {
+        MemberExpression: (m, _state, ancestors) => {
+          const parent = ancestors[ancestors.length - 2];
+          if (parent?.type === 'MemberExpression' && parent.object === m) return; // inner prefix → skip
+          for (const r of rootsToScan) {
+            const nodes = FragmentPathValidatorAnalyzer.chainForRoot(m, r);
+            if (nodes && nodes.length >= 2) {
+              referencesAnyRoot = true;
+              if (root) chains.push({ nodes, line: m.loc?.start.line });
+            }
+          }
+        },
+      });
+
+      if (!root) {
+        if (referencesAnyRoot) {
+          issues.push({
+            severity: 'warning',
+            type: 'fragment-path-missing-annotation',
+            file: file.filename,
+            line: 1,
+            message: `This JS references \`globals.fragment.*\`/\`globals.form.*\` fields but has no `
+              + `\`@fragmentPath\`/\`@formPath\` JSDoc tag naming its JCR content path. Add the matching tag `
+              + `(e.g. \`@fragmentPath /content/forms/af/…/<name>\`) so the field-hierarchy validator can `
+              + `verify these references against the authored JSON.`,
+          });
+        }
+        continue;
+      }
+      if (chains.length === 0) continue;
+
+      const json = resolveJson(tag.jcrPath);
+      if (!json) continue; // linked JSON not in the analyzed set → skip (fail-safe)
+
+      const { paths, roots, boundaries } = FragmentPathValidatorAnalyzer.jsonPathSet(json);
+      const seen = new Set();
+      for (const { nodes, line } of chains) {
+        const asIs = nodes.join('.');
+        const rootRelative = roots.has(nodes[0]) ? asIs : nodes.slice(1).join('.');
+
+        // Nested-fragment boundary: if this chain DESCENDS past a node marked with a fragmentPath, it
+        // reaches INTO a child fragment's fields (which that node embeds). The descending path exists in
+        // the flat JSON (the walk goes through the boundary), so this is checked separately, and FIRST —
+        // it's an ownership violation, not a broken path. Reading the boundary node itself is fine; only
+        // a reach BELOW it (its child root + deeper) is flagged. Both reads and writes count.
+        const boundary = boundaries.find((b) => (asIs === b.path || asIs.startsWith(`${b.path}.`)
+          || rootRelative === b.path || (rootRelative && rootRelative.startsWith(`${b.path}.`)))
+          && !(asIs === b.path || rootRelative === b.path)); // strictly BELOW the boundary
+        if (boundary) {
+          const childName = boundary.fragmentPath.split('/').filter(Boolean).pop();
+          const bkey = `boundary|${file.filename}|${line}|${asIs}`;
+          if (!seen.has(bkey)) {
+            seen.add(bkey);
+            issues.push({
+              severity: 'error',
+              type: 'nested-fragment-boundary-reach',
+              file: file.filename,
+              line,
+              path: `globals.${root}.${asIs}`,
+              message: `\`globals.${root}.${asIs}\` reaches INTO the nested fragment \`${boundary.path}\` `
+                + `(embeds \`${boundary.fragmentPath}\`). A fragment owns only its OWN fields and must never `
+                + `read or write a nested child fragment's fields directly — this couples the parent to the `
+                + `child's internal structure and breaks when the child is re-authored. Broadcast on the form `
+                + `— \`globals.functions.dispatchEvent(globals.form, 'custom:<event>', payload, true)\` — and `
+                + `let the \`${childName}\` fragment listen for \`custom:<event>\` and fill its OWN fields from `
+                + '`globals.event.payload`.',
+            });
+          }
+          continue;
+        }
+
+        if (paths.has(asIs) || (rootRelative && paths.has(rootRelative))) continue;
+
+        // Dedup vs foreign-fragment-root: a chain whose TOP segment isn't a known root of this JSON is
+        // a cross-fragment (foreign) reach, owned by ForeignFragmentRootAnalyzer — not a broken path
+        // here. Only "top IS my root, a DEEPER segment is broken" belongs to path-not-in-json. When
+        // there are no roots at all (shouldn't happen for a real form/fragment), fall through.
+        if (roots.size > 0 && !roots.has(nodes[0])) continue;
+
+        let broken = null;
+        for (let i = 2; i <= nodes.length; i += 1) {
+          const sub = nodes.slice(0, i).join('.');
+          const subRel = roots.has(nodes[0]) ? sub : nodes.slice(1, i).join('.');
+          if (!paths.has(sub) && !(subRel && paths.has(subRel))) { broken = nodes[i - 1]; break; }
+        }
+        const key = `${file.filename}|${line}|${asIs}`;
+        if (seen.has(key)) continue; seen.add(key);
+        issues.push({
+          severity: 'error',
+          type: 'fragment-path-not-in-json',
+          file: file.filename,
+          line,
+          path: `globals.${root}.${asIs}`,
+          message: `\`globals.${root}.${asIs}\` does not exist in the ${root === 'form' ? 'form' : 'fragment'} `
+            + `JSON hierarchy (${tag.jcrPath})${broken ? ` — \`${broken}\` is not a child at that level` : ''}. `
+            + `The reference resolves to \`undefined\` at runtime; fix the path or the JSON hierarchy.`,
+        });
+      }
+    }
+
+    return { violations: issues.length, issues };
+  }
+
+  compare(before, after) {
+    const b = before?.violations || 0;
+    const a = after?.violations || 0;
+    return { before: b, after: a, delta: a - b, regressed: a > b };
+  }
+}
+
 ;// CONCATENATED MODULE: ./src/analyzers/foreign-fragment-root-analyzer.js
+
+
 
 
 
@@ -190937,17 +192751,18 @@ class CustomFnCorrectnessAnalyzer {
  * Foreign-Fragment-Root Analyzer  (ownership: "never reach into another concern's fields")
  *
  * fragment-component-plan ownership rule: a fragment "owns the fields inside it" and must NEVER reach
- * into another concern's fields (e.g. a loan-offer fragment touching bank-details fields). A file
- * references exactly ONE `globals.fragment.<xRoot>` — its own. A reference to a DIFFERENT `<xRoot>` in
- * the same file is a statically-detectable cross-concern reach — in ANY layout (blocks/form,
- * blocks/fragment, journeys/<j>/fragments), so there is NO path gate.
+ * into another concern's fields (e.g. a loan-offer fragment touching bank-details fields).
  *
- * Heuristic: per JS file, collect all `globals.fragment.<name>Root` identifiers. The file's OWN root
- * is the most-referenced one; any OTHER root referenced in the same file is flagged. The signal is
- * self-identifying (referencing 2+ distinct fragment roots), so there is NO path gate at all — a
- * cross-fragment reach is a violation wherever the code lives (scripts/fragment, scripts/loans/**,
- * functions.js, journeys/<j>/fragments, …). A file that never writes `globals.fragment.<root>` yields
- * 0 roots and is skipped, so non-form JS never matches.
+ * TWO detection modes:
+ *  1. JSON-FIRST (precise) — when the file carries an `@fragmentPath`/`@formPath` tag and its linked
+ *     JSON is in the set, the file's OWN root(s) are the JSON's actual root names. Any
+ *     `globals.fragment.<X>...` whose top segment `<X>` is NOT one of those roots is a foreign reach.
+ *     This is exact (no frequency guessing) and correctly ignores `$`-accessors. To avoid
+ *     double-reporting, fragment-path-validator DEFERS chains whose top segment isn't a known root
+ *     (those are foreign, owned here); it keeps only "top IS my root, deeper segment broken".
+ *  2. HEURISTIC FALLBACK — no tag / linked JSON absent: collect all `globals.fragment.<name>`
+ *     identifiers (skipping `$`-accessors), take the most-referenced as the own root, flag the rest.
+ *     Self-identifying (needs 2+ distinct roots), so it runs in any layout with no path gate.
  *
  * NOT detectable here (stays human review): tier-misplacement where the logic touches only the
  * fragment's OWN fields but re-does what a component already owns (e.g. re-clamping a slider value) —
@@ -190960,9 +192775,33 @@ class ForeignFragmentRootAnalyzer {
     this.config = config;
   }
 
-  analyze(formJson, jsFiles = []) {
+  analyze(formJson, jsFiles = [], jsonFiles = []) {
     const issues = [];
+
+    // Resolver over the analyzed JSON set (same matching as fragment-path-validator).
+    const jsonByPath = [];
+    for (const jf of Array.isArray(jsonFiles) ? jsonFiles : []) {
+      if (!jf?.filename || jf.content == null) continue;
+      jsonByPath.push({ filename: (jf.filename || '').replace(/\\/g, '/'), content: jf.content });
+    }
+    const resolveJson = (jcrPath) => {
+      const want = `${jcrPath.replace(/^\/+/, '')}.json`;
+      const hit = jsonByPath.find((j) => j.filename.endsWith(want) || j.filename.endsWith(`/${want}`));
+      if (!hit) return null;
+      try { return typeof hit.content === 'string' ? JSON.parse(hit.content) : hit.content; } catch { return null; }
+    };
+
     for (const jsFile of jsFiles) {
+      // ── Mode 1: JSON-first, when a tag names a resolvable JSON ────────────────────────────────────
+      const tag = FragmentPathValidatorAnalyzer.readPathTag(jsFile.content || '');
+      if (tag) {
+        const json = resolveJson(tag.jcrPath);
+        if (json) {
+          const foreignIssues = this._analyzeWithJson(jsFile, tag, json);
+          if (foreignIssues !== null) { issues.push(...foreignIssues); continue; }
+        }
+      }
+      // ── Mode 2: heuristic fallback (no tag / JSON not in set) ─────────────────────────────────────
       // No path gate — the "2+ distinct globals.fragment.<root>" signal is self-identifying and
       // survives any layout. A file that never writes globals.fragment.<root> yields 0 roots → skipped
       // below. (Only AEM Forms custom-fn code writes globals.fragment.X, so non-form JS never matches.)
@@ -190983,6 +192822,11 @@ class ForeignFragmentRootAnalyzer {
             && m.object.property?.name === 'fragment'
             && m.property?.name) {
             const name = m.property.name;
+            // `$`-prefixed segments are runtime ACCESSORS on the fragment scope ($properties, $value,
+            // $name, $qualifiedName, $items, …), not fragment roots. `globals.fragment.$properties` is
+            // in fact the pattern fragment-globals-scope PRESCRIBES over globals.form.$properties — so
+            // counting it as a second "root" would flag the recommended fix as a foreign reach.
+            if (name.startsWith('$')) return;
             const cur = roots.get(name) || { count: 0, firstLine: m.loc?.start.line };
             cur.count += 1;
             roots.set(name, cur);
@@ -191015,6 +192859,59 @@ class ForeignFragmentRootAnalyzer {
       }
     }
     return { violations: issues.length, issues };
+  }
+
+  // Mode 1: precise foreign detection against the linked JSON. The file's OWN roots are the JSON's
+  // actual root names; a globals.<root>.<X>... chain whose top node-segment <X> is NOT a JSON root is a
+  // foreign reach. Returns an issues array, or null if the file references no static chains (let the
+  // caller fall back to the heuristic — e.g. a tag present but the file only uses computed access).
+  _analyzeWithJson(jsFile, tag, json) {
+    let ast;
+    try {
+      ast = acorn_parse(jsFile.content, { ecmaVersion: 'latest', sourceType: 'module', locations: true });
+    } catch (e) {
+      lib_core.warning(`[ForeignFragmentRoot] parse failed for ${jsFile.filename}: ${e.message}`);
+      return null;
+    }
+    const { roots } = FragmentPathValidatorAnalyzer.jsonPathSet(json);
+
+    // Collect maximal globals.<root>.* chains (same extraction path-validator uses).
+    const chains = [];
+    ancestor(ast, {
+      MemberExpression: (m, _state, ancestors) => {
+        const parent = ancestors[ancestors.length - 2];
+        if (parent?.type === 'MemberExpression' && parent.object === m) return; // inner prefix → skip
+        const nodes = FragmentPathValidatorAnalyzer.chainForRoot(m, tag.root);
+        if (nodes && nodes.length >= 1) chains.push({ nodes, line: m.loc?.start.line });
+      },
+    });
+    if (chains.length === 0) return null; // nothing static to judge → defer to heuristic
+
+    const issues = [];
+    const seen = new Set();
+    for (const { nodes, line } of chains) {
+      // The top node-segment must be one of the JSON's own roots. If the chain is written
+      // root-relative (its first segment IS a root), check that; else the first segment is the root.
+      const top = nodes[0];
+      if (roots.has(top)) continue; // own root → path-validator owns any deeper breakage, not us
+      // Not a known root — foreign reach. (A single bare segment that isn't a root is still foreign.)
+      const key = `${jsFile.filename}|${line}|${nodes.join('.')}`;
+      if (seen.has(key)) continue; seen.add(key);
+      const own = [...roots].join(', ') || '(none)';
+      issues.push({
+        severity: 'error',
+        type: 'foreign-fragment-root-access',
+        file: jsFile.filename,
+        line,
+        path: `globals.${tag.root}.${nodes.join('.')}`,
+        message: `\`globals.${tag.root}.${top}\` is not a root of this ${tag.root === 'form' ? 'form' : 'fragment'} `
+          + `(${tag.jcrPath}; own root(s): ${own}). A fragment owns only its OWN root's fields and must never `
+          + 'reach into another concern\'s fields. Broadcast on the form — `globals.functions.dispatchEvent('
+          + `globals.form, 'custom:<event>', payload, true)\` — and let the fragment that OWNS \`${top}\` listen `
+          + 'for `custom:<event>` and fill its OWN fields from `globals.event.payload`.',
+      });
+    }
+    return issues;
   }
 
   compare(before, after) {
@@ -191075,6 +192972,54 @@ function isCustomFnSurface(filename) {
     || /-rules\.js$/.test(f)
     || /^functions(\.source)?\.js$/.test(basename(filename))
     || /(^|\/)scripts\//.test(f);
+}
+
+/**
+ * Does a parsed JSON object have the xwalk component-authoring MODEL shape? A model carries a
+ * `definitions[]` array (with the xwalk `plugins` block that names the resource/template) and/or a
+ * `models[]` array of `{ id, fields[] }`. This is what distinguishes a real component model from any
+ * other `_`-prefixed JSON that happens to sit in a component folder (a fixture, a config blob, etc.).
+ * @param {object} obj - parsed JSON
+ */
+function hasComponentModelShape(obj) {
+  if (!obj || typeof obj !== 'object') return false;
+  const defs = Array.isArray(obj.definitions) ? obj.definitions : [];
+  const models = Array.isArray(obj.models) ? obj.models : [];
+  const defHasXwalk = defs.some((d) => d && typeof d === 'object' && d.plugins && typeof d.plugins === 'object');
+  const modelHasFields = models.some((m) => m && Array.isArray(m.fields));
+  return defHasXwalk || modelHasFields;
+}
+
+/**
+ * Component authoring MODEL JSON: `…/components/<name>/_<file>.json` — the `_`-prefixed model
+ * definition co-located with a component view (e.g. `_loan-range-slider-with-ticks.json`). This is the
+ * xwalk authoring surface (`definitions`/`models`), NOT runtime form JSON, so it must be routed to the
+ * model-aware analyzer rather than the runtime-JSON ones. Shared includes under `…/models/…` are NOT
+ * component models (they have no co-located view) and are excluded.
+ *
+ * Path is necessary but not sufficient — when `content` is supplied it is parsed and validated against
+ * the model shape (see hasComponentModelShape), so a stray `_x.json` in a component folder is NOT
+ * misclassified. Without content (path-only callers) the path check stands alone.
+ * @param {{filename: string, content?: string}|string} file
+ */
+function isComponentModelJson(file) {
+  const filename = typeof file === 'string' ? file : file?.filename;
+  if (!/(^|\/)components\/[^/]+\/_[^/]+\.json$/.test(norm(filename))) return false;
+  const content = typeof file === 'object' ? file?.content : undefined;
+  if (content == null) return true; // path-only caller — can't verify shape, trust the path
+  try { return hasComponentModelShape(JSON.parse(content)); } catch { return false; }
+}
+
+/**
+ * A shared model INCLUDE target: a `_`-prefixed JSON under a `…/models/…` dir (e.g.
+ * `models/form-common/_number-validation-fields.json`). These aren't analyzed themselves, but the
+ * component-model analyzer must SEE them to resolve a model's `...`-includes — otherwise a field a
+ * shared include provides would be falsely flagged as an undeclared read.
+ * @param {{filename: string}|string} file
+ */
+function isModelIncludeJson(file) {
+  const filename = typeof file === 'string' ? file : file?.filename;
+  return /(^|\/)models\/.*\/_[^/]+\.json$/.test(norm(filename)) || /(^|\/)models\/_[^/]+\.json$/.test(norm(filename));
 }
 
 ;// CONCATENATED MODULE: ./src/analyzers/navigation-in-custom-fn-analyzer.js
@@ -193680,213 +195625,6 @@ class OotbPropertyShadowAnalyzer {
   }
 }
 
-;// CONCATENATED MODULE: ./src/analyzers/fragment-path-validator-analyzer.js
-
-
-
-
-/**
- * Form/Fragment Path-Validator Analyzer
- *
- * Form and fragment JS reference their fields by hierarchy — `globals.fragment.<root>.<panel>.<field>`
- * in a fragment, `globals.form.<panel>.<field>` in a top-level form. That chain must actually EXIST,
- * in that parent→child order, in the authored JSON. A typo or a stale rename (`loanInputPanel` renamed
- * in JSON but not JS) resolves to `undefined` at runtime — a silent dead read. This analyzer verifies
- * each referenced chain against the linked JSON hierarchy.
- *
- * ── LINKING (a JSDoc tag names the JSON and implies which accessor root to validate) ─────────────
- * A file opts in with ONE file-level JSDoc tag naming its JCR/content path (NOT the CRISPR file):
- *   - `@fragmentPath /content/forms/af/…/loanoffer-a2a`  → validate `globals.fragment.*` chains.
- *   - `@formPath     /content/forms/af/…/my-journey`     → validate `globals.form.*` chains.
- *
- * The JCR path resolves to the on-disk JSON by matching a jsonFiles entry whose path ends with
- * `<jcrPath>.json` (the CRISPR mirror lives at `local-form-json/<jcrPath>.json`). Without the tag, or
- * when the linked JSON isn't in the analyzed set, the file is SKIPPED (fail-safe). A file that
- * references `globals.<root>.*` fields but has NO matching tag emits a single `warning` nudging authors
- * to add it, never an error.
- *
- * Finding `fragment-path-not-in-json` (error): a referenced chain absent from the JSON hierarchy. Only
- * NODE-NAME segments are checked — tail runtime accessors (`.$value`, `.$properties`, method calls) and
- * computed access (`globals.fragment[x]`) are ignored.
- */
-class FragmentPathValidatorAnalyzer {
-  constructor(config = null) {
-    this.config = config;
-  }
-
-  // Tag → the globals accessor root it validates. `@fragmentPath` ⇒ globals.fragment, `@formPath` ⇒ globals.form.
-  static TAGS = [
-    { tag: 'fragmentPath', root: 'fragment' },
-    { tag: 'formPath', root: 'form' },
-  ];
-
-  // Read the FIRST recognized path tag. Returns { jcrPath, root } or null. The jcrPath is a LOGICAL
-  // JCR identity (e.g. /content/forms/af/…/loanoffer), not a filesystem path — so reject anything that
-  // could escape the form-JSON root when resolved to disk: `..` segments, a URL scheme, or a Windows
-  // drive/backslash. A malformed tag is treated as absent (null) rather than trusted.
-  static readPathTag(content) {
-    for (const { tag, root } of FragmentPathValidatorAnalyzer.TAGS) {
-      const m = new RegExp(`@${tag}\\s+(\\S+)`).exec(content || '');
-      if (!m) continue;
-      const jcrPath = m[1].replace(/\/+$/, '');
-      if (/(^|\/)\.\.(\/|$)/.test(jcrPath) || /^[a-z]+:/i.test(jcrPath) || /[\\]/.test(jcrPath)) return null;
-      return { jcrPath, root };
-    }
-    return null;
-  }
-
-  // Runtime accessors / non-node tail segments that are NOT JSON hierarchy nodes.
-  static NON_NODE_SEG = new Set(['$value', '$properties', 'properties', '$name', '$qualifiedName', 'value', '$items']);
-
-  // Build the set of valid parent→child name-chains from a form/fragment JSON (dot-joined, root-relative).
-  static jsonPathSet(json) {
-    const paths = new Set();
-    const roots = new Set();
-    const walkNode = (n, prefix) => {
-      if (!n || typeof n !== 'object') return;
-      const nm = typeof n.name === 'string' ? n.name : null;
-      const cur = nm ? [...prefix, nm] : prefix;
-      if (nm) { paths.add(cur.join('.')); if (cur.length === 1) roots.add(nm); }
-      const items = n[':items'] || n.items;
-      if (items && typeof items === 'object') for (const c of Object.values(items)) walkNode(c, cur);
-    };
-    walkNode(json, []);
-    return { paths, roots };
-  }
-
-  // Extract a `globals.<root>.<a>.<b>...` node-name chain (root = 'fragment' | 'form') from a member
-  // expression. Returns the node-name segments after `globals.<root>` (stopping at the first non-node
-  // tail seg), or null if it isn't a static chain on that root.
-  static chainForRoot(node, root) {
-    const segs = [];
-    let cur = node;
-    while (cur && cur.type === 'MemberExpression') {
-      if (cur.computed) return null;
-      if (cur.property?.type !== 'Identifier') return null;
-      segs.unshift(cur.property.name);
-      cur = cur.object;
-    }
-    if (cur?.type !== 'Identifier' || cur.name !== 'globals') return null;
-    if (segs[0] !== root) return null;
-    const after = segs.slice(1);
-    const nodes = [];
-    for (const s of after) {
-      if (FragmentPathValidatorAnalyzer.NON_NODE_SEG.has(s)) break;
-      nodes.push(s);
-    }
-    return nodes;
-  }
-
-  analyze(formJson, jsFiles = [], jsonFiles = []) {
-    const issues = [];
-    if (!Array.isArray(jsFiles) || jsFiles.length === 0) return { violations: 0, issues: [] };
-
-    const jsonByPath = [];
-    for (const jf of Array.isArray(jsonFiles) ? jsonFiles : []) {
-      if (!jf?.filename || jf.content == null) continue;
-      jsonByPath.push({ filename: (jf.filename || '').replace(/\\/g, '/'), content: jf.content });
-    }
-    const resolveJson = (jcrPath) => {
-      const want = `${jcrPath.replace(/^\/+/, '')}.json`;
-      const hit = jsonByPath.find((j) => j.filename.endsWith(want) || j.filename.endsWith(`/${want}`));
-      if (!hit) return null;
-      try { return typeof hit.content === 'string' ? JSON.parse(hit.content) : hit.content; } catch (e) {
-        lib_core.warning(`[FragmentPathValidator] JSON parse failed for ${hit.filename}: ${e.message}`);
-        return null;
-      }
-    };
-
-    for (const file of jsFiles) {
-      if (!file?.filename || file.content == null) continue;
-
-      let ast;
-      try {
-        ast = acorn_parse(file.content, { ecmaVersion: 'latest', sourceType: 'module', locations: true });
-      } catch (e) {
-        lib_core.warning(`[FragmentPathValidator] JS parse failed for ${file.filename}: ${e.message}`);
-        continue;
-      }
-
-      const tag = FragmentPathValidatorAnalyzer.readPathTag(file.content);
-      const root = tag ? tag.root : null;
-
-      // Collect MAXIMAL globals.<root>.* chains (depth >= 2). If no tag, probe BOTH roots to decide
-      // whether to nudge for an annotation. Skip an inner member whose parent extends the same chain.
-      const rootsToScan = root ? [root] : ['fragment', 'form'];
-      const chains = [];
-      let referencesAnyRoot = false;
-      ancestor(ast, {
-        MemberExpression: (m, _state, ancestors) => {
-          const parent = ancestors[ancestors.length - 2];
-          if (parent?.type === 'MemberExpression' && parent.object === m) return; // inner prefix → skip
-          for (const r of rootsToScan) {
-            const nodes = FragmentPathValidatorAnalyzer.chainForRoot(m, r);
-            if (nodes && nodes.length >= 2) {
-              referencesAnyRoot = true;
-              if (root) chains.push({ nodes, line: m.loc?.start.line });
-            }
-          }
-        },
-      });
-
-      if (!root) {
-        if (referencesAnyRoot) {
-          issues.push({
-            severity: 'warning',
-            type: 'fragment-path-missing-annotation',
-            file: file.filename,
-            line: 1,
-            message: `This JS references \`globals.fragment.*\`/\`globals.form.*\` fields but has no `
-              + `\`@fragmentPath\`/\`@formPath\` JSDoc tag naming its JCR content path. Add the matching tag `
-              + `(e.g. \`@fragmentPath /content/forms/af/…/<name>\`) so the field-hierarchy validator can `
-              + `verify these references against the authored JSON.`,
-          });
-        }
-        continue;
-      }
-      if (chains.length === 0) continue;
-
-      const json = resolveJson(tag.jcrPath);
-      if (!json) continue; // linked JSON not in the analyzed set → skip (fail-safe)
-
-      const { paths, roots } = FragmentPathValidatorAnalyzer.jsonPathSet(json);
-      const seen = new Set();
-      for (const { nodes, line } of chains) {
-        const asIs = nodes.join('.');
-        const rootRelative = roots.has(nodes[0]) ? asIs : nodes.slice(1).join('.');
-        if (paths.has(asIs) || (rootRelative && paths.has(rootRelative))) continue;
-
-        let broken = null;
-        for (let i = 2; i <= nodes.length; i += 1) {
-          const sub = nodes.slice(0, i).join('.');
-          const subRel = roots.has(nodes[0]) ? sub : nodes.slice(1, i).join('.');
-          if (!paths.has(sub) && !(subRel && paths.has(subRel))) { broken = nodes[i - 1]; break; }
-        }
-        const key = `${file.filename}|${line}|${asIs}`;
-        if (seen.has(key)) continue; seen.add(key);
-        issues.push({
-          severity: 'error',
-          type: 'fragment-path-not-in-json',
-          file: file.filename,
-          line,
-          path: `globals.${root}.${asIs}`,
-          message: `\`globals.${root}.${asIs}\` does not exist in the ${root === 'form' ? 'form' : 'fragment'} `
-            + `JSON hierarchy (${tag.jcrPath})${broken ? ` — \`${broken}\` is not a child at that level` : ''}. `
-            + `The reference resolves to \`undefined\` at runtime; fix the path or the JSON hierarchy.`,
-        });
-      }
-    }
-
-    return { violations: issues.length, issues };
-  }
-
-  compare(before, after) {
-    const b = before?.violations || 0;
-    const a = after?.violations || 0;
-    return { before: b, after: a, delta: a - b, regressed: a > b };
-  }
-}
-
 ;// CONCATENATED MODULE: ./src/analyzers/component-owns-model-concern-analyzer.js
 
 
@@ -194118,6 +195856,292 @@ class ComponentOwnsModelConcernAnalyzer {
   }
 }
 
+;// CONCATENATED MODULE: ./src/analyzers/component-model-analyzer.js
+
+
+
+
+
+
+
+
+/**
+ * Component-Model Analyzer
+ *
+ * A custom component ships TWO artefacts that must agree: the view JS (`components/<name>/<name>.js`)
+ * and its co-located authoring model (`components/<name>/_<name>.json`, the xwalk `definitions`/`models`
+ * surface). Two silent drifts live in the gap between them — neither is caught by the runtime-JSON
+ * analyzers (ootb-property-shadow et al.), because the model file is authoring-shaped, not runtime form
+ * JSON: props are `models[].fields[]` entries keyed by `name`, not a runtime `properties{}` bag.
+ *
+ * Finding `component-model-prop-duplicates-ootb` (error): a model field whose `name` concept-maps to an
+ * OOTB property/constraint for the component's field type (`minValue`→`minimum`, `maxValue`→`maximum`,
+ * `stepValue`→`step`). The OOTB base already provides it (a slider's model `...`-includes
+ * `_number-validation-fields.json` = minimum/maximum), so the custom field is a DUPLICATE second source
+ * of truth that bypasses native validation. Field type is read from the template
+ * (`plugins.xwalk.page.template.fieldType`); the OOTB concept set is derived from
+ * `src/data/runtime-property-matrix.js` — same source of truth as ootb-property-shadow.
+ *
+ * Finding `component-model-prop-missing` (error): a `properties.<key>` the view JS READS at runtime
+ * (`fieldJson?.properties?.<key>`) that the model does NOT declare (after resolving `...`-includes). A
+ * stale rename (model declares `effectiveMaxValue`, JS reads `properties.preApprovedAmount`) resolves to
+ * `undefined` at runtime — a silent dead read. OOTB names and framework keys are skipped (they ride the
+ * OOTB base / are not authored custom props).
+ *
+ * Detection is deterministic (no LLM). Linking is by CONVENTION: the model is the `_<name>.json`
+ * co-located with `<name>.js` in the component folder — passed in as a jsonFiles entry. A view whose
+ * model isn't in the analyzed set is SKIPPED (fail-safe).
+ */
+
+// Framework / layout keys that legitimately appear but are never authored custom props.
+const component_model_analyzer_FRAMEWORK_KEY_RE = /^(fd:|afs:|aue|jcr:|sling:|cq:)/;
+const component_model_analyzer_FRAMEWORK_EXACT = new Set([
+  'colspan', 'gridClassNames', 'customFunctionsPath', 'customStylesPath', 'analyticsFilePath',
+]);
+// A read whose key is a message/label companion is content, not a constraint — never a "missing prop".
+const MESSAGE_LABEL_RE = /(message|msg|label|text)$/i;
+
+class ComponentModelAnalyzer {
+  constructor(config = null) {
+    this.config = config;
+    this.matrix = (config && config.propertyMatrix) || runtime_property_matrix;
+  }
+
+  // The set of OOTB property names for a field type, from the matrix (same resolution as
+  // ootb-property-shadow: a type entry is { includes:[group], excludes:[name] }; unknown → baseline).
+  ootbNames(fieldType) {
+    const p = this.matrix.properties || {};
+    const groupNames = (grp) => (Array.isArray(p[grp]) ? p[grp] : []).map((it) => it && it.name).filter(Boolean);
+    const names = new Set();
+    const typeEntry = (this.matrix.fieldTypeProperties || {})[fieldType];
+    if (typeEntry && Array.isArray(typeEntry.includes)) {
+      for (const grp of typeEntry.includes) for (const n of groupNames(grp)) names.add(n);
+      for (const ex of typeEntry.excludes || []) names.delete(ex);
+    } else {
+      for (const grp of ['fieldCommon', 'fieldConstraints', 'fieldRuntime']) for (const n of groupNames(grp)) names.add(n);
+    }
+    for (const it of (p.fieldTypeAdditional || {})[fieldType] || []) if (it && it.name) names.add(it.name);
+    return names;
+  }
+
+  // Concept-token sets of the OOTB CONSTRAINT/property names (skip generic single-token names that
+  // would over-match, mirroring ootb-property-shadow's GENERIC_EXACT guard). Used to catch a
+  // differently-named duplicate (minValue → minimum).
+  static GENERIC_EXACT = new Set(['value', 'type', 'name', 'index', 'parent', 'default', 'format', 'lang', 'label', 'description', 'tooltip']);
+  // Decorator tokens a custom name may append to an OOTB concept and still MEAN that OOTB concept:
+  // `minValue`/`maxValue`/`stepValue` = OOTB concept + `value`. Any OTHER extra token makes the name a
+  // DISTINCT concept, not a duplicate — `tickValues` (= tick + [values→]enum) has the meaningful extra
+  // token `tick`, so it is genuinely custom and must NOT be flagged as an `enum` duplicate.
+  static DECORATOR_TOKENS = new Set(['value']);
+
+  // `keyConcepts` covers `nameConcepts` AND every extra token (key − name) is a pure decorator — i.e.
+  // the custom name is the OOTB concept plus only decoration, not a broader/different concept.
+  static coversAsDuplicate(keyConcepts, nameConcepts) {
+    if (nameConcepts.size === 0) return false;
+    for (const t of nameConcepts) if (!keyConcepts.has(t)) return false;
+    for (const t of keyConcepts) {
+      if (!nameConcepts.has(t) && !ComponentModelAnalyzer.DECORATOR_TOKENS.has(t)) return false;
+    }
+    return true;
+  }
+
+  // Does model-field `name` duplicate an OOTB property for `fieldType`? Returns the OOTB name or null.
+  duplicatesOotb(name, ootbNames) {
+    if (component_model_analyzer_FRAMEWORK_KEY_RE.test(name) || component_model_analyzer_FRAMEWORK_EXACT.has(name)) return null;
+    // exact OOTB name declared as a custom field → duplicate.
+    if (ootbNames.has(name)) return name;
+    // concept-cover against each OOTB name, but ONLY when the extra tokens are pure decorators
+    // (minValue covers minimum; tickValues does NOT cover enum because `tick` is meaningful).
+    const keyConcepts = conceptTokens(name);
+    for (const ootbName of ootbNames) {
+      if (ComponentModelAnalyzer.GENERIC_EXACT.has(ootbName)) continue;
+      if (ComponentModelAnalyzer.coversAsDuplicate(keyConcepts, conceptTokens(ootbName))) return ootbName;
+    }
+    return null;
+  }
+
+  // Parse a model JSON string/object. Returns the object or null (logged) on parse failure.
+  static parseModel(content, filename) {
+    try { return typeof content === 'string' ? JSON.parse(content) : content; } catch (e) {
+      lib_core.warning(`[ComponentModel] JSON parse failed for ${filename}: ${e.message}`);
+      return null;
+    }
+  }
+
+  // Field type from the xwalk template (`plugins.xwalk.page.template.fieldType`), or null.
+  static fieldTypeOf(model) {
+    const defs = Array.isArray(model?.definitions) ? model.definitions : [];
+    for (const d of defs) {
+      const ft = d?.plugins?.xwalk?.page?.template?.fieldType;
+      if (typeof ft === 'string') return ft;
+    }
+    return null;
+  }
+
+  // The set of authored field `name`s declared directly in this model's `models[].fields[]` (own
+  // fields only — NOT include refs, which are resolved separately). Each entry is { name, isOwn }.
+  static ownFieldNames(model) {
+    const names = new Set();
+    const includeRefs = [];
+    for (const m of Array.isArray(model?.models) ? model.models : []) {
+      for (const f of Array.isArray(m?.fields) ? m.fields : []) {
+        if (f && typeof f === 'object') {
+          if (typeof f['...'] === 'string') includeRefs.push(f['...']);
+          else if (typeof f.name === 'string' && f.name) names.add(f.name);
+        }
+      }
+    }
+    return { names, includeRefs };
+  }
+
+  // Resolve `...`-include refs (`../../models/form-common/_x.json#/fields`) against the analyzed JSON
+  // set, collecting every field `name` they contribute (one level of nesting — includes rarely nest).
+  // Returns { names, allResolved }: allResolved is false if ANY ref's target wasn't in the set — the
+  // caller then SUPPRESSES `component-model-prop-missing` (a read could be provided by the unresolved
+  // include, so we can't prove it's missing; the design canon forbids a false positive here).
+  static includedNames(includeRefs, jsonByBase) {
+    const names = new Set();
+    let allResolved = true;
+    for (const ref of includeRefs) {
+      const base = ref.replace(/#.*$/, '').split('/').pop(); // `_number-validation-fields.json`
+      const hit = jsonByBase.get(base);
+      if (!hit) { allResolved = false; continue; }
+      const inc = ComponentModelAnalyzer.parseModel(hit.content, hit.filename);
+      if (!inc) { allResolved = false; continue; }
+      // Includes are `{ fields: [...] }` OR the same `models[].fields` shape — handle both.
+      const fieldLists = [];
+      if (Array.isArray(inc?.fields)) fieldLists.push(inc.fields);
+      for (const m of Array.isArray(inc?.models) ? inc.models : []) if (Array.isArray(m?.fields)) fieldLists.push(m.fields);
+      for (const list of fieldLists) for (const f of list) {
+        if (f && typeof f === 'object' && typeof f.name === 'string' && f.name) names.add(f.name);
+      }
+    }
+    return { names, allResolved };
+  }
+
+  // All `properties.<key>` reads in a component-view AST (custom authoring-bag reads). Returns
+  // [{ key, line }]. Matches `<...>.properties.<key>` (optional-chained or not) via member paths.
+  static propertyReads(ast) {
+    const reads = [];
+    simple(ast, {
+      MemberExpression: (m) => {
+        // property directly after a `.properties` member: object is a MemberExpression whose own
+        // property is `properties`, and this node's (non-computed) property is the key.
+        if (m.computed || m.property?.type !== 'Identifier') return;
+        const obj = m.object;
+        if (obj?.type !== 'MemberExpression' || obj.computed) return;
+        if (obj.property?.name !== 'properties') return;
+        reads.push({ key: m.property.name, line: m.loc?.start.line });
+      },
+    });
+    return reads;
+  }
+
+  // Model basename for a component view file: `.../components/<name>/<name>.js` → `_<name>.json`.
+  static modelBasenameFor(jsFilename) {
+    const f = (jsFilename || '').replace(/\\/g, '/');
+    const parts = f.split('/');
+    const idx = parts.lastIndexOf('components');
+    if (idx < 0 || !parts[idx + 1]) return null;
+    return `_${parts[idx + 1]}.json`;
+  }
+
+  analyze(formJson, jsFiles = [], jsonFiles = []) {
+    const issues = [];
+    if (!Array.isArray(jsFiles) || jsFiles.length === 0) return { violations: 0, issues: [] };
+
+    // Index every analyzed JSON by basename so co-located models and shared includes both resolve.
+    const jsonByBase = new Map();
+    for (const jf of Array.isArray(jsonFiles) ? jsonFiles : []) {
+      if (!jf?.filename || jf.content == null) continue;
+      const base = (jf.filename || '').replace(/\\/g, '/').split('/').pop();
+      if (!jsonByBase.has(base)) jsonByBase.set(base, jf);
+    }
+
+    for (const file of jsFiles) {
+      if (!file?.filename || file.content == null) continue;
+      if (!isComponentView(file.filename)) continue;
+
+      const modelBase = ComponentModelAnalyzer.modelBasenameFor(file.filename);
+      const modelEntry = modelBase ? jsonByBase.get(modelBase) : null;
+      if (!modelEntry) continue; // co-located model not in the analyzed set → skip (fail-safe)
+
+      const model = ComponentModelAnalyzer.parseModel(modelEntry.content, modelEntry.filename);
+      if (!model) continue;
+
+      let ast;
+      try {
+        ast = acorn_parse(file.content, { ecmaVersion: 'latest', sourceType: 'module', locations: true });
+      } catch (e) {
+        lib_core.warning(`[ComponentModel] JS parse failed for ${file.filename}: ${e.message}`);
+        continue;
+      }
+
+      const { names: ownNames, includeRefs } = ComponentModelAnalyzer.ownFieldNames(model);
+      const { names: includedNames, allResolved } = ComponentModelAnalyzer.includedNames(includeRefs, jsonByBase);
+      const declared = new Set([...ownNames, ...includedNames]);
+      const fieldType = ComponentModelAnalyzer.fieldTypeOf(model);
+      const ootbNames = fieldType ? this.ootbNames(fieldType) : new Set();
+
+      const seen = new Set();
+      const flag = (o) => {
+        const key = `${o.type}|${o.name}`;
+        if (seen.has(key)) return; seen.add(key);
+        issues.push({ file: modelEntry.filename, ...o });
+      };
+
+      // 1) duplicate-of-OOTB: an OWN model field that duplicates an OOTB prop for this field type.
+      for (const name of ownNames) {
+        const ootb = this.duplicatesOotb(name, ootbNames);
+        if (!ootb) continue;
+        flag({
+          severity: 'error',
+          type: 'component-model-prop-duplicates-ootb',
+          name,
+          message: `Model declares custom field \`${name}\`, which duplicates the OOTB property `
+            + `\`${ootb}\` for field type \`${fieldType}\`. The OOTB base (already included via `
+            + `\`_number-validation-fields.json\` / the number-input base) provides it — a parallel custom `
+            + `field is a second source of truth that bypasses native validation / DoR. Drop it and use the `
+            + `OOTB \`${ootb}\`. (OOTB set from src/data/runtime-property-matrix.js.)`,
+        });
+      }
+
+      // 2) missing-in-model: a properties.<key> the JS reads that the model never declares → undefined.
+      // Fail-safe: if any `...`-include couldn't be resolved (not in the analyzed set), skip this check
+      // entirely — the read could be provided by the unresolved include, and a false "missing" is worse
+      // than a miss. (The duplicate-OOTB check above is unaffected: it only inspects OWN model fields.)
+      for (const { key, line } of allResolved ? ComponentModelAnalyzer.propertyReads(ast) : []) {
+        if (component_model_analyzer_FRAMEWORK_KEY_RE.test(key) || component_model_analyzer_FRAMEWORK_EXACT.has(key)) continue;
+        if (MESSAGE_LABEL_RE.test(key)) continue;
+        if (declared.has(key)) continue;
+        // A read of an OOTB name (`properties.minimum`) is a different smell (misplacement) — not ours.
+        if (ootbNames.has(key)) continue;
+        flag({
+          severity: 'error',
+          type: 'component-model-prop-missing',
+          name: key,
+          line,
+          // reported against the VIEW JS (the read site); the model file is named in the message.
+          file: file.filename,
+          message: `Component view reads \`properties.${key}\`, but the model `
+            + `(\`${modelBase}\`) declares no field named \`${key}\` (and no \`...\`-include provides it). `
+            + `The read resolves to \`undefined\` at runtime — a silent dead read, usually a stale rename `
+            + `(model field renamed but the JS not updated, or vice versa). Align the model field name with `
+            + `the property the view reads.`,
+        });
+      }
+    }
+
+    return { violations: issues.length, issues };
+  }
+
+  compare(before, after) {
+    const b = before?.violations || 0;
+    const a = after?.violations || 0;
+    return { before: b, after: a, delta: a - b, regressed: a > b };
+  }
+}
+
 ;// CONCATENATED MODULE: ./src/pipeline.js
 /**
  * Shared analyzer pipeline
@@ -194134,6 +196158,7 @@ class ComponentOwnsModelConcernAnalyzer {
  * @param {Object} [logger]     - Optional logger: { info, warning, error }. Defaults to console.
  * @returns {Promise<Object>}   - Results object with one key per analyzer
  */
+
 
 
 
@@ -194245,7 +196270,7 @@ async function runAnalysis(beforeData, afterData, jsFiles = [], cssFiles = [], c
   const hardcodedConfigResult    = new HardcodedConfigAnalyzer(config).analyze(formJson, jsFiles);
   const storageClassResult       = new StorageClassAnalyzer(config).analyze(formJson, jsFiles);
   const customFnCorrectnessResult = new CustomFnCorrectnessAnalyzer(config).analyze(formJson, jsFiles);
-  const foreignFragmentRootResult = new ForeignFragmentRootAnalyzer(config).analyze(formJson, jsFiles);
+  const foreignFragmentRootResult = new ForeignFragmentRootAnalyzer(config).analyze(formJson, jsFiles, jsonFiles);
   const navigationInCustomFnResult = new NavigationInCustomFnAnalyzer(config).analyze(formJson, jsFiles);
   const shouldBeComponentResult    = new ShouldBeComponentAnalyzer(config).analyze(formJson, jsFiles);
   const componentValueSyncResult   = new ComponentValueSyncAnalyzer(config).analyze(formJson, jsFiles);
@@ -194265,6 +196290,10 @@ async function runAnalysis(beforeData, afterData, jsFiles = [], cssFiles = [], c
   // Component-view tier: view-side reinvention of model-owned concerns (display format, constraints,
   // synthetic DOM change). Pure JS analysis (component-view files); no form JSON needed.
   const componentModelResult = new ComponentOwnsModelConcernAnalyzer(config).analyze(formJson, jsFiles);
+  // Component view ↔ co-located authoring model (`_<name>.json`) consistency: model fields that
+  // duplicate an OOTB prop, and properties.<key> reads the model doesn't declare (→ undefined). Needs
+  // the component model JSON in jsonFiles; skips a view whose model isn't in the analyzed set.
+  const componentModelDriftResult = new ComponentModelAnalyzer(config).analyze(formJson, jsFiles, jsonFiles);
 
   if (hasFormData) {
     log.info('Running all analyzers in parallel...');
@@ -194383,6 +196412,7 @@ async function runAnalysis(beforeData, afterData, jsFiles = [], cssFiles = [], c
     ootbPropertyShadow: { after: ootbShadowResult, newIssues: ootbShadowResult.issues ?? [], resolvedIssues: [] },
     fragmentPathValidator: { after: fragmentPathResult, newIssues: fragmentPathResult.issues ?? [], resolvedIssues: [] },
     componentModelConcern: { after: componentModelResult, newIssues: componentModelResult.issues ?? [], resolvedIssues: [] },
+    componentModelDrift: { after: componentModelDriftResult, newIssues: componentModelDriftResult.issues ?? [], resolvedIssues: [] },
   };
 }
 
@@ -194495,6 +196525,7 @@ const DESIGN_CANON_KEYS = {
   ootbPropertyShadow: 'custom property/constraint-message or event duplicates an OOTB one (reuse the built-in; OOTB set from src/data/runtime-property-matrix.js)',
   fragmentPathValidator: 'globals.fragment.<path> reference does not exist in the linked fragment JSON hierarchy (@fragmentPath) — resolves to undefined',
   componentModelConcern: 'component view reinvents a model-owned concern — display format / OOTB constraint hardcoded, or a synthetic DOM change event (set model.value)',
+  componentModelDrift: 'component model _<name>.json duplicates an OOTB prop, or the view reads a properties.<key> the model never declares (→ undefined at runtime)',
 };
 
 /**
@@ -198332,6 +200363,407 @@ async function loadConfig(configPath = null) {
 }
 
 
+;// CONCATENATED MODULE: ./src/cli/rule-types.js
+/**
+ * Canonical rule-id → finding-types map. The bot config (eslint.config.js) keys on stable RULE IDS
+ * (kebab, matching the analyzer/plugin-rule name), but a single analyzer emits many finding `type`s
+ * (e.g. component-owns-model-concern → component-formats-display-value / -reinvents-constraint /
+ * -dispatches-dom-change). This map lets applyConfig resolve a finding's `type` back to its owning
+ * rule id, so `'aem-forms/component-owns-model-concern': 'off'` silences ALL of its findings.
+ *
+ * Derived from the analyzers' emitted `type:` literals. A rule whose id already EQUALS its single
+ * finding type (display-format-in-code, content-in-code, …) needs no entry — the reverse lookup falls
+ * back to identity. Only multi-type or renamed analyzers are listed here.
+ *
+ * Keep in sync when an analyzer adds a finding type — the test in test-flat-config guards drift.
+ */
+const RULE_TYPES = {
+  'component-owns-model-concern': ['component-formats-display-value', 'component-reinvents-constraint', 'component-dispatches-dom-change'],
+  'component-value-sync': ['component-ignores-value-change'],
+  'component-model': ['component-model-prop-duplicates-ootb', 'component-model-prop-missing'],
+  'custom-fn-correctness': ['async-custom-function-ignored', 'field-parent-not-dollar-parent', 'jsonmodel-direct-read'],
+  'custom-function': ['bulk-set-property-use-import-data', 'custom-event-in-custom-function', 'custom-functions-not-analyzed', 'direct-properties-mutation', 'dom-access-in-custom-function', 'http-request-in-custom-function', 'set-property-form-properties', 'window', 'window-access-in-custom-function'],
+  'dispatch-target': ['dispatch-on-field-not-form', 'dispatch-plain-object-not-customevent'],
+  'foreign-fragment-root': ['foreign-fragment-root-access'],
+  'fragment-globals-scope': ['fragment-form-property-scope', 'fragment-globals-form-traversal'],
+  'fragment-path-validator': ['fragment-path-missing-annotation', 'fragment-path-not-in-json', 'nested-fragment-boundary-reach'],
+  'fragment-qualified-name': ['fragment-qualified-name-in-custom-function'],
+  'fragment-rule-form-ref': ['fragment-rule-references-form-root'],
+  'hardcoded-config': ['hardcoded-endpoint-url', 'hardcoded-error-message'],
+  'hidden-fields': ['static-false-visibility', 'unnecessary-hidden-field'],
+  'navigation-in-custom-fn': ['navigation-dom-in-custom-function', 'window-location-navigation-in-custom-function'],
+  'ootb-property-shadow': ['ootb-event-misuse', 'ootb-property-shadow'],
+  'request-error-handling': ['request-catch-only-no-ok-check'],
+  // rule-ordering-race is emitted by the event-impact analyzer; identity resolution already covers it,
+  // as it does the analyzer's other, distinct event-impact types (dom-in-event / http-in-event /
+  // high-impact) which are their own self-governing ids — NOT silenced by `rule-ordering-race: off`.
+  'rule-performance': ['rule-cycle', 'runtime-error-in-custom-function'],
+  'rule-vs-code': ['markfieldasinvalid-instead-of-validationexpression', 'value-visibility-logic-in-js'],
+  'runtime-cls': ['direct-style-manipulation', 'dynamic-class-manipulation', 'dynamic-css-loading', 'dynamic-style-injection'],
+  'should-be-component': ['fragment-dom-create-element', 'fragment-dom-event-listener', 'fragment-dom-mutation', 'fragment-dom-query'],
+  'storage-class': ['form-data-in-variable', 'getvariable-in-init', 'getvariable-not-namespaced', 'variable-not-namespaced', 'write-only-variable'],
+  'form-analyzer': ['component-count', 'event-handlers', 'nested-panels', 'nesting-depth'],
+  'form-events': ['api-call-in-initialize', 'axios', 'fetch', 'jquery-ajax', 'request', 'requestWithRetry', 'xhr'],
+};
+
+// Reverse: finding type → owning rule id. Built once.
+const TYPE_TO_RULE = new Map();
+for (const [ruleId, types] of Object.entries(RULE_TYPES)) {
+  for (const t of types) TYPE_TO_RULE.set(t, ruleId);
+}
+
+/**
+ * The config rule id that owns a finding `type`. Falls back to the type itself (rules whose id equals
+ * their single finding type, e.g. display-format-in-code / content-in-code / field-writes-sibling).
+ * @param {string} type
+ * @returns {string}
+ */
+function rule_types_ruleIdForType(type) {
+  return TYPE_TO_RULE.get(type) || type;
+}
+
+// EXTERNAL MODULE: ./node_modules/minimatch/minimatch.js
+var minimatch = __nccwpck_require__(43772);
+;// CONCATENATED MODULE: ./src/cli/flat-config.js
+
+
+
+const { Minimatch } = minimatch;
+
+/**
+ * Minimal flat-config reader — lets the bot consume the SAME `eslint.config.js` the ESLint plugin
+ * uses, so file/rule config lives in one place. Not a full ESLint config engine: it resolves, per
+ * file, whether the file is ignored and each rule's effective severity — the subset the bot needs to
+ * drive `ignores` (== --exclude), `files` gating, and per-rule on/off/severity across ALL analyzers
+ * (including the whole-form/runtime ones ESLint can't host).
+ *
+ * A flat config is an array of blocks: `{ files?: string[], ignores?: string[], rules?: {} }`. A block
+ * with only `ignores` is a global ignore. Rule ids are matched by bare name — `aem-forms/x` and `x`
+ * both map to the bot's rule/type `x`.
+ */
+
+const flat_config_norm = (p) => (p || '').replace(/\\/g, '/');
+// The CLI feeds absolute paths (loadFiles/gatherFiles resolve()), but ESLint evaluates files/ignores
+// globs against the CWD-relative path — so `vendor/**` or `blocks/**/*.js` would silently miss on an
+// absolute path. Match each glob against BOTH the raw path AND its cwd-relative form so the same
+// eslint.config.js gates identically in the bot and in ESLint.
+const relToCwd = (file) => {
+  const cwd = flat_config_norm(process.cwd());
+  if (file.startsWith(`${cwd}/`)) return file.slice(cwd.length + 1);
+  return null;
+};
+const matchAny = (globs, file) => {
+  const rel = relToCwd(file);
+  return (globs || []).some((g) => {
+    const mm = new Minimatch(g, { dot: true, matchBase: true });
+    return mm.match(file) || (rel != null && mm.match(rel));
+  });
+};
+const bareRule = (id) => id.replace(/^[^/]+\//, ''); // 'aem-forms/x' → 'x'
+const sevWord = (v) => {
+  const n = Array.isArray(v) ? v[0] : v;
+  if (n === 2 || n === 'error') return 'error';
+  if (n === 1 || n === 'warn') return 'warn';
+  return 'off';
+};
+const ruleOpts = (v) => (Array.isArray(v) ? v[1] : undefined);
+
+/**
+ * Resolve the effective config for `filePath` against a flat-config array.
+ * @param {Array} configArray - the default export of eslint.config.js (array of blocks)
+ * @param {string} filePath
+ * @returns {{ ignored: boolean, rules: Map<string,{severity:string,options:any}> }}
+ */
+function resolveConfig(configArray, filePath) {
+  const file = flat_config_norm(filePath);
+  const rules = new Map();
+  let ignored = false;
+  for (const block of Array.isArray(configArray) ? configArray : []) {
+    if (!block || typeof block !== 'object') continue;
+    // A block with ONLY `ignores` is a global ignore.
+    if (block.ignores && !block.files && !block.rules) {
+      if (matchAny(block.ignores, file)) ignored = true;
+      continue;
+    }
+    // `files` gate: block applies to this file iff it matches files (or has none = applies to all),
+    // and isn't excluded by the block's own `ignores`.
+    const applies = (!block.files || matchAny(block.files, file)) && !(block.ignores && matchAny(block.ignores, file));
+    if (!applies || !block.rules) continue;
+    for (const [id, val] of Object.entries(block.rules)) {
+      rules.set(bareRule(id), { severity: sevWord(val), options: ruleOpts(val) });
+    }
+  }
+  return { ignored, rules };
+}
+
+/**
+ * Convenience: is a rule (by bare name or full type) enabled for a file, and at what severity?
+ * Returns null when the config doesn't mention it (caller decides the default — usually "run it").
+ */
+function ruleFor(resolved, ruleName) {
+  return resolved.rules.get(bareRule(ruleName)) || null;
+}
+
+/**
+ * Load a flat config from disk (default export of eslint.config.{js,mjs} in `cwd`, or an explicit
+ * path). Returns the config array, or null if none is present / it fails to load. Never throws —
+ * a missing/broken config just means "no config-driven overrides".
+ * @param {string} cwd
+ * @param {string} [explicitPath]
+ * @returns {Promise<Array|null>}
+ */
+async function loadFlatConfig(cwd, explicitPath) {
+  const { resolve } = await Promise.resolve(/* import() */).then(__nccwpck_require__.t.bind(__nccwpck_require__, 76760, 19));
+  const { existsSync } = await Promise.resolve(/* import() */).then(__nccwpck_require__.t.bind(__nccwpck_require__, 73024, 19));
+  const { pathToFileURL } = await Promise.resolve(/* import() */).then(__nccwpck_require__.t.bind(__nccwpck_require__, 73136, 19));
+  const candidates = explicitPath
+    ? [resolve(cwd, explicitPath)]
+    : ['eslint.config.js', 'eslint.config.mjs'].map((f) => resolve(cwd, f));
+  for (const p of candidates) {
+    if (!existsSync(p)) continue;
+    try {
+      const mod = await __nccwpck_require__(19869)(pathToFileURL(p).href);
+      const cfg = mod.default ?? mod;
+      return Array.isArray(cfg) ? cfg : null;
+    } catch { return null; }
+  }
+  return null;
+}
+
+/**
+ * Extract the `formJsonRoot` a config sets for the Group-B rules (fragment-path-validator /
+ * orphan-fragment-handler), so the bot can load the form/fragment JSON from the SAME root the ESLint
+ * rules use. Scans every block's rule options; returns the first non-empty value, or null.
+ * @param {Array|null} configArray
+ * @returns {string|null}
+ */
+function formJsonRootFrom(configArray) {
+  for (const block of Array.isArray(configArray) ? configArray : []) {
+    for (const val of Object.values(block?.rules || {})) {
+      const opts = ruleOpts(val);
+      if (opts && typeof opts.formJsonRoot === 'string' && opts.formJsonRoot) return opts.formJsonRoot;
+    }
+  }
+  return null;
+}
+
+/**
+ * Apply a flat config to a findings list: drop findings whose file is `ignores`d or whose OWNING RULE
+ * is `off` for that file, and OVERRIDE severity where the config sets it (`warn` → `warning`, `error`
+ * → `error`). A finding's owning rule is resolved from its `type` via ruleIdForType — so a config
+ * entry on a rule id (`component-owns-model-concern`) governs ALL of that analyzer's finding types
+ * (component-formats-display-value / -reinvents-constraint / …), not just a type that happens to
+ * equal the id. Findings the config doesn't mention keep their analyzer-assigned severity.
+ * @param {Array} findings
+ * @param {Array|null} configArray
+ * @returns {Array}
+ */
+function applyConfig(findings, configArray) {
+  if (!Array.isArray(configArray) || configArray.length === 0) return findings;
+  const cache = new Map();
+  const resolved = (file) => {
+    if (!cache.has(file)) cache.set(file, resolveConfig(configArray, file));
+    return cache.get(file);
+  };
+  const out = [];
+  for (const f of findings) {
+    const r = resolved(f.file || '');
+    if (r.ignored) continue;
+    // Match config by the finding's OWNING rule id (type→ruleId), else fall back to the raw type.
+    const rule = ruleFor(r, ruleIdForType(f.type)) || ruleFor(r, f.type);
+    if (!rule) { out.push(f); continue; }       // not mentioned → keep as-is
+    if (rule.severity === 'off') continue;       // disabled for this file → drop
+    // `warn` explicitly downgrades; `error` never WEAKENS an analyzer-assigned `critical` (a functional
+    // break — fragment reaching the parent form / broken hierarchy). Both gate identically, so keeping
+    // the stronger `critical` label loses nothing and matches the bot's built-in reporting.
+    const severity = rule.severity === 'warn' ? 'warning' : (f.severity === 'critical' ? 'critical' : 'error');
+    out.push({ ...f, severity });
+  }
+  return out;
+}
+
+;// CONCATENATED MODULE: ./src/cli/suppressions.js
+/**
+ * Inline suppression — lets an author silence a specific finding at a specific line, for the
+ * false-positive cases. ONE convention everywhere: ESLint's own directive syntax, so the same comment
+ * works in the editor (via eslint-plugin-aem-forms) AND in the bot CLI (incl. the bot-only rules
+ * ESLint can't host):
+ *   eslint-disable-next-line aem-forms/<rule>[, aem-forms/<rule>...]   → suppress on the NEXT line
+ *   eslint-disable-line aem-forms/<rule>...                            → suppress on THIS line
+ *   eslint-disable aem-forms/<rule>...                                 → suppress across the WHOLE file
+ * Both `//` (JS/JSON) and `/* ... *␣/` (CSS — which has no `//`) comment forms are accepted, so the
+ * same directive works in every source we lint. A directive with NO rule list suppresses ALL rules in
+ * its scope (line or file). File-wide is the only scope that can silence a line-less finding (e.g. a
+ * runtime `runtime-error-in-custom-function`, which carries no line to anchor a line/next-line on).
+ *
+ * `<rule>` is the ESLint RULE ID (e.g. `component-owns-model-concern`); the `aem-forms/` prefix is
+ * optional. A rule id expands to ALL of that analyzer's finding types (via RULE_TYPES) — so
+ * `aem-forms/component-owns-model-concern` suppresses its `component-formats-display-value` /
+ * `-reinvents-constraint` / `-dispatches-dom-change` findings, matching how it silences the ESLint
+ * rule. A bare finding `type` still works (identity), so both `<ruleId>` and `<type>` suppress.
+ */
+
+
+// Line 0 is the file-wide bucket (real source lines are 1-indexed, so 0 never collides).
+const FILE_WIDE = 0;
+// `//` or `/* … */`, then `eslint-disable` optionally suffixed `-next-line`/`-line`, then the rule
+// list, TERMINATED at the first `*/` (block form — so trailing code after `*/ code();` is excluded)
+// or end of line (`//` form). Group 1 = variant (undefined → file-wide); group 2 = rule list.
+const DIRECTIVE_RE = /(?:\/\/|\/\*)\s*eslint-disable(?:-(next-line|line))?\b([^\n]*?)(?:\*\/|$)/;
+
+/**
+ * Parse a file's content into a suppression map: lineNumber → Set(ruleIds) | true (all). Key 0 holds
+ * the file-wide entry (from a bare `eslint-disable`), applied to every finding in the file.
+ * @param {string} content
+ * @returns {Map<number, Set<string>|true>}
+ */
+function parseSuppressions(content) {
+  const map = new Map();
+  if (typeof content !== 'string') return map;
+  const lines = content.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i += 1) {
+    const m = DIRECTIVE_RE.exec(lines[i]);
+    if (!m) continue;
+    // next-line → the following line; line → this line; no variant → file-wide (key 0).
+    const targetLine = m[1] === 'next-line' ? i + 2 : m[1] === 'line' ? i + 1 : FILE_WIDE;
+    // ESLint allows a trailing `-- explanation` after the rule list; strip it before splitting, so the
+    // reason text isn't parsed as extra "rules" (and `disable-next-line -- reason` stays a bare = all).
+    const rest = (m[2] || '').split(/\s+--\s+/)[0].trim();
+    // Each listed id expands to its owned finding types (RULE_TYPES); identity-covered ids (id==type)
+    // pass through as themselves, so a directive naming either the rule id or a bare type both work.
+    const rules = rest
+      ? rest.split(/[\s,]+/).filter(Boolean).flatMap((r) => {
+        const id = r.replace(/^aem-forms\//, '');
+        return RULE_TYPES[id] ? [id, ...RULE_TYPES[id]] : [id];
+      })
+      : null; // no list → suppress all on that line
+    const existing = map.get(targetLine);
+    if (rules === null || existing === true) {
+      map.set(targetLine, true);
+    } else {
+      const set = existing instanceof Set ? existing : new Set();
+      rules.forEach((r) => set.add(r));
+      map.set(targetLine, set);
+    }
+  }
+  return map;
+}
+
+/**
+ * Drop findings suppressed by an inline directive. `fileContents` is a Map(filename → source) for the
+ * files that were analyzed (only real JS/CSS/JSON source has directives; synthetic `formJson:*` files
+ * have none, so they pass through). A finding is suppressed when its file has a directive on its line
+ * whose rule set contains the finding's `type` (rule ids in the directive were pre-expanded to their
+ * owned types in parseSuppressions) or is a bare "all rules" directive.
+ * @param {Array} findings
+ * @param {Map<string,string>} fileContents
+ * @returns {Array} findings minus suppressed ones
+ */
+function applySuppressions(findings, fileContents) {
+  const cache = new Map(); // filename → suppression map
+  const suppressionsFor = (file) => {
+    if (cache.has(file)) return cache.get(file);
+    const src = fileContents.get(file);
+    const map = src != null ? parseSuppressions(src) : new Map();
+    cache.set(file, map);
+    return map;
+  };
+  return findings.filter((f) => {
+    const perFile = suppressionsFor(f.file);
+    // File-wide directive (key 0) applies to EVERY finding, incl. line-less ones (line == null).
+    const fileWide = perFile.get(FILE_WIDE);
+    if (fileWide === true) return false;
+    if (fileWide instanceof Set && fileWide.has(f.type)) return false;
+    // Line/next-line directives can only match a finding that carries a line.
+    if (f.line == null) return true;
+    const at = perFile.get(f.line);
+    if (at === true) return false;            // bare directive → all rules on this line
+    if (at instanceof Set && at.has(f.type)) return false; // rule-specific
+    return true;
+  });
+}
+
+;// CONCATENATED MODULE: ./src/cli/results-filter.js
+
+
+
+
+/**
+ * Apply the SAME flat-config gating (`eslint.config.js`) + inline `eslint-disable` suppression the CLI
+ * uses (applyConfig / applySuppressions) to the GH Action's NESTED `results` shape — the object
+ * runAnalysis returns, `{ <analyzerKey>: { newIssues: [], after: { issues: [] } } }`. The CLI operates
+ * on a flattened findings array; the Action posts a PR report straight off `results`, so without this
+ * the Action honored neither config nor suppressions. This filters each analyzer stream in place
+ * (issues that are ignored / rule-off / suppressed are removed; severity overrides are applied),
+ * mirroring filterResultsToPRFiles' per-stream deep-clone-and-filter.
+ *
+ * @param {object} results - runAnalysis output (nested)
+ * @param {Map<string,string>} fileContents - filename → source, for inline-suppression parsing
+ * @param {Array|null} configArray - eslint.config.js default export, or null
+ * @returns {object} a filtered deep clone of results
+ */
+function applyConfigAndSuppressionsToResults(results, fileContents, configArray) {
+  if (!results || typeof results !== 'object') return results;
+
+  const hasConfig = Array.isArray(configArray) && configArray.length > 0;
+  const configCache = new Map();
+  const resolved = (file) => {
+    if (!configCache.has(file)) configCache.set(file, resolveConfig(configArray, file));
+    return configCache.get(file);
+  };
+
+  const suppCache = new Map();
+  const suppressionsFor = (file) => {
+    if (!suppCache.has(file)) {
+      const src = fileContents?.get(file);
+      suppCache.set(file, src != null ? parseSuppressions(src) : new Map());
+    }
+    return suppCache.get(file);
+  };
+  // A finding is suppressed by an inline directive (file-wide key 0, or its own line) naming its type.
+  const isSuppressed = (issue) => {
+    const map = suppressionsFor(issue.file);
+    const fileWide = map.get(0);
+    if (fileWide === true) return true;
+    if (fileWide instanceof Set && fileWide.has(issue.type)) return true;
+    if (issue.line == null) return false;
+    const at = map.get(issue.line);
+    if (at === true) return true;
+    return at instanceof Set && at.has(issue.type);
+  };
+
+  // Decide the fate of one issue: null = drop, else the (possibly severity-overridden) issue.
+  const decide = (issue) => {
+    if (!issue || !issue.type) return issue;
+    if (isSuppressed(issue)) return null;
+    if (!hasConfig) return issue;
+    const r = resolved(issue.file || '');
+    if (r.ignored) return null;
+    const rule = ruleFor(r, rule_types_ruleIdForType(issue.type)) || ruleFor(r, issue.type);
+    if (!rule) return issue;
+    if (rule.severity === 'off') return null;
+    const severity = rule.severity === 'warn' ? 'warning' : (issue.severity === 'critical' ? 'critical' : 'error');
+    return { ...issue, severity };
+  };
+
+  const filterList = (list) => (Array.isArray(list) ? list.map(decide).filter(Boolean) : list);
+
+  const out = {};
+  for (const [key, stream] of Object.entries(results)) {
+    if (!stream || typeof stream !== 'object') { out[key] = stream; continue; }
+    const clone = { ...stream };
+    if (Array.isArray(stream.newIssues)) clone.newIssues = filterList(stream.newIssues);
+    // resolvedIssues too — else a rule turned off / suppressed could still surface as a "fixed" item
+    // in the PR report, breaking parity with the CLI's gating.
+    if (Array.isArray(stream.resolvedIssues)) clone.resolvedIssues = filterList(stream.resolvedIssues);
+    if (stream.after && Array.isArray(stream.after.issues)) {
+      clone.after = { ...stream.after, issues: filterList(stream.after.issues) };
+    }
+    out[key] = clone;
+  }
+  return out;
+}
+
 ;// CONCATENATED MODULE: ./src/index.js
 
 
@@ -198354,6 +200786,11 @@ async function loadConfig(configPath = null) {
 
 
 
+
+
+
+// JSON the fragment/component-model analyzers consume (path signal; models are content-verified in the predicate).
+const isFragmentJson = (f) => /(^|\/)fragments?\//.test((f.filename || '').replace(/\\/g, '/'));
 
 /**
  * Get tokens for different operations
@@ -198515,6 +200952,26 @@ async function runPRMode(context, octokit, patOctokit, config) {
   };
   lib_core.info(`  After filtering: ${afterFilterCounts.customFunctions} custom function issues, ${afterFilterCounts.css} CSS issues, ${afterFilterCounts.formEvents} form event issues`);
   lib_core.info(` Filtered to issues in PR diff files only`);
+
+  // Honor inline `eslint-disable` directives — parity with the CLI, which the Action previously lacked.
+  // A file with no directives is a no-op, so existing behavior is unchanged.
+  //
+  // SECURITY: we deliberately do NOT load eslint.config.js here. `loadFlatConfig` dynamically imports
+  // it (`import(pathToFileURL(...))`) — live JS execution. On the Action runner the workspace is the PR
+  // AUTHOR's branch, so importing their eslint.config.js would run attacker-controlled code with the
+  // runner's secrets (GITHUB_TOKEN, …) — a code-injection / secret-exfiltration vector (CWE-829). That
+  // trust boundary doesn't exist for the CLI (operator runs locally against their own repo), which is
+  // why config loading stays CLI-only. The Action honors ONLY inline suppressions, which are parsed as
+  // comment text — never executed. (Static per-rule gating for the Action lives in .performance-bot.json.)
+  try {
+    const fileContents = new Map(
+      [...jsFiles, ...cssFiles, ...jsonFiles].map((f) => [f.filename, f.content])
+    );
+    results = applyConfigAndSuppressionsToResults(results, fileContents, null);
+    lib_core.info(` Applied inline eslint-disable suppressions`);
+  } catch (e) {
+    lib_core.warning(`  Suppression pass skipped: ${e.message}`);
+  }
 
   // AI AUTO-FIX SUGGESTIONS (runs after all analyzers complete)
   // Generates one-click fixable code suggestions for critical issues
@@ -199162,16 +201619,23 @@ async function loadFilesFromWorkspace() {
             });
           }
 
-          // Fragment JSON files (path under /fragments/) — drive fragment-rule-form-ref +
-          // orphan-fragment-handler. Only fragment JSON, not every .json in the repo.
+          // JSON the JSON-aware analyzers consume: fragment JSON (fragment-rule-form-ref +
+          // orphan-fragment-handler), a component's co-located authoring model + shared model
+          // includes (component-model). Not every .json in the repo. Gate on the cheap PATH check
+          // FIRST (path-only, no read) so most .json files are skipped without any IO; only read +
+          // content-verify (component-model shape) the few whose path qualifies.
           if (entry.endsWith('.json') &&
-              /(^|\/)fragments?\//.test(relativePath.replace(/\\/g, '/')) &&
               !relativePath.includes('test') &&
-              !relativePath.includes('__tests__')) {
-            jsonFiles.push({
-              filename: relativePath,
-              content: (0,external_fs_.readFileSync)(fullPath, 'utf-8')
-            });
+              !relativePath.includes('__tests__') &&
+              (isFragmentJson({ filename: relativePath })
+                || isComponentModelJson(relativePath)   // path-only (string) form — no content read
+                || isModelIncludeJson(relativePath))) {
+            const jf = { filename: relativePath, content: (0,external_fs_.readFileSync)(fullPath, 'utf-8') };
+            // Re-check component-model WITH content so a stray _x.json in a component folder that
+            // isn't a real model is dropped (fragment/include are path-authoritative).
+            if (isFragmentJson(jf) || isComponentModelJson(jf) || isModelIncludeJson(jf)) {
+              jsonFiles.push(jf);
+            }
           }
         }
       } catch (error) {

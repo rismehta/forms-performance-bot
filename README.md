@@ -7,7 +7,7 @@ Static analyzer for AEM Adaptive Forms. Runs as a **GitHub Action** (before/afte
 Two families of analyzers, all defined in `src/pipeline.js` (the single source of truth):
 
 - **Performance / CWV** – form structure & nesting, blocking API calls in `initialize`, unnecessary hidden & disabled fields, circular/slow rules, DOM/`window`/HTTP in custom functions, runtime CLS, HTML (lazy-load, dimensions, blocking scripts, iframes), CSS (background-image, data URIs, `@import`, deep/duplicate selectors, `!important`, hardcoded colors).
-- **Design canon** – ownership & storage-class rules from the AEM Forms design canon: field-writes-sibling, foreign-fragment-root, dispatch-on-form-not-field, rules-vs-code, storage-class namespacing, content-in-code, display-format-in-code (use `displayFormat`/`displayValueExpression`), ootb-property-shadow (custom prop/event duplicating an OOTB one), rule-ordering-race, fragment-form-property-scope (`globals.form` reach inside a fragment), fragment-path-validator (`globals.fragment.<path>` vs the linked JSON hierarchy), component-owns-model-concern (view reinventing model presentation/constraints), and more.
+- **Design canon** – ownership & storage-class rules from the AEM Forms design canon: field-writes-sibling, foreign-fragment-root, dispatch-on-form-not-field, rules-vs-code, storage-class namespacing, content-in-code, display-format-in-code (use `displayFormat`/`displayValueExpression`), ootb-property-shadow (custom prop/event duplicating an OOTB one), rule-ordering-race, fragment-form-property-scope (`globals.form` reach inside a fragment), fragment-path-validator (`globals.fragment.<path>` vs the linked JSON hierarchy), component-owns-model-concern (view reinventing model presentation/constraints), component-model (a component's authoring model `_<name>.json` duplicating an OOTB prop, or the view reading a `properties.<key>` the model never declares → `undefined`), and more.
 
 Optional **AI auto-fix** (Azure OpenAI) can open a PR with CSS fixes and JS suggestions.
 
@@ -150,7 +150,7 @@ input.dispatchEvent(new Event('change'));
 @import url('./assisted-by-bank.css');
 ```
 
-- Honored by both `lint` **and** `analyze --fail-on` (a suppressed finding never fails the gate).
+- Honored by all three surfaces: `lint`, `analyze --fail-on`, **and** the GitHub Action's PR report (a suppressed finding never fails the gate nor shows in the PR comment). The Action equally honors the repo's `eslint.config.js` (per-rule off/severity + `ignores`).
 - Works for **every** analyzer — including the whole-form / runtime ones the ESLint plugin can't host.
 - **CSS:** use the `/* … */` block-comment form (CSS has no `//`); both `-line` and `-next-line` are honored.
 - **Line-less findings** (runtime findings that carry no source line, e.g. `runtime-error-in-custom-function`) can only be silenced by the **file-wide** form — a bare `eslint-disable` (optionally with a rule list), with no `-line`/`-next-line`. Placed anywhere in the file, it applies to the whole file.
