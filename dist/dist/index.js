@@ -192498,10 +192498,11 @@ class CustomFnCorrectnessAnalyzer {
  *   - `@formPath     /content/forms/af/…/my-journey`     → validate `globals.form.*` chains.
  *
  * The JCR path resolves to the on-disk JSON by matching a jsonFiles entry whose path ends with
- * `<jcrPath>.json` (the CRISPR mirror lives at `local-form-json/<jcrPath>.json`). Without the tag, or
- * when the linked JSON isn't in the analyzed set, the file is SKIPPED (fail-safe). A file that
- * references `globals.<root>.*` fields but has NO matching tag emits a single `warning` nudging authors
- * to add it, never an error.
+ * `<jcrPath>.json` (the CRISPR mirror lives at `local-form-json/<jcrPath>.json`). Without the tag the
+ * file is SKIPPED (fail-safe). A file that references `globals.<root>.*` fields but has NO matching tag
+ * emits a single `warning` nudging authors to add it, never an error. A file that HAS the tag but whose
+ * linked JSON isn't in the analyzed set emits `fragment-json-not-in-scope` (warning) so the author knows
+ * the hierarchy/structural analysis silently couldn't run — add the JSON to the diff or set `formJsonRoot`.
  *
  * Finding `fragment-path-not-in-json` (error): a referenced chain absent from the JSON hierarchy. Only
  * NODE-NAME segments are checked — tail runtime accessors (`.$value`, `.$properties`, method calls) and
@@ -192534,7 +192535,7 @@ class FragmentPathValidatorAnalyzer {
       if (!m) continue;
       const jcrPath = m[1].replace(/\/+$/, '');
       if (/(^|\/)\.\.(\/|$)/.test(jcrPath) || /^[a-z]+:/i.test(jcrPath) || /[\\]/.test(jcrPath)) return null;
-      return { jcrPath, root };
+      return { jcrPath, root, tag };
     }
     return null;
   }
@@ -192662,7 +192663,24 @@ class FragmentPathValidatorAnalyzer {
       if (chains.length === 0) continue;
 
       const json = resolveJson(tag.jcrPath);
-      if (!json) continue; // linked JSON not in the analyzed set → skip (fail-safe)
+      if (!json) {
+        // The file DECLARES its JSON (@fragmentPath/@formPath) and references field chains, but that
+        // JSON isn't in the analyzed set — so field-hierarchy + structural analysis silently can't run.
+        // Surface it (advisory) so the PR author adds the JSON to the diff or points `formJsonRoot` at
+        // it, rather than getting a hollow all-clear. Keyed once per file (line 1).
+        issues.push({
+          severity: 'warning',
+          type: 'fragment-json-not-in-scope',
+          file: file.filename,
+          line: 1,
+          message: `This file declares \`@${tag.tag} ${tag.jcrPath}\` and references \`globals.${root}.*\` `
+            + `fields, but that form/fragment JSON is not in the analyzed set — so field-hierarchy and `
+            + `structural analysis (hidden/disabled fields, rule cycles) could not run for it. Add the JSON `
+            + `to the diff, or set \`formJsonRoot\` in \`eslint.config.js\` to the directory holding it, so `
+            + `these references can be verified against the authored JSON.`,
+        });
+        continue; // linked JSON not in the analyzed set → skip the hierarchy check (fail-safe)
+      }
 
       const { paths, roots, boundaries } = FragmentPathValidatorAnalyzer.jsonPathSet(json);
       const seen = new Set();
@@ -196381,6 +196399,10 @@ async function runAnalysis(beforeData, afterData, jsFiles = [], cssFiles = [], c
   blockDecorator = { after: blockDecResult, newIssues: blockDecResult.issues ?? [], resolvedIssues: [] };
 
   return {
+    // Report meta (non-analyzer): true when no form JSON was in scope, so the structural analyzers
+    // (hidden/disabled fields, rule cycles, form structure/events/HTML) had nothing to run on and
+    // their zeros are "not analyzed", NOT "clean". Renderers surface this instead of a hollow ✓.
+    noFormJson: !hasFormData,
     formStructure,
     formEvents,
     hiddenFields,

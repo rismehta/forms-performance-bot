@@ -1,6 +1,6 @@
 # Performance Bot
 
-Static analyzer for AEM Adaptive Forms. Runs as a **GitHub Action** (before/after URL comparison on a PR), a **standalone CLI** (`analyze` report + `lint` gate), and an **ESLint plugin** (`eslint-plugin-aem-forms`, for the JS-anchored rules — live editor feedback). The Action + CLI share one analyzer pipeline (`src/pipeline.js`); the plugin reuses the same matcher modules. Findings are suppressible inline with ESLint's `// eslint-disable` directive across all surfaces.
+Static analyzer for AEM Adaptive Forms. Runs as a **standalone CLI** (`lint` — offline gate + PR-comment report; plus an optional `analyze` command for deployed-URL performance snapshots), a **GitHub Action**, and an **ESLint plugin** (`eslint-plugin-aem-forms`, for the JS-anchored rules — live editor feedback). The Action + CLI share one analyzer pipeline (`src/pipeline.js`); the plugin reuses the same matcher modules. Findings are suppressible inline with ESLint's `// eslint-disable` directive across all surfaces.
 
 ## What it checks
 
@@ -69,23 +69,6 @@ mkdir -p ~/.performance-bot
 curl -L https://github.com/adobe-aem-forms/performance-bot/releases/latest/download/performance-bot-cli.tar.gz \
   | tar -xz -C ~/.performance-bot
 
-# Single URL snapshot
-node ~/.performance-bot/index.js --url https://your-branch--your-project.aem.live/
-
-# Before/after comparison
-node ~/.performance-bot/index.js \
-  --before https://main--your-project.aem.live/ \
-  --after  https://branch--your-project.aem.live/
-
-# Git diff mode — analyze only your changed files (run from your project repo)
-node ~/.performance-bot/index.js --diff                        # auto-detects merge-base
-node ~/.performance-bot/index.js --diff HEAD                   # uncommitted changes only
-node ~/.performance-bot/index.js --diff --url https://...      # changed files + URL analysis
-```
-
-The same bundle exposes a **`lint`** subcommand — a static gate that runs the **full** analyzer pipeline (perf + design-canon) over your files and exits non-zero on any error-severity finding:
-
-```bash
 # Lint explicit files (exits non-zero on any error-severity finding → use in a commit hook / CI)
 node ~/.performance-bot/index.js lint blocks/form/scripts/fragment/myfrag.js
 
@@ -95,8 +78,11 @@ node ~/.performance-bot/index.js lint --diff
 # Lint a whole directory tree
 node ~/.performance-bot/index.js lint --dir blocks/form
 
+# PR-comment report (markdown, report-only — exits 0 even with errors)
+node ~/.performance-bot/index.js lint --diff --format markdown --output report.md
+
 # Machine-readable output for tooling
-node ~/.performance-bot/index.js lint --diff --json
+node ~/.performance-bot/index.js lint --diff --format json      # (--json is a legacy alias)
 
 # Exclude extra files by regex (repeatable), on top of the built-in skips
 # (generated bundles, node_modules, *.test.js/*.spec.js, vendored afb-runtime.js)
@@ -105,9 +91,11 @@ node ~/.performance-bot/index.js lint --dir blocks/form --exclude 'vendor/' --ex
 
 From a clone you can run it via npm: `npm run lint:forms -- <files… | --diff | --dir <path>>`.
 
-`analyze` gates natively with `--fail-on error|warning` (default report-only) and honours the same `--exclude <regex>` — e.g. `analyze --diff --fail-on error --exclude 'vendor/'`.
+`lint` is the primary command — offline (no URL, no browser), it runs the **full** analyzer pipeline (perf + design-canon) over your files. It reads form/fragment JSON two ways: any form-shaped JSON in the file set, and — for structural analysis without a URL — the directory named by **`formJsonRoot`** in your `eslint.config.js` (loaded off disk regardless of the diff). A file that declares `@fragmentPath`/`@formPath` but whose JSON is out of scope gets a `fragment-json-not-in-scope` advisory so you know structural analysis was skipped.
 
-**Output.** `lint` prints the **complete** findings list — every finding from every analyzer (perf + design-canon), grouped by file, each as `✗ [error] <type>:<line>` (or `[warning]`) with a one-line explanation, then an `N error(s), M warning(s)` footer. It exits `1` if any error is present, else `0`.
+> **Deployed-URL performance snapshot (optional).** The bundle also exposes a default `analyze` command that fetches a live form URL for the CWV/performance picture (`--url`, or `--before`/`--after` for a comparison), writing a Markdown report to `-o`. Used by the scheduled/weekly run; not part of the PR gate.
+
+**Output.** With no `--format`, `lint` prints the **complete** findings list — every finding from every analyzer (perf + design-canon), grouped by file, each as `✗ [error] <type>:<line>` (or `[warning]`) with a one-line explanation, then an `N error(s), M warning(s)` footer. It exits `1` if any error is present, else `0`. `--format markdown` renders a PR-comment report instead (errors first, warnings collapsed, repo-relative paths) and is **report-only** (always exits 0) — pair it with a separate plain `lint --diff` for the gate.
 
 ```text
 ──────────────────────────────────────────────────────────────────────
@@ -126,7 +114,7 @@ blocks/form/scripts/fragment/loanoffer10sec.js
 ──────────────────────────────────────────────────────────────────────
 ```
 
-`--json` emits `{ findings: [{ severity, type, message, file, line, analyzer }], errors, warnings }` for tooling/editor integration.
+`--format json` (alias `--json`) emits `{ findings: [{ severity, type, message, file, line, analyzer }], errors, warnings }` for tooling/editor integration.
 
 ### Suppressing a finding (false positives)
 
@@ -150,7 +138,7 @@ input.dispatchEvent(new Event('change'));
 @import url('./assisted-by-bank.css');
 ```
 
-- Honored by all three surfaces: `lint`, `analyze --fail-on`, **and** the GitHub Action's PR report (a suppressed finding never fails the gate nor shows in the PR comment). The Action equally honors the repo's `eslint.config.js` (per-rule off/severity + `ignores`).
+- Honored by all surfaces: `lint` (every format), the optional `analyze --fail-on`, **and** the GitHub Action's PR report (a suppressed finding never fails the gate nor shows in the PR comment). The Action equally honors the repo's `eslint.config.js` (per-rule off/severity + `ignores`).
 - Works for **every** analyzer — including the whole-form / runtime ones the ESLint plugin can't host.
 - **CSS:** use the `/* … */` block-comment form (CSS has no `//`); both `-line` and `-next-line` are honored.
 - **Line-less findings** (runtime findings that carry no source line, e.g. `runtime-error-in-custom-function`) can only be silenced by the **file-wide** form — a bare `eslint-disable` (optionally with a rule list), with no `-line`/`-next-line`. Placed anywhere in the file, it applies to the whole file.
@@ -172,19 +160,17 @@ export default [
 
 The plugin covers the ~12 single-file rules; the **bot still runs the full set** in CI (the cross-file, whole-form, and runtime analyzers — `storage-class`, `ootb-property-shadow`, `rule-performance`, etc. — cannot be ESLint rules). See [issue #30](https://github.com/adobe-aem-forms/performance-bot/issues/30) for which analyzers live where and why.
 
-### `analyze` vs `lint` — when to use which
+### `lint` output modes, and the optional `analyze` command
 
-Both run the **same full analyzer pipeline** (all analyzers, including the design-canon checks). They differ only in how they're driven and what they do with the results:
+`lint` is one command with three output modes, all over the **same full analyzer pipeline** (perf + design-canon):
 
-| | `analyze` (default command) | `lint` subcommand |
-|---|---|---|
-| **Question it answers** | "How does this form perform, and what's the CWV impact?" | "Do my files have any error-severity finding (perf or design-canon)? Fail if so." |
-| **Input** | live form **URL(s)** (`--url` / `--before`/`--after`), optionally `--diff` to scope files | **files** — explicit paths, `--diff`, or `--dir` (no URL, no browser) |
-| **Output** | a full Markdown **report** (perf sections + a **Design Canon** summary) written to `-o` | a findings list; **exits non-zero** on any error-severity finding |
-| **Use it for** | PR performance review, before/after comparison, CWV dashboards | pre-commit / pre-PR **gate**, editor integration, CI check |
-| **Findings surfaced** | full report, incl. a **Design Canon** section | all findings flattened; **any error fails the gate** |
+| `--format` | Output | Exit | Use it for |
+|---|---|---|---|
+| _(none)_ / `human` | grouped findings list on stdout | `1` if any error, else `0` | pre-commit / editor / local check |
+| `markdown` | PR-comment report (errors first, warnings in `<details>`, repo-relative paths); `--output` to a file | **always `0`** (report-only) | the PR comment — pair with a plain `lint --diff` for the gate |
+| `json` (alias `--json`) | `{ findings, errors, warnings }` | `1` if any error, else `0` | tooling / editor integration |
 
-Both run every analyzer — `lint` differs only in that it's file/offline-driven and turns findings into an exit code. Rule of thumb: **`lint`** while you code (fast, offline, gates on your files); **`analyze`** against a deployed URL when you want the performance picture.
+The default `analyze` command is a **separate, optional** path — it fetches a live form **URL** (`--url`, or `--before`/`--after`) for the CWV/performance picture and writes a Markdown report to `-o`. It's driven by the scheduled/weekly run, not the PR gate. Rule of thumb: **`lint`** for every PR and while you code (offline, gates + comments on your files); **`analyze`** against a deployed URL when you want the performance snapshot.
 
 See [docs/release-notes.md](docs/release-notes.md) for full CLI reference.
 
@@ -271,12 +257,12 @@ Set repo secrets: `AZURE_API_KEY`, `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_MODEL`
 ## Architecture
 
 ```
+lint CLI:       files / --diff / --dir → runAnalysis → collectFindings → { human gate | markdown PR report | json }
+analyze CLI:    URL(s) / --diff files  → runAnalysis → Markdown report (perf + Design Canon sections)   [optional, URL]
 GitHub Action:  PR (Before/After URLs) → URL extraction → runAnalysis → compare → PR comment + optional auto-fix PR
-analyze CLI:    URL(s) / --diff files  → runAnalysis → Markdown report (perf + Design Canon sections)
-lint CLI:       files / --diff / --dir → runAnalysis → collectFindings → exit non-zero on error findings
 ```
 
-All three call the same `runAnalysis()` in `src/pipeline.js`, so every analyzer runs in every mode; the modes differ only in input and how results are surfaced.
+All call the same `runAnalysis()` in `src/pipeline.js`, so every analyzer runs in every mode; the modes differ only in input and how results are surfaced. `lint --format markdown` is the PR comment; a plain `lint --diff` is the gate.
 
 ### Analyzers
 
