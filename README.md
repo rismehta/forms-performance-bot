@@ -1,6 +1,6 @@
 # Performance Bot
 
-Static analyzer for AEM Adaptive Forms. Runs as a **standalone CLI** (`lint` — offline gate + PR-comment report; plus an optional `analyze` command for deployed-URL performance snapshots), a **GitHub Action**, and an **ESLint plugin** (`eslint-plugin-aem-forms`, for the JS-anchored rules — live editor feedback). The Action + CLI share one analyzer pipeline (`src/pipeline.js`); the plugin reuses the same matcher modules. Findings are suppressible inline with ESLint's `// eslint-disable` directive across all surfaces.
+Static analyzer for AEM Adaptive Forms. Runs as a **standalone CLI** (`lint` — offline gate + PR-comment report; plus an optional `analyze` command for deployed-URL performance snapshots), a **GitHub Action**, and an **ESLint plugin** (`@aemforms/eslint-plugin`, for the JS-anchored rules — live editor feedback). The Action + CLI share one analyzer pipeline (`src/pipeline.js`); the plugin reuses the same matcher modules. Findings are suppressible inline with ESLint's `// eslint-disable` directive across all surfaces.
 
 ## What it checks
 
@@ -146,19 +146,26 @@ input.dispatchEvent(new Event('change'));
 
 ### ESLint plugin — editor integration
 
-The **JS-anchored** design-canon rules (display-format, content-in-code, field-writes-sibling, should-be-component, component-owns-model-concern) also ship as `eslint-plugin-aem-forms` for live in-editor squigglies + one-click `eslint-disable`. It **reuses the bot's matcher modules**, so a rule's verdict is identical in the editor and in CI.
+The **JS-anchored** design-canon rules ship as `@aemforms/eslint-plugin` for live in-editor squigglies + one-click `eslint-disable`. It **reuses the bot's matcher modules**, so a rule's verdict is identical in the editor and in CI. `configs.recommended` turns on every JS-anchored rule (Group A + B), including the intermittent-bug guards:
+
+- **`interactive-change-guard`** — a UI side effect (`dispatchEvent(x,'focus')`, `.focus()`, auto-advance) not gated on an interactive change, which then fires on a `form.importData` restore and corrupts UI state.
+- **`async-value-race`** — a value written inside a request `.then` but read synchronously (stale read), or a `.catch` that writes an empty value (silent data loss).
 
 ```js
 // eslint.config.js (flat config, ESLint 9 / 8.57+)
-import aemForms from 'eslint-plugin-aem-forms';
+import aemForms from '@aemforms/eslint-plugin';
 export default [
-  aemForms.configs.recommended,
-  { files: ['**/components/**/*.js'],
-    rules: { 'aem-forms/component-owns-model-concern': 'error' } },
+  aemForms.configs.recommended,          // all JS-anchored rules, incl. the two guards above
+  // per-tier overrides / companion-JSON root for the Group-B rules:
+  { files: ['**/*.js'],
+    rules: {
+      'aem-forms/storage-class': ['error', { formJsonRoot: 'local-form-json' }],
+      'aem-forms/fragment-path-validator': ['error', { formJsonRoot: 'local-form-json' }],
+    } },
 ];
 ```
 
-The plugin covers the ~12 single-file rules; the **bot still runs the full set** in CI (the cross-file, whole-form, and runtime analyzers — `storage-class`, `ootb-property-shadow`, `rule-performance`, etc. — cannot be ESLint rules). See [issue #30](https://github.com/adobe-aem-forms/performance-bot/issues/30) for which analyzers live where and why.
+The plugin hosts the Group A (single-file) **and** Group B (JS-anchored, reads a companion JSON via `formJsonRoot` — `storage-class`, `fragment-qualified-name`, `fragment-path-validator`, `orphan-fragment-handler`, `component-model`) rules. The whole-form / runtime analyzers (`hidden-fields`, `rule-performance`, `ootb-property-shadow`, …) cannot be ESLint rules — their findings don't anchor to a JS line — so they run in the **bot only** and are registered as no-op stubs in the plugin (so one `eslint.config.js` can list every rule id without ESLint's unknown-rule error). See [issue #30](https://github.com/adobe-aem-forms/performance-bot/issues/30) for the full A/B/C/D breakdown.
 
 ### `lint` output modes, and the optional `analyze` command
 
@@ -290,7 +297,7 @@ src/
 │   └── pr-reporter-form.js   ← report rendering + DESIGN_CANON_KEYS
 └── utils/ …
 
-eslint-plugin/         ← eslint-plugin-aem-forms (JS-anchored rules; reuses src/analyzers matchers)
+eslint-plugin/         ← @aemforms/eslint-plugin (JS-anchored rules; reuses src/analyzers matchers)
 ├── index.js           ← plugin + `recommended` flat-config preset
 └── rules/*.js         ← one rule per Group-A analyzer
 ```

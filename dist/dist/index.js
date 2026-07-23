@@ -184158,6 +184158,9 @@ If you want to optimize development server performance, you can manually bundle 
       fragmentPathValidator: 'globals.fragment path not found in the linked fragment JSON hierarchy',
       componentModelConcern: 'Component view reinvents a model-owned concern (display format / constraint / DOM change)',
       componentModelDrift: 'Component model duplicates an OOTB prop, or the view reads a properties.<key> the model never declares',
+      interactiveChangeGuard: 'UI side effect not gated on an interactive change (fires on a form.importData restore)',
+      asyncValueRace: 'Async value read before it resolves, or an empty value written on .catch (silent data loss)',
+      componentRuleFormScope: 'Reusable component rule reaches into form/fragment scope (use its own field or an event payload)',
     };
 
     const suggestions = [];
@@ -187241,6 +187244,11 @@ class RulePerformanceAnalyzer {
       };
     }
 
+    // Hoisted above the try so the catch's `console.error = originalConsoleError` restore always has it
+    // in scope. If it were declared inside the try (after the awaits / registerFunctions calls that can
+    // throw), an early throw would make the catch reference a TDZ const → ReferenceError masking the
+    // real error.
+    const originalConsoleError = console.error;
     try {
       // Register custom functions for form initialization
       // Try to load real custom function implementations from the checked-out repository
@@ -187315,7 +187323,6 @@ class RulePerformanceAnalyzer {
       const rawDataRefErrors = [];
       const rawTypeConflicts = [];
       
-      const originalConsoleError = console.error;
       console.error = (...args) => {
         const message = args[0];
         if (typeof message === 'string') {
@@ -187735,14 +187742,24 @@ class RulePerformanceAnalyzer {
         lib_core.info(`Found ${exportedNames.length} exported names in export block`);
       }
       
-      // Remove ALL export statements to make it executable in non-ESM context
+      // Strip ESM module syntax so the source runs in a classic `vm` context (runInContext executes a
+      // SCRIPT, not a module — an `import` statement throws "Cannot use import statement outside a
+      // module"). Imports can't be resolved in this sandbox anyway (no module loader), and a re-export
+      // barrel's imported functions aren't executable here regardless — so drop the import lines.
       sourceCode = sourceCode
+        // `import … from '…';` / `import '…';` / bare `import defaultName from '…';` (incl. multi-line
+        // `import {\n a,\n b\n} from '…';`) → removed. Anchored to line start to avoid touching the word
+        // "import" inside strings/comments.
+        .replace(/^\s*import\s+[^;]*?from\s*['"][^'"]+['"]\s*;?/gm, '')
+        .replace(/^\s*import\s*['"][^'"]+['"]\s*;?/gm, '')
+        // Remove ALL export statements to make it executable in non-ESM context
         .replace(/export\s+async\s+function\s+/g, 'async function ')  // export async function
         .replace(/export\s+function\s+/g, 'function ')                // export function
         .replace(/export\s+const\s+/g, 'const ')                      // export const
         .replace(/export\s+let\s+/g, 'let ')                          // export let
         .replace(/export\s+var\s+/g, 'var ')                          // export var
         .replace(/export\s+class\s+/g, 'class ')                      // export class
+        .replace(/export\s*\{[^}]+\}\s*from\s*['"][^'"]+['"]\s*;?/gs, '') // re-export: export {…} from '…'
         .replace(/export\s*\{[^}]+\}/gs, '')                           // remove export { ... }
         .replace(/export\s+default\s+/g, '');                          // export default
       
@@ -191848,9 +191865,21 @@ class RuleVsCodeAnalyzer {
         lib_core.warning(`[RuleVsCode] parse failed for ${jsFile.filename}: ${e.message}`);
         continue;
       }
+      // Inspect BOTH classic `function foo(){}` and modern `const foo = (globals) => {}` /
+      // `const foo = function(){}` custom-fn styles — an arrow/fn-expression export suffers the exact
+      // same rule-vs-code smell, so a FunctionDeclaration-only walk would silently miss it.
+      const inspected = new WeakSet();
+      const inspect = (fnNode, name) => {
+        if (!fnNode || inspected.has(fnNode)) return;
+        inspected.add(fnNode);
+        issues.push(...RuleVsCodeAnalyzer.inspectFn(fnNode, name, jsFile.filename));
+      };
       simple(ast, {
-        FunctionDeclaration: (fn) => {
-          issues.push(...RuleVsCodeAnalyzer.inspectFn(fn, fn.id?.name || 'anonymous', jsFile.filename));
+        FunctionDeclaration: (fn) => inspect(fn, fn.id?.name || 'anonymous'),
+        VariableDeclarator: (vd) => {
+          if (vd.init?.type === 'ArrowFunctionExpression' || vd.init?.type === 'FunctionExpression') {
+            inspect(vd.init, vd.id?.name || 'anonymous');
+          }
         },
       });
     }
@@ -192400,6 +192429,13 @@ class CustomFnCorrectnessAnalyzer {
         if (node.declaration?.type === 'FunctionDeclaration' && node.declaration.id) {
           names.add(node.declaration.id.name);
         }
+        // `export const foo = …, bar = …` — capture each declarator name (covers arrow/fn-expression
+        // custom fns like `export const onUpload = async () => {}`).
+        if (node.declaration?.type === 'VariableDeclaration') {
+          for (const d of node.declaration.declarations || []) {
+            if (d.id?.type === 'Identifier') names.add(d.id.name);
+          }
+        }
         (node.specifiers || []).forEach((s) => names.add(s.local?.name));
       },
     });
@@ -192418,19 +192454,27 @@ class CustomFnCorrectnessAnalyzer {
       }
       const exported = CustomFnCorrectnessAnalyzer.exportedNames(ast);
 
-      // #8 — exported async function used as a custom function
+      // #8 — exported async function used as a custom function. Covers BOTH `export async function
+      // foo(){}` and `export const foo = async () => {}` / `= async function(){}` — the rule parser
+      // ignores async regardless of declaration style, so both fail identically at runtime.
+      const flagAsync = (name, node) => {
+        if (node?.async && name && exported.has(name)) {
+          issues.push({
+            severity: 'error',
+            type: 'async-custom-function-ignored',
+            message: `Exported '${name}' is an async function — the rule parser SILENTLY `
+              + 'IGNORES async function/function*, so it never registers as a custom function. Use a '
+              + 'plain `function` declaration and kick off async work with `.then`.',
+            file: jsFile.filename,
+            line: node.loc?.start.line,
+          });
+        }
+      };
       simple(ast, {
-        FunctionDeclaration: (fn) => {
-          if (fn.async && fn.id && exported.has(fn.id.name)) {
-            issues.push({
-              severity: 'error',
-              type: 'async-custom-function-ignored',
-              message: `Exported '${fn.id.name}' is an async function — the rule parser SILENTLY `
-                + 'IGNORES async function/function*, so it never registers as a custom function. Use a '
-                + 'plain `function` declaration and kick off async work with `.then`.',
-              file: jsFile.filename,
-              line: fn.loc?.start.line,
-            });
+        FunctionDeclaration: (fn) => flagAsync(fn.id?.name, fn),
+        VariableDeclarator: (vd) => {
+          if (vd.init?.type === 'ArrowFunctionExpression' || vd.init?.type === 'FunctionExpression') {
+            flagAsync(vd.id?.name, vd.init);
           }
         },
       });
@@ -192498,11 +192542,13 @@ class CustomFnCorrectnessAnalyzer {
  *   - `@formPath     /content/forms/af/…/my-journey`     → validate `globals.form.*` chains.
  *
  * The JCR path resolves to the on-disk JSON by matching a jsonFiles entry whose path ends with
- * `<jcrPath>.json` (the CRISPR mirror lives at `local-form-json/<jcrPath>.json`). Without the tag the
- * file is SKIPPED (fail-safe). A file that references `globals.<root>.*` fields but has NO matching tag
- * emits a single `warning` nudging authors to add it, never an error. A file that HAS the tag but whose
- * linked JSON isn't in the analyzed set emits `fragment-json-not-in-scope` (warning) so the author knows
- * the hierarchy/structural analysis silently couldn't run — add the JSON to the diff or set `formJsonRoot`.
+ * `<jcrPath>.json` (the CRISPR mirror lives at `local-form-json/<jcrPath>.json`). A file that references
+ * `globals.<root>.*` field paths but has NO matching tag emits `fragment-path-missing-annotation`
+ * (ERROR) — the tag is required so those paths can be verified against the JSON; without it a typo or
+ * stale rename reads `undefined` at runtime and goes uncaught. (A genuine many-forms file with no single
+ * path suppresses the line explicitly.) A file that HAS the tag but whose linked JSON isn't in the
+ * analyzed set emits `fragment-json-not-in-scope` (warning) so the author knows the hierarchy/structural
+ * analysis couldn't run — add the JSON to the diff or set `formJsonRoot`.
  *
  * Finding `fragment-path-not-in-json` (error): a referenced chain absent from the JSON hierarchy. Only
  * NODE-NAME segments are checked — tail runtime accessors (`.$value`, `.$properties`, method calls) and
@@ -192648,14 +192694,17 @@ class FragmentPathValidatorAnalyzer {
       if (!root) {
         if (referencesAnyRoot) {
           issues.push({
-            severity: 'warning',
+            severity: 'error',
             type: 'fragment-path-missing-annotation',
             file: file.filename,
             line: 1,
-            message: `This JS references \`globals.fragment.*\`/\`globals.form.*\` fields but has no `
-              + `\`@fragmentPath\`/\`@formPath\` JSDoc tag naming its JCR content path. Add the matching tag `
-              + `(e.g. \`@fragmentPath /content/forms/af/…/<name>\`) so the field-hierarchy validator can `
-              + `verify these references against the authored JSON.`,
+            message: `This JS references \`globals.fragment.*\`/\`globals.form.*\` field paths but has no `
+              + `\`@fragmentPath\`/\`@formPath\` JSDoc tag naming its JCR content path — so its field paths `
+              + `cannot be verified against the authored JSON (a typo or stale rename would read `
+              + `\`undefined\` at runtime and go uncaught). Add the matching tag (e.g. `
+              + `\`@fragmentPath /content/forms/af/…/<name>\` for a fragment, \`@formPath …\` for a `
+              + `form-level functions file). If this file legitimately serves many forms and no single `
+              + `path applies, suppress this line explicitly.`,
           });
         }
         continue;
@@ -192817,6 +192866,21 @@ class ForeignFragmentRootAnalyzer {
         if (json) {
           const foreignIssues = this._analyzeWithJson(jsFile, tag, json);
           if (foreignIssues !== null) { issues.push(...foreignIssues); continue; }
+        } else {
+          // Tag present but its JSON isn't in the analyzed set. Surface the SAME advisory
+          // fragment-path-validator emits (deduped by file|line|type in collectFindings) so the author
+          // knows the precise JSON-backed check couldn't run, instead of silently degrading to the
+          // heuristic. Keyed once per file (line 1). We still fall through to Mode 2 as a best effort.
+          issues.push({
+            severity: 'warning',
+            type: 'fragment-json-not-in-scope',
+            file: jsFile.filename,
+            line: 1,
+            message: `This file declares \`@${tag.tag} ${tag.jcrPath}\` and references \`globals.fragment.*\` `
+              + 'fields, but that form/fragment JSON is not in the analyzed set — so the precise '
+              + 'foreign-root check could not run (fell back to a heuristic). Add the JSON to the diff, or '
+              + 'set `formJsonRoot` in `eslint.config.js` to the directory holding it.',
+          });
         }
       }
       // ── Mode 2: heuristic fallback (no tag / JSON not in set) ─────────────────────────────────────
@@ -192968,6 +193032,22 @@ function isComponentView(filename) {
 }
 
 /**
+ * Component RULE script: a `*-rules.js` that belongs to a reusable component — either co-located
+ * (`…/components/<name>/<name>-rules.js`) or in a shared component-rules folder
+ * (`…/scripts/components/<name>-rules.js`). These provide the THEN-logic a component's `change`/event
+ * rule calls, and are reused across MANY forms — so unlike a fragment (which owns one form JSON) a
+ * component rule must NOT reach into form/fragment scope at all: no `globals.form.<field>` traversal,
+ * no `globals.form.$properties.<key>` read. It gets values from its own field (`globals.field`) or an
+ * event payload, and communicates outward by broadcasting (`dispatchEvent(globals.form, …)`).
+ */
+function isComponentRule(filename) {
+  const f = norm(filename);
+  return /-rules\.js$/.test(f)
+    && (/(^|\/)components\/[^/]+\/[^/]+-rules\.js$/.test(f)   // components/<name>/<name>-rules.js
+      || /(^|\/)scripts\/components\/[^/]+-rules\.js$/.test(f)); // scripts/components/<name>-rules.js
+}
+
+/**
  * Form-block runtime where DOM is the job. Basename match (folder-agnostic).
  */
 function isFormRuntime(filename) {
@@ -193104,6 +193184,24 @@ class NavigationInCustomFnAnalyzer {
       }
       simple(ast, {
         CallExpression: (c) => {
+          // window.location.assign(url) / window.location.replace(url) — programmatic redirect. Same
+          // violation as `window.location.href = …` but expressed as a call, not an assignment.
+          const callee = c.callee;
+          if (callee?.type === 'MemberExpression'
+            && (callee.property?.name === 'assign' || callee.property?.name === 'replace')
+            && callee.object?.type === 'MemberExpression'
+            && callee.object.object?.name === 'window' && callee.object.property?.name === 'location') {
+            issues.push({
+              severity: 'error',
+              type: 'window-location-navigation-in-custom-function',
+              message: `window.location.${callee.property.name}() navigation in a custom-function/`
+                + 'fragment file. Custom fns run headless — dispatch a custom:* event and navigate in '
+                + 'the ONE subscriber hook in blocks/form/decorateForm.js (the analytics pattern), or use '
+                + 'globals.functions.submitForm / the form redirectUrl. Never window.* in a custom fn.',
+              file: jsFile.filename,
+              line: c.loc?.start.line,
+            });
+          }
           // document.createElement('form') — hand-built POST form
           if (NavigationInCustomFnAnalyzer.calleeName(c.callee) === 'createElement') {
             const arg = c.arguments?.[0];
@@ -193626,8 +193724,13 @@ class OrphanFragmentHandlerAnalyzer {
     const issues = [];
     if (!Array.isArray(jsFiles) || jsFiles.length === 0) return { violations: 0, issues: [] };
 
-    // Index fragment JSON refs by fragment basename (fail-safe: skip unreadable/malformed).
+    // Index fragment JSON refs by fragment basename (JS and its JSON live in different trees —
+    // blocks/.../fragment/x.js ↔ content/.../fragments/x.json — so basename is the pairing key, not
+    // directory). Track basename COLLISIONS: two fragment JSONs sharing a basename (e.g. `loanOffer`
+    // in different journeys) are ambiguous — pairing a JS to either would be a guess (last-wins gave
+    // false orphans). Mark such basenames and SKIP them (fail-safe) rather than mispair.
     const jsonRefsByName = new Map();
+    const collided = new Set();
     for (const jf of Array.isArray(jsonFiles) ? jsonFiles : []) {
       if (!jf?.filename || jf.content == null || jf.content === '') continue;
       if (!/(^|\/)fragments?\//.test((jf.filename || '').replace(/\\/g, '/'))) continue;
@@ -193637,14 +193740,18 @@ class OrphanFragmentHandlerAnalyzer {
         continue;
       }
       if (!json || typeof json !== 'object') continue;
-      jsonRefsByName.set(OrphanFragmentHandlerAnalyzer.baseName(jf.filename), OrphanFragmentHandlerAnalyzer.collectJsonRefs(json));
+      const name = OrphanFragmentHandlerAnalyzer.baseName(jf.filename);
+      if (jsonRefsByName.has(name)) { collided.add(name); continue; }
+      jsonRefsByName.set(name, OrphanFragmentHandlerAnalyzer.collectJsonRefs(json));
     }
+    for (const name of collided) jsonRefsByName.delete(name);
 
     for (const file of jsFiles) {
       if (!file?.filename || file.content == null) continue;
       if (!OrphanFragmentHandlerAnalyzer.isFragmentJs(file.filename)) continue;
 
-      // Require the paired fragment JSON — without it wiring can't be verified → skip (fail-safe).
+      // Require the paired fragment JSON — without it (or when its basename collided → ambiguous)
+      // wiring can't be verified → skip (fail-safe).
       const refs = jsonRefsByName.get(OrphanFragmentHandlerAnalyzer.baseName(file.filename));
       if (!refs) continue;
 
@@ -196068,12 +196175,18 @@ class ComponentModelAnalyzer {
     const issues = [];
     if (!Array.isArray(jsFiles) || jsFiles.length === 0) return { violations: 0, issues: [] };
 
-    // Index every analyzed JSON by basename so co-located models and shared includes both resolve.
+    // Index every analyzed JSON by basename (shared `...`-includes resolve by basename globally). Also
+    // keep the full list so the co-located model can be matched by DIRECTORY, not bare basename: two
+    // components sharing a model basename (`_slider.json` in different journeys) would otherwise collide
+    // (first-wins), analyzing one component against the other's model.
     const jsonByBase = new Map();
+    const jsonList = [];
     for (const jf of Array.isArray(jsonFiles) ? jsonFiles : []) {
       if (!jf?.filename || jf.content == null) continue;
-      const base = (jf.filename || '').replace(/\\/g, '/').split('/').pop();
+      const norm = (jf.filename || '').replace(/\\/g, '/');
+      const base = norm.split('/').pop();
       if (!jsonByBase.has(base)) jsonByBase.set(base, jf);
+      jsonList.push({ norm, jf });
     }
 
     for (const file of jsFiles) {
@@ -196081,7 +196194,16 @@ class ComponentModelAnalyzer {
       if (!isComponentView(file.filename)) continue;
 
       const modelBase = ComponentModelAnalyzer.modelBasenameFor(file.filename);
-      const modelEntry = modelBase ? jsonByBase.get(modelBase) : null;
+      // Resolve the co-located model in the VIEW's own component directory. Match the model entry whose
+      // path is `<viewComponentDir>/<modelBase>` by DIRECTORY SUFFIX — tolerant of abs-vs-relative path
+      // styles (the ESLint adapter passes an absolute model path but a cwd-relative view path). Directory
+      // pairing (not bare basename) is what prevents the same-basename cross-journey collision.
+      const viewDir = (file.filename || '').replace(/\\/g, '/').split('/').slice(0, -1).join('/');
+      const modelEntry = !modelBase ? null : (jsonList.find(({ norm }) => {
+        if (norm.split('/').pop() !== modelBase) return false;
+        const jdir = norm.split('/').slice(0, -1).join('/');
+        return jdir === viewDir || jdir.endsWith(`/${viewDir}`) || viewDir.endsWith(`/${jdir}`);
+      })?.jf) || null;
       if (!modelEntry) continue; // co-located model not in the analyzed set → skip (fail-safe)
 
       const model = ComponentModelAnalyzer.parseModel(modelEntry.content, modelEntry.filename);
@@ -196160,6 +196282,458 @@ class ComponentModelAnalyzer {
   }
 }
 
+;// CONCATENATED MODULE: ./src/analyzers/interactive-change-guard-analyzer.js
+
+
+
+
+
+/**
+ * Interactive-Change-Guard Analyzer
+ *
+ * A `change`/rule handler runs for BOTH a real user edit AND a bulk `form.importData` restore
+ * (resume / KYC-return / Perfios rehydrate). Only an interactive edit carries `eventSource` in
+ * `globals.event.payload`; a restore does not. A UI SIDE EFFECT — moving focus, auto-advancing to the
+ * next field, opening a modal, a scroll/click nudge — fired unconditionally therefore ALSO fires on a
+ * restore, where it intermittently corrupts UI state (the canonical failure: a restored 30-char
+ * address dispatches `focus`, sets activeChild, and yanks the wizard back to step 1, overriding the
+ * step the resume handler navigated to).
+ *
+ * THE CORRECT PATTERN (from personaldetails1.js): gate the side effect on an interactive change —
+ *   function isInteractiveChange(globals) {
+ *     return !!(globals.event && globals.event.payload && 'eventSource' in globals.event.payload);
+ *   }
+ *   if (val.length === 30 && isInteractiveChange(globals)) dispatchEvent(nextField, 'focus');
+ *
+ * Finding `ui-side-effect-without-interactive-guard` (error): a UI-only side effect
+ * (`dispatchEvent(<x>, 'focus'|'click'|'blur')`, `.focus()`, `.scrollIntoView()`, `.select()`) in a
+ * custom-fn-surface file that is NOT inside a guard whose test references `isInteractiveChange` or
+ * `eventSource`. If the side effect is genuinely wanted on restore too, suppress it inline.
+ *
+ * Scope: custom-fn surface only (fragment/scripts/*-rules.js) — the same tier gate the other
+ * design-canon analyzers use. Component-view/runtime DOM is legitimate and NOT flagged.
+ *
+ * Severity: error.
+ */
+class InteractiveChangeGuardAnalyzer {
+  constructor(config = null) {
+    this.config = config;
+  }
+
+  static isCustomFnSurface(filename) {
+    return isCustomFnSurface(filename);
+  }
+
+  // Synthetic UI events that only make sense on a real user interaction (never on a data restore).
+  static UI_EVENT_NAMES = new Set(['focus', 'blur', 'click', 'select']);
+  // Member-call side effects that drive the browser UI directly.
+  static UI_METHODS = new Set(['focus', 'blur', 'scrollIntoView', 'select', 'click']);
+
+  static calleeName(callee) {
+    if (!callee) return '';
+    if (callee.type === 'Identifier') return callee.name;
+    if (callee.type === 'MemberExpression') return callee.property?.name || '';
+    return '';
+  }
+
+  // Is this CallExpression a UI-only side effect?  dispatchEvent(<x>, 'focus'|…) or <x>.focus()/…
+  static uiSideEffect(node) {
+    if (node.type !== 'CallExpression') return null;
+    const name = InteractiveChangeGuardAnalyzer.calleeName(node.callee);
+    if (name === 'dispatchEvent') {
+      // 2nd arg is the event name; flag only the synthetic UI events (not custom:* data events).
+      const evt = node.arguments?.[1];
+      if (evt?.type === 'Literal' && typeof evt.value === 'string'
+        && InteractiveChangeGuardAnalyzer.UI_EVENT_NAMES.has(evt.value)) {
+        return `dispatchEvent(…, '${evt.value}')`;
+      }
+      return null;
+    }
+    // <member>.focus() / .scrollIntoView() / .select() / .blur()  (a member call, not a bare identifier)
+    if (node.callee?.type === 'MemberExpression' && InteractiveChangeGuardAnalyzer.UI_METHODS.has(name)
+      && (node.arguments?.length ?? 0) === 0) {
+      return `.${name}()`;
+    }
+    return null;
+  }
+
+  // Does any ancestor gate this node on an interactive-change check? A guard is an IfStatement,
+  // ConditionalExpression, or `&&` LogicalExpression whose TEST subtree mentions `isInteractiveChange`
+  // or `eventSource`. We test the guard's source text (cheap, robust to shape: `if (isInteractiveChange
+  // (g))`, `if ('eventSource' in g.event.payload)`, `x && isInteractiveChange(g) && …`).
+  static isGuarded(ancestors, sourceOf) {
+    for (const anc of ancestors) {
+      let test = null;
+      if (anc.type === 'IfStatement' || anc.type === 'ConditionalExpression') test = anc.test;
+      else if (anc.type === 'LogicalExpression' && anc.operator === '&&') test = anc;
+      if (!test) continue;
+      const src = sourceOf(test);
+      if (/\bisInteractiveChange\b|eventSource/.test(src)) return true;
+    }
+    return false;
+  }
+
+  analyze(formJson, jsFiles = []) {
+    const issues = [];
+    for (const jsFile of jsFiles) {
+      if (!jsFile?.filename || jsFile.content == null) continue;
+      if (!InteractiveChangeGuardAnalyzer.isCustomFnSurface(jsFile.filename)) continue;
+      let ast;
+      try {
+        ast = acorn_parse(jsFile.content, { ecmaVersion: 'latest', sourceType: 'module', locations: true, ranges: true });
+      } catch (e) {
+        lib_core.warning(`[InteractiveChangeGuard] parse failed for ${jsFile.filename}: ${e.message}`);
+        continue;
+      }
+      const sourceOf = (n) => jsFile.content.slice(n.start, n.end);
+      const seen = new Set();
+      ancestor(ast, {
+        CallExpression: (node, _state, ancestors) => {
+          const what = InteractiveChangeGuardAnalyzer.uiSideEffect(node);
+          if (!what) return;
+          if (InteractiveChangeGuardAnalyzer.isGuarded(ancestors, sourceOf)) return;
+          const line = node.loc?.start.line;
+          const key = `${line}|${what}`;
+          if (seen.has(key)) return;
+          seen.add(key);
+          issues.push({
+            severity: 'error',
+            type: 'ui-side-effect-without-interactive-guard',
+            file: jsFile.filename,
+            line,
+            message: `\`${what}\` is a UI side effect that fires on EVERY change — including a bulk `
+              + '`form.importData` restore (resume / KYC-return / Perfios), which carries no '
+              + '`eventSource`. On a restore this corrupts UI state (e.g. a rehydrated max-length field '
+              + 'auto-advances focus and yanks a wizard back to step 1). Gate it on an interactive '
+              + 'change: `if (isInteractiveChange(globals)) { … }` where `isInteractiveChange` = '
+              + "`!!(globals.event && globals.event.payload && 'eventSource' in globals.event.payload)`. "
+              + 'If the side effect is intended on restore too, suppress this line explicitly.',
+          });
+        },
+      });
+    }
+    return { violations: issues.length, issues };
+  }
+
+  compare(before, after) {
+    const b = before?.violations || 0;
+    const a = after?.violations || 0;
+    return { before: b, after: a, delta: a - b, regressed: a > b };
+  }
+}
+
+;// CONCATENATED MODULE: ./src/analyzers/async-value-race-analyzer.js
+
+
+
+
+
+/**
+ * Async-Value-Race Analyzer
+ *
+ * A value derived from an async `request()` / api-client `.then()` is committed to the model
+ * (`setVariable` / `setProperty` / `dispatchEvent` payload) only AFTER the promise resolves. If a
+ * synchronous downstream reads it before then — a fast Continue/submit, another rule on the same
+ * change, a navigation — it reads the stale/empty value. Two concrete, repeatedly-seen shapes:
+ *
+ *   (2a) READ-BEFORE-OWN-ASYNC-WRITE — the SAME function reads a form variable synchronously
+ *        (`getVariable('x')`) AND writes `x` inside a `.then` of a request in that function. The
+ *        sync read runs before the async write resolves → it sees the pre-fetch value.
+ *        e.g. prefetchStampDuty sets `loanOfferStampDuty` inside `.then`, but a caller reads it
+ *        synchronously right after (personaliseYourLoan.js). employer `category` is set inside the
+ *        getemployername `.then`; a submit that reads `employerCategory` first gets ''.
+ *
+ *   (2b) EMPTY-ON-CATCH — the `.catch` of a request/api-client chain writes an EMPTY/constant value
+ *        to the same model key the `.then` fills from the response
+ *        (`.catch(() => broadcast([]))` / `.catch(() => setVariable('x', '', form))`). A slow/failed
+ *        API silently yields empty data that looks valid — a silent data loss, not an error surface.
+ *
+ * Both findings are `error` (a race that intermittently drops real data). Anchors to the JS line of
+ * the async write / catch. Scope: custom-fn surface only.
+ *
+ * NOT flagged (documented, too heuristic for a static rule): cross-field reentrancy where two
+ * handlers share a dataRef and the second reads a stale widget value — the fix is a reentrancy guard
+ * flag (see `tenureSyncInProgress` in personaliseYourLoan.js), not something this rule can prove.
+ */
+class AsyncValueRaceAnalyzer {
+  constructor(config = null) {
+    this.config = config;
+  }
+
+  static isCustomFnSurface(filename) {
+    return isCustomFnSurface(filename);
+  }
+
+  static calleeName(callee) {
+    if (!callee) return '';
+    if (callee.type === 'Identifier') return callee.name;
+    if (callee.type === 'MemberExpression') return callee.property?.name || '';
+    return '';
+  }
+
+  // Async source: a `request(...)` call, or an api-client-style call whose result is `.then`ed. We
+  // detect it structurally as a `.then(` member call — the object is the async source.
+  static isThenCall(node) {
+    return node.type === 'CallExpression'
+      && node.callee?.type === 'MemberExpression'
+      && node.callee.property?.name === 'then';
+  }
+
+  static isCatchCall(node) {
+    return node.type === 'CallExpression'
+      && node.callee?.type === 'MemberExpression'
+      && node.callee.property?.name === 'catch';
+  }
+
+  // Classify which promise callback a node sits in: 'then' | 'catch' | null. `ancestors` is
+  // acorn-walk's outermost→innermost stack (ancestors[last] is the node itself). We walk INNERMOST
+  // first and return the first `.then`/`.catch` call the node is inside the CALLBACK ARG of — not merely
+  // has in its chain. This distinguishes `.catch(b)` from the upstream `.then(a)`: in
+  // `request().then(a).catch(b)`, a node in `b` is inside `.catch`'s arg but only inside `.then`'s
+  // OBJECT sub-tree (the `.then(...)` call is the callee.object of the `.catch`), so `.catch` wins.
+  static nearestPromiseCallback(node, ancestors) {
+    for (let i = ancestors.length - 2; i >= 0; i -= 1) { // -2: skip the node itself (last entry)
+      const anc = ancestors[i];
+      const isThen = AsyncValueRaceAnalyzer.isThenCall(anc);
+      const isCatch = AsyncValueRaceAnalyzer.isCatchCall(anc);
+      if (!isThen && !isCatch) continue;
+      // Is `node` within this call's callback ARGUMENT (arguments[0]), not its callee/object chain?
+      const cb = anc.arguments?.[0];
+      if (cb && node.start >= cb.start && node.end <= cb.end) {
+        return isThen ? 'then' : 'catch';
+      }
+    }
+    return null;
+  }
+
+  // First string-literal arg of a setVariable/getVariable call → the state key.
+  static firstStringArg(node) {
+    const a = node.arguments?.[0];
+    return (a?.type === 'Literal' && typeof a.value === 'string') ? a.value : null;
+  }
+
+  // Does the subtree write an EMPTY / constant literal for `key` via setVariable('key', <empty>)?
+  // Empty = '' , null, [], {} , or a bare `broadcast([])`-style call with an empty array/obj arg.
+  static writesEmpty(node) {
+    let empty = false;
+    const isEmptyLiteral = (n) => n
+      && ((n.type === 'Literal' && (n.value === '' || n.value === null))
+        || (n.type === 'ArrayExpression' && n.elements.length === 0)
+        || (n.type === 'ObjectExpression' && n.properties.length === 0));
+    simple(node, {
+      CallExpression: (c) => {
+        const name = AsyncValueRaceAnalyzer.calleeName(c.callee);
+        if (name === 'setVariable' && isEmptyLiteral(c.arguments?.[1])) empty = true;
+        // dispatchEvent(form, 'custom:x', <emptyArg>) OR a local broadcast([])/emit({}) helper.
+        if ((name === 'dispatchEvent' || /broadcast|emit|publish/i.test(name))
+          && (c.arguments || []).some(isEmptyLiteral)) empty = true;
+      },
+    });
+    return empty;
+  }
+
+  analyze(formJson, jsFiles = []) {
+    const issues = [];
+    for (const jsFile of jsFiles) {
+      if (!jsFile?.filename || jsFile.content == null) continue;
+      if (!AsyncValueRaceAnalyzer.isCustomFnSurface(jsFile.filename)) continue;
+      let ast;
+      try {
+        ast = acorn_parse(jsFile.content, { ecmaVersion: 'latest', sourceType: 'module', locations: true });
+      } catch (e) {
+        lib_core.warning(`[AsyncValueRace] parse failed for ${jsFile.filename}: ${e.message}`);
+        continue;
+      }
+      const seen = new Set();
+      const push = (type, line, message) => {
+        const key = `${type}|${line}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        issues.push({ severity: 'error', type, file: jsFile.filename, line, message });
+      };
+
+      // Walk each function: within it, collect sync getVariable keys, and keys written inside a .then.
+      simple(ast, {
+        FunctionDeclaration: (fn) => this._inspectFn(fn, push),
+        FunctionExpression: (fn) => this._inspectFn(fn, push),
+        ArrowFunctionExpression: (fn) => this._inspectFn(fn, push),
+      });
+    }
+    return { violations: issues.length, issues };
+  }
+
+  // Inspect ONE function for the two race shapes.
+  _inspectFn(fn, push) {
+    // Sync getVariable('x') reads that are NOT inside a .then/.catch of this fn (i.e. run synchronously).
+    const syncReads = new Map(); // key → line
+    const thenWrites = new Map(); // key → line (setVariable inside a .then)
+    let catchNode = null;
+    let thenNode = null;
+
+    ancestor(fn, {
+      CallExpression: (node, _state, ancestors) => {
+        const name = AsyncValueRaceAnalyzer.calleeName(node.callee);
+        // Which promise callback is this node in? In `request().then(a).catch(b)` a node inside `b`
+        // has BOTH the `.catch(...)` and the upstream `.then(...)` in its ancestor chain — so
+        // `ancestors.some(isThenCall)` is wrong (it reports true inside .catch). Find the NEAREST
+        // enclosing `.then`/`.catch` whose CALLBACK ARGUMENT actually contains this node.
+        const enclosing = AsyncValueRaceAnalyzer.nearestPromiseCallback(node, ancestors);
+        const insideThen = enclosing === 'then';
+        const insideCatch = enclosing === 'catch';
+
+        if (name === 'getVariable' && !insideThen && !insideCatch) {
+          const k = AsyncValueRaceAnalyzer.firstStringArg(node);
+          if (k && !syncReads.has(k)) syncReads.set(k, node.loc?.start.line);
+        }
+        if (name === 'setVariable' && insideThen) {
+          const k = AsyncValueRaceAnalyzer.firstStringArg(node);
+          if (k && !thenWrites.has(k)) thenWrites.set(k, node.loc?.start.line);
+        }
+        if (AsyncValueRaceAnalyzer.isThenCall(node) && !thenNode) thenNode = node;
+        if (AsyncValueRaceAnalyzer.isCatchCall(node) && !catchNode) catchNode = node;
+      },
+    });
+
+    // (2a) read-before-own-async-write: a key read synchronously AND written inside a .then here.
+    for (const [key, writeLine] of thenWrites) {
+      if (syncReads.has(key)) {
+        push('async-value-read-before-resolve', writeLine,
+          `\`${key}\` is written inside a \`.then\` (after an async request resolves) but also read `
+          + `synchronously (\`getVariable('${key}')\` at line ${syncReads.get(key)}) in the same `
+          + 'function — the sync read runs BEFORE the async write, so it sees the stale/pre-fetch '
+          + 'value. Order the read after the write (chain it inside the same `.then`), or await the '
+          + 'request, so the value is populated before anything consumes it.');
+      }
+    }
+
+    // (2b) empty-on-catch: a .catch that writes an empty/constant to a model key the .then fills.
+    if (catchNode && thenNode) {
+      const catchCb = catchNode.arguments?.[0];
+      const thenCb = thenNode.arguments?.[0];
+      if (catchCb && thenCb && AsyncValueRaceAnalyzer.writesEmpty(catchCb)) {
+        // The catch writes an empty/constant value (setVariable('x','') or a broadcast([])-style
+        // empty payload). That is the silent-data-loss signal on its own — the `.then` fills real
+        // data from the response, the `.catch` quietly substitutes empty.
+        push('async-empty-value-on-catch', catchNode.loc?.start.line,
+          'The `.catch` of a request/api-client chain writes an EMPTY/constant value to the model '
+          + '(e.g. `setVariable(x, \'\')` / `broadcast([])`). The af-core request pipeline resolves '
+          + '`{ok:false}` on failure (it never rejects), so a slow/failed API silently produces '
+          + 'empty data that looks valid — a silent data loss. Branch on `if (!res.ok)` inside '
+          + '`.then` and surface the failure (dispatch an error event), rather than writing an empty '
+          + 'value in `.catch`.');
+      }
+    }
+  }
+
+  compare(before, after) {
+    const b = before?.violations || 0;
+    const a = after?.violations || 0;
+    return { before: b, after: a, delta: a - b, regressed: a > b };
+  }
+}
+
+;// CONCATENATED MODULE: ./src/analyzers/component-rule-form-scope-analyzer.js
+
+
+
+
+
+/**
+ * Component-Rule-Form-Scope Analyzer
+ *
+ * A component rule script (`…/components/<name>/<name>-rules.js`, `…/scripts/components/<name>-rules.js`)
+ * is REUSED across many forms. Unlike a fragment — which owns exactly one form JSON and may read its own
+ * fields via `globals.fragment` — a reusable component must NOT reach into form or fragment scope at all:
+ *
+ *   - `globals.form.$properties.<key>` — reads a FORM-LEVEL variable that may not exist in every form the
+ *     component is embedded in. If the host form doesn't set `<key>`, it silently reads `undefined`.
+ *   - `globals.form.<field>` / `globals.fragment.<field>` — traverses into another field the component
+ *     doesn't own; couples it to a specific form/fragment layout.
+ *
+ * A reusable component gets its inputs from ITS OWN field (`globals.field` / an authored property on the
+ * field) or from an event payload, and communicates OUTWARD by broadcasting on the form. So these ARE
+ * allowed (form/fragment passed as a plain argument, never traversed):
+ *   - `dispatchEvent(globals.form, 'custom:x', payload, true)`  — broadcast (the correct outward pattern)
+ *   - `getVariable('k', globals.form)` / `setVariable('k', v, globals.form)` — form-scope var arg
+ *
+ * Finding `component-rule-reaches-form-scope` (error): a `globals.form`/`globals.fragment` MEMBER read
+ * (`.<field>`, `.$properties`, `.$value`, …) in a component-rule file, where the object is NOT merely
+ * passed as a call argument. Move the value onto the component's own field property or pass it in an
+ * event payload.
+ */
+class ComponentRuleFormScopeAnalyzer {
+  constructor(config = null) {
+    this.config = config;
+  }
+
+  static isComponentRule(filename) {
+    return isComponentRule(filename);
+  }
+
+  // Is `node` a `globals.form` / `globals.fragment` member expression (the object of a deeper access)?
+  static isFormOrFragmentBase(node) {
+    return node?.type === 'MemberExpression'
+      && node.object?.type === 'Identifier' && node.object.name === 'globals'
+      && (node.property?.name === 'form' || node.property?.name === 'fragment');
+  }
+
+  analyze(formJson, jsFiles = []) {
+    const issues = [];
+    for (const jsFile of jsFiles) {
+      if (!jsFile?.filename || jsFile.content == null) continue;
+      if (!ComponentRuleFormScopeAnalyzer.isComponentRule(jsFile.filename)) continue;
+
+      let ast;
+      try {
+        ast = acorn_parse(jsFile.content, { ecmaVersion: 'latest', sourceType: 'module', locations: true });
+      } catch (e) {
+        lib_core.warning(`[ComponentRuleFormScope] parse failed for ${jsFile.filename}: ${e.message}`);
+        continue;
+      }
+
+      const seen = new Set();
+      ancestor(ast, {
+        MemberExpression: (node, _state, ancestors) => {
+          // We want the access whose OBJECT is `globals.form`/`globals.fragment` — i.e. the `.X` in
+          // `globals.form.X`. `node.object` is that base; `node.property` is the accessed member.
+          if (!ComponentRuleFormScopeAnalyzer.isFormOrFragmentBase(node.object)) return;
+          const scope = node.object.property.name; // 'form' | 'fragment'
+
+          // Allowed: `globals.form`/`globals.fragment` passed as a plain ARGUMENT to a call
+          // (dispatchEvent(globals.form, …), getVariable('k', globals.form)) — that's the base node
+          // itself used as an arg, NOT a `.X` access on it. Here we already have a `.X` access, so it's
+          // a read/traversal — flag it. (The bare-arg case never reaches this handler as `node.object`.)
+          const member = node.computed ? '<computed>' : (node.property?.name || '');
+          const line = node.loc?.start.line;
+          const key = `${line}|${scope}.${member}`;
+          if (seen.has(key)) return;
+          seen.add(key);
+          issues.push({
+            severity: 'error',
+            type: 'component-rule-reaches-form-scope',
+            file: jsFile.filename,
+            line,
+            message: `A reusable component rule reads \`globals.${scope}.${member}\` — reaching into `
+              + `${scope} scope. This component is embedded in many forms; a form-level value like this `
+              + 'may not exist in every host (it silently reads `undefined`), and traversing another '
+              + "field couples the component to one form's layout. Get the value from the component's OWN "
+              + 'field (`globals.field` / an authored field property) or from an event payload, and '
+              + 'communicate outward by broadcasting `dispatchEvent(globals.form, \'custom:…\', payload, '
+              + 'true)` (passing `globals.form` as an argument is fine; reading through it is not).',
+          });
+        },
+      });
+    }
+    return { violations: issues.length, issues };
+  }
+
+  compare(before, after) {
+    const b = before?.violations || 0;
+    const a = after?.violations || 0;
+    return { before: b, after: a, delta: a - b, regressed: a > b };
+  }
+}
+
 ;// CONCATENATED MODULE: ./src/pipeline.js
 /**
  * Shared analyzer pipeline
@@ -196176,6 +196750,9 @@ class ComponentModelAnalyzer {
  * @param {Object} [logger]     - Optional logger: { info, warning, error }. Defaults to console.
  * @returns {Promise<Object>}   - Results object with one key per analyzer
  */
+
+
+
 
 
 
@@ -196290,6 +196867,11 @@ async function runAnalysis(beforeData, afterData, jsFiles = [], cssFiles = [], c
   const customFnCorrectnessResult = new CustomFnCorrectnessAnalyzer(config).analyze(formJson, jsFiles);
   const foreignFragmentRootResult = new ForeignFragmentRootAnalyzer(config).analyze(formJson, jsFiles, jsonFiles);
   const navigationInCustomFnResult = new NavigationInCustomFnAnalyzer(config).analyze(formJson, jsFiles);
+  // Intermittent-bug guards (JS-only): UI side effect fired on a restore; async value read before it
+  // resolves / empty-on-catch.
+  const interactiveChangeGuardResult = new InteractiveChangeGuardAnalyzer(config).analyze(formJson, jsFiles);
+  const asyncValueRaceResult       = new AsyncValueRaceAnalyzer(config).analyze(formJson, jsFiles);
+  const componentRuleFormScopeResult = new ComponentRuleFormScopeAnalyzer(config).analyze(formJson, jsFiles);
   const shouldBeComponentResult    = new ShouldBeComponentAnalyzer(config).analyze(formJson, jsFiles);
   const componentValueSyncResult   = new ComponentValueSyncAnalyzer(config).analyze(formJson, jsFiles);
   // Fail-safe: scans fragment JSON files (path contains /fragments/); empty/absent → no-op.
@@ -196424,6 +197006,9 @@ async function runAnalysis(beforeData, afterData, jsFiles = [], cssFiles = [], c
     customFnCorrectness: { after: customFnCorrectnessResult, newIssues: customFnCorrectnessResult.issues ?? [], resolvedIssues: [] },
     foreignFragmentRoot: { after: foreignFragmentRootResult, newIssues: foreignFragmentRootResult.issues ?? [], resolvedIssues: [] },
     navigationInCustomFn: { after: navigationInCustomFnResult, newIssues: navigationInCustomFnResult.issues ?? [], resolvedIssues: [] },
+    interactiveChangeGuard: { after: interactiveChangeGuardResult, newIssues: interactiveChangeGuardResult.issues ?? [], resolvedIssues: [] },
+    asyncValueRace: { after: asyncValueRaceResult, newIssues: asyncValueRaceResult.issues ?? [], resolvedIssues: [] },
+    componentRuleFormScope: { after: componentRuleFormScopeResult, newIssues: componentRuleFormScopeResult.issues ?? [], resolvedIssues: [] },
     shouldBeComponent: { after: shouldBeComponentResult, newIssues: shouldBeComponentResult.issues ?? [], resolvedIssues: [] },
     componentValueSync: { after: componentValueSyncResult, newIssues: componentValueSyncResult.issues ?? [], resolvedIssues: [] },
     fragmentRuleFormRef: { after: fragmentRuleFormRefResult, newIssues: fragmentRuleFormRefResult.issues ?? [], resolvedIssues: [] },
@@ -196537,6 +197122,9 @@ const DESIGN_CANON_KEYS = {
   customFnCorrectness: 'async custom fn (silently ignored) / field.parent (use $parent) / _jsonModel read (breaks tracking)',
   foreignFragmentRoot: 'fragment reaches into another concern\'s fields (own-root only; use the fragment contract)',
   navigationInCustomFn: 'navigation DOM (hand-built form / window.location) in a custom fn (route via submitForm / a view)',
+  interactiveChangeGuard: 'UI side effect (focus/auto-advance) not gated on an interactive change — fires on a form.importData restore',
+  asyncValueRace: 'value written inside a request .then but read synchronously (stale), or a .catch that writes an empty value (silent data loss)',
+  componentRuleFormScope: 'a reusable component rule reaches into form/fragment scope (reads globals.form.$properties / traverses a field) instead of using its own field or an event payload',
   shouldBeComponent: 'view/keystroke DOM in a fragment (querySelector / createElement / addEventListener — move to a component)',
   componentValueSync: 'component shadows the field value but never re-syncs on a later value change (importData/prefill/resume dropped)',
   fragmentRuleFormRef: 'fragment rule references the absolute form root $form (breaks standalone / on re-embed)',
