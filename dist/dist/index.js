@@ -189274,29 +189274,47 @@ class FormCSSAnalyzer {
   }
 
   /**
+   * Iterate the selector preludes in a stylesheet.
+   *
+   * A selector is a run of text ending at `{` that contains neither brace (`[^{}]+`). Forbidding
+   * BOTH braces is what fixes the original bug: a selector can never swallow the *previous* rule's
+   * declaration body (e.g. `grid-column: 1 / -1;` leaking in and being counted as combinators),
+   * because the closing `}` terminates the previous capture. It also naturally handles selectors
+   * nested directly inside an at-rule block (`@media { .foo { … } }`) — the inner `.foo` is preceded
+   * by `{`, which a `}`-anchor would miss. Comments are already blanked to spaces by stripComments
+   * before this runs. `index` is the offset of the selector text so callers report the correct line.
+   *
+   * @param {string} content
+   * @param {(selector: string, index: number) => void} fn
+   */
+  forEachSelector(content, fn) {
+    const selectorPattern = /([^{}]+)\{/g;
+
+    let match;
+    while ((match = selectorPattern.exec(content)) !== null) {
+      const selector = match[1].trim();
+      if (!selector || selector.startsWith('@')) continue;
+      // Offset of the trimmed selector within the captured group (skips leading whitespace/newlines).
+      const index = match.index + match[1].indexOf(selector);
+      fn(selector, index);
+    }
+  }
+
+  /**
    * Detect overly specific selectors
    * Issue: Slow selector matching, hard to maintain
    */
   detectDeepSelectors(filename, activeContent, originalContent) {
     const content = activeContent;
     const issues = [];
-    
-    // Match selectors (simplified - captures most cases)
-    const selectorPattern = /([^{]+)\{/g;
-    
-    let match;
-    while ((match = selectorPattern.exec(content)) !== null) {
-      const selector = match[1].trim();
-      
-      // Skip @-rules
-      if (selector.startsWith('@')) continue;
-      
-      // Count selector depth (number of spaces/combinators)
-      const depth = (selector.match(/[\s>+~]/g) || []).length;
-      
-      // Flag selectors deeper than 4 levels
-      if (depth > 4) {
-        const lineNumber = this.getLineNumber(content, match.index);
+
+    this.forEachSelector(content, (selector, index) => {
+      // Count selector depth (number of descendant/child/sibling combinators).
+      const depth = (selector.match(/[\s>+~]+/g) || []).length;
+
+      // Flag selectors deeper than 5 levels.
+      if (depth > 5) {
+        const lineNumber = this.getLineNumber(content, index);
 
         issues.push({
           severity: 'info',
@@ -189309,7 +189327,7 @@ class FormCSSAnalyzer {
           recommendation: 'Use BEM or utility classes to reduce selector depth. Deep selectors slow down CSS matching in forms with many elements.',
         });
       }
-    }
+    });
 
     return issues;
   }
@@ -189322,21 +189340,15 @@ class FormCSSAnalyzer {
     const content = activeContent;
     const issues = [];
     const selectorMap = new Map();
-    const selectorPattern = /([^{]+)\{/g;
-    
-    let match;
-    while ((match = selectorPattern.exec(content)) !== null) {
-      const selector = match[1].trim();
-      
-      if (selector.startsWith('@')) continue;
-      
+
+    this.forEachSelector(content, (selector, index) => {
       if (selectorMap.has(selector)) {
         selectorMap.get(selector).count++;
-        selectorMap.get(selector).positions.push(match.index);
+        selectorMap.get(selector).positions.push(index);
       } else {
-        selectorMap.set(selector, { count: 1, positions: [match.index] });
+        selectorMap.set(selector, { count: 1, positions: [index] });
       }
-    }
+    });
 
     // Find duplicates
     selectorMap.forEach((data, selector) => {
