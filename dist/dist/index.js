@@ -190499,7 +190499,132 @@ class RuntimeCLSAnalyzer {
   }
 }
 
+;// CONCATENATED MODULE: ./src/analyzers/alias-resolver.js
+
+
+/**
+ * Shared local-alias resolution for the field-chain analyzers.
+ *
+ * Many analyzers decide behaviour by matching a `globals.fragment/form/field.<...>` member chain (or a
+ * `window.location` / `document` chain). But authors routinely bind an intermediate node to a local
+ * first — by simple assignment OR by object destructuring — and then use the local:
+ *
+ *     const city = globals.fragment.root.panel.cityDropDown;   // simple alias
+ *     const { cityDropDown: city } = globals.fragment.root.panel; // destructure (rename)
+ *     const { slider } = globals.fragment.root.wrapper;          // destructure (shorthand)
+ *     ... setProperty(city, …) / city.$value ...
+ *
+ * A raw MemberExpression match sees only `city.$value` (a bare Identifier root), not the full chain, so
+ * the analyzer silently misses the case. This module expands those aliases so a consumer can recover
+ * the FULL segment chain a local ultimately refers to.
+ *
+ * Ambiguity is handled the safe way: a name re-bound to a DIFFERENT chain in the same file is "poisoned"
+ * (mapped to null) so it resolves to `null` (unknown) rather than a wrong chain — never a silent wrong
+ * exemption. Only ONE level of destructuring is tracked (nested/computed/rest patterns → unknown).
+ *
+ * SCOPE OF THIS PASS (deliberate): this is a best-effort LOCAL-alias resolver, NOT full data-flow.
+ * ESLint/espree give the AST but no value tracking, so an AST-shape rule misses aliased chains unless it
+ * resolves them itself — which is what this does for the common cases (simple `const x = chain`, object
+ * destructuring, transitive aliases). It does NOT follow values through function returns, reassigned
+ * `let`s, or conditional branches. Anything it can't resolve returns `null` (unknown) — a MISSED
+ * detection, never a false positive. Full data-flow would need a type engine (typescript-eslint), which
+ * is disproportionate for untyped form JS.
+ */
+
+/**
+ * Flatten a member/identifier chain to its dotted segments, ROOT-first (`globals.form.a.b` →
+ * `['globals','form','a','b']`, so `segs[0]` is the root identifier). Returns null for a non-static
+ * shape (a call in the middle, a computed non-string key, etc.).
+ * @param {object} node - an acorn AST node (Identifier | MemberExpression | ChainExpression)
+ * @returns {string[]|null}
+ */
+function chainSegments(node) {
+  // Unwrap optional-chaining: `a?.b` parses as ChainExpression wrapping the MemberExpression.
+  let cur = node?.type === 'ChainExpression' ? node.expression : node;
+  const segs = [];
+  while (cur) {
+    if (cur.type === 'ChainExpression') { cur = cur.expression; continue; }
+    if (cur.type === 'Identifier') { segs.unshift(cur.name); return segs; }
+    if (cur.type === 'MemberExpression') {
+      let key;
+      if (!cur.computed && cur.property?.type === 'Identifier') key = cur.property.name;
+      else if (cur.computed && cur.property?.type === 'Literal' && typeof cur.property.value === 'string') key = cur.property.value;
+      else return null;
+      segs.unshift(key);
+      cur = cur.object;
+    } else return null;
+  }
+  return segs;
+}
+
+/**
+ * Build the alias map for an AST: every `const/let/var` local that binds a static member/identifier
+ * chain — via a plain assignment OR one level of object destructuring — mapped to its full segment
+ * chain. A name bound to conflicting chains is mapped to `null` (ambiguous).
+ * @param {object} ast - parsed program
+ * @returns {Map<string, string[]|null>}
+ */
+function buildAliasMap(ast) {
+  const aliases = new Map();
+  const bind = (name, segs) => {
+    if (!name || !segs) return;
+    if (!aliases.has(name)) { aliases.set(name, segs); return; }
+    const prev = aliases.get(name);
+    if (!prev || prev.length !== segs.length || prev.some((s, i) => s !== segs[i])) {
+      aliases.set(name, null); // conflicting re-binding → ambiguous
+    }
+  };
+  // Poison a name to `null` (ambiguous → never resolves). Used for a binding we can't statically
+  // resolve, so a SAME name that IS a valid alias elsewhere doesn't get wrongly expanded through it.
+  const poison = (name) => { if (name) aliases.set(name, null); };
+  simple(ast, {
+    VariableDeclarator: (d) => {
+      if (!d.init) return;
+      const initSegs = chainSegments(d.init);
+      // `const x = <chain>` — alias; `const x = <non-chain>` (a call, etc.) — poison, don't ignore.
+      if (d.id?.type === 'Identifier') {
+        if (initSegs) bind(d.id.name, initSegs); else poison(d.id.name);
+        return;
+      }
+      // `const { key: local, shorthand } = <chain>` — each property aliases the chain + its key. If the
+      // init isn't a static chain, poison every bound local (same safety reasoning).
+      if (d.id?.type === 'ObjectPattern') {
+        for (const prop of d.id.properties) {
+          if (prop.type !== 'Property' || prop.computed) continue;
+          const keyName = prop.key?.type === 'Identifier' ? prop.key.name
+            : (prop.key?.type === 'Literal' && typeof prop.key.value === 'string' ? prop.key.value : null);
+          const localName = prop.value?.type === 'Identifier' ? prop.value.name : null; // rename or shorthand
+          if (!localName) continue;
+          if (initSegs && keyName) bind(localName, [...initSegs, keyName]);
+          else poison(localName);
+        }
+      }
+    },
+  });
+  return aliases;
+}
+
+/**
+ * Resolve a node's chain through the alias map, expanding a leading alias transitively. Returns the
+ * fully-expanded segment chain, or null when the node isn't a static chain or hits an ambiguous alias.
+ * @param {object} node
+ * @param {Map<string, string[]|null>} aliases - from buildAliasMap
+ * @returns {string[]|null}
+ */
+function resolveChain(node, aliases) {
+  let segs = chainSegments(node);
+  const seen = new Set();
+  while (segs && aliases.has(segs[0]) && !seen.has(segs[0])) {
+    seen.add(segs[0]);
+    const bound = aliases.get(segs[0]);
+    if (!bound) return null; // ambiguous alias — cannot safely resolve
+    segs = [...bound, ...segs.slice(1)];
+  }
+  return segs;
+}
+
 ;// CONCATENATED MODULE: ./src/analyzers/fragment-qualified-name-analyzer.js
+
 
 
 
@@ -190591,11 +190716,15 @@ class FragmentQualifiedNameAnalyzer {
         continue;
       }
 
+      // Local-alias map so a fragment field reached via a local (simple or destructured) resolves to
+      // its full globals.form.<fragmentName>… chain before matching. Threaded through explicitly.
+      const aliases = buildAliasMap(ast);
+
       const visitFn = (node, name) => {
         if (!flaggable.has(name)) return;
         analyzed++;
         const fragmentName = flaggable.get(name);
-        const fnIssues = this._scanFunction(node, name, fragmentName, file);
+        const fnIssues = this._scanFunction(node, name, fragmentName, file, aliases);
         issues.push(...fnIssues);
       };
 
@@ -190716,13 +190845,13 @@ class FragmentQualifiedNameAnalyzer {
    * Skips the function entirely if it already references `globals.fragment`
    * (developer is using the fragment API or fallback pattern intentionally).
    */
-  _scanFunction(fnNode, functionName, expectedFragment, file) {
+  _scanFunction(fnNode, functionName, expectedFragment, file, aliases = null) {
     let usesFragmentApi = false;
     const offenders = [];
 
     simple(fnNode, {
       MemberExpression: (node) => {
-        const path = this._getMemberPath(node);
+        const path = this._getMemberPath(node, aliases);
         if (!path) return;
         if (path === 'globals.fragment' || path.startsWith('globals.fragment.')) {
           usesFragmentApi = true;
@@ -190772,19 +190901,25 @@ class FragmentQualifiedNameAnalyzer {
   }
 
   /**
-   * Builds a dotted path from a MemberExpression chain. Mirrors the helper in
-   * custom-function-analyzer.js — returns null on computed access (a[b]).
+   * Builds a dotted path from a MemberExpression chain. `aliases` (per-file map) is passed explicitly.
+   * Resolves local aliases (simple + destructured) and STRING-literal computed access (`a["b"]`) to a
+   * static path; returns null only on truly dynamic computed access (`a[expr]`).
    */
-  _getMemberPath(node) {
+  _getMemberPath(node, aliases = null) {
     if (!node) return null;
+    // Resolve local aliases (simple + destructured) + string-literal computed access to the full chain.
+    if (aliases) {
+      const segs = resolveChain(node, aliases);
+      if (segs) return segs.join('.');
+    }
     if (node.type === 'Identifier') return node.name;
     if (node.type === 'MemberExpression') {
-      const obj = this._getMemberPath(node.object);
+      const obj = this._getMemberPath(node.object, aliases);
       const prop = node.computed ? null : node.property?.name;
       if (!obj || !prop) return null;
       return `${obj}.${prop}`;
     }
-    if (node.type === 'ChainExpression') return this._getMemberPath(node.expression);
+    if (node.type === 'ChainExpression') return this._getMemberPath(node.expression, aliases);
     return null;
   }
 
@@ -190810,6 +190945,7 @@ class FragmentQualifiedNameAnalyzer {
 }
 
 ;// CONCATENATED MODULE: ./src/analyzers/fragment-globals-scope-analyzer.js
+
 
 
 
@@ -190929,15 +191065,59 @@ class FragmentGlobalsScopeAnalyzer {
   _scanFile(ast, file) {
     const issues = [];
 
+    // Local-alias map so `globals.form` reached via a local (simple assignment OR destructuring) is
+    // resolved to its full chain before matching — e.g. `const { cityField } = globals.form;` then
+    // `cityField.value` resolves to `globals.form.cityField`. Threaded into _getMemberPath explicitly.
+    const aliases = buildAliasMap(ast);
+
     // First pass: find GENERIC form-$properties accessors — a function whose body reads
     // `<param>.form.$properties` (directly or `.properties`) and returns it keyed by a parameter.
     // e.g. `function readProp(globals, key){ return globals.form.$properties[key]; }`. We record the
     // function name + which param index is the KEY, so call sites can be judged by their literal key.
     const genericAccessors = this._findFormPropertyAccessors(ast);
 
+    // Track which alias locals were already reported at their binding, so we flag a destructured
+    // `globals.form.<field>` traversal ONCE (not on every `.value`/method access of the local).
+    const reportedAliasTraversal = new Set();
+
     ancestor(ast, {
       MemberExpression: (node, _state, ancestors) => {
-        const objPath = this._getMemberPath(node.object);
+        const objPath = this._getMemberPath(node.object, aliases);
+
+        // (B0) The OBJECT itself resolves (via a destructured/simple alias) to a `globals.form.<field>`
+        // traversal — e.g. `const { cityField } = globals.form; cityField.value` → node.object is
+        // `cityField` = `globals.form.cityField`. A direct `globals.form.cityField.value` is already
+        // handled by (B) below (its object is `globals.form`); this catches the ALIASED form, reported
+        // once per alias local.
+        if (aliases && node.object?.type === 'Identifier') {
+          const objSegs = resolveChain(node.object, aliases);
+          if (objSegs && objSegs.length >= 3 && objSegs[0] === 'globals' && objSegs[1] === 'form'
+            && objSegs[2] !== '$properties') {
+            const localName = node.object.name;
+            if (!reportedAliasTraversal.has(localName)) {
+              reportedAliasTraversal.add(localName);
+              const fullPath = objSegs.join('.');
+              issues.push({
+                severity: 'critical',
+                type: 'fragment-globals-form-traversal',
+                functionName: this._enclosingFunctionName(ancestors) || '(module scope)',
+                file: file.filename,
+                line: node.object.loc?.start.line ?? node.loc?.start.line,
+                path: fullPath,
+                message:
+                  `Fragment file references \`${fullPath}\` (via the local \`${localName}\`) — fragment ` +
+                  `code must not traverse the absolute form root. Use \`globals.fragment\` to keep this ` +
+                  `portable across embeddings.`,
+                recommendation:
+                  `Bind from \`globals.fragment\` instead of \`globals.form\`. Passing \`globals.form\` as ` +
+                  `a scope argument to getVariable/setVariable/dispatchEvent is still allowed — only ` +
+                  `field traversal is prohibited.`,
+                cwvImpact: 'Functional (breaks on re-embedded or renamed fragments)',
+              });
+            }
+            return;
+          }
+        }
 
         // (A) `globals.form.$properties.<key>` read — key-aware scope check. Handles dotted access
         // (`.queryParams`) AND computed STRING-literal access (`['uistate._x']`, common for namespaced
@@ -190989,7 +191169,18 @@ class FragmentGlobalsScopeAnalyzer {
       },
     });
 
-    return issues;
+    // Dedup traversal findings by resolved path: a simple alias (`const c = globals.form.x; c.value`)
+    // is flagged both at its RHS (case B, on `globals.form.x`) and at the use (B0, via the alias) —
+    // same violation, one path. Keep the first per (type|path). (Non-traversal findings have no `path`
+    // collision risk; they pass through.)
+    const seenPath = new Set();
+    return issues.filter((i) => {
+      if (i.type !== 'fragment-globals-form-traversal') return true;
+      const k = `${i.type}|${i.path}`;
+      if (seenPath.has(k)) return false;
+      seenPath.add(k);
+      return true;
+    });
   }
 
   // Flag a fragment's `globals.form.$properties.<key>` read. Exemptions / rules (per journey-state-model):
@@ -191114,16 +191305,23 @@ class FragmentGlobalsScopeAnalyzer {
     return null;
   }
 
-  _getMemberPath(node) {
+  // `aliases` (the per-file map from buildAliasMap) is passed explicitly — no hidden instance state.
+  _getMemberPath(node, aliases = null) {
     if (!node) return null;
+    // Resolve local aliases (simple + destructured) to the full chain first, so a member reached via a
+    // local (`const {cityField} = globals.form; cityField.value`) matches `globals.form.cityField`.
+    if (aliases) {
+      const segs = resolveChain(node, aliases);
+      if (segs) return segs.join('.');
+    }
     if (node.type === 'Identifier') return node.name;
     if (node.type === 'MemberExpression') {
-      const obj = this._getMemberPath(node.object);
+      const obj = this._getMemberPath(node.object, aliases);
       const prop = node.computed ? null : node.property?.name;
       if (!obj || !prop) return null;
       return `${obj}.${prop}`;
     }
-    if (node.type === 'ChainExpression') return this._getMemberPath(node.expression);
+    if (node.type === 'ChainExpression') return this._getMemberPath(node.expression, aliases);
     return null;
   }
 
@@ -191359,6 +191557,7 @@ class BlockDecoratorAnalyzer {
 
 
 
+
 /**
  * Field-Writes-Sibling Analyzer
  *
@@ -191406,8 +191605,21 @@ class FieldWritesSiblingAnalyzer {
   }
 
   // The first argument of setProperty(target, {...}) — is it a NAMED sibling (not self)?
-  static isSiblingTarget(argNode) {
-    if (!argNode || argNode.type !== 'MemberExpression') return false;
+  // `aliases` (optional) resolves a destructured/simple local target to its full chain, so
+  // `const { bankName } = globals.fragment.root.panel; setProperty(bankName, …)` is caught.
+  static isSiblingTarget(argNode, aliases = null) {
+    if (!argNode) return false;
+    // Resolve a bare local (destructured/simple alias) to its chain; a resolved sibling field is
+    // `globals.<form|fragment>.….<field>` (length ≥ 3) and NOT `globals.field` (self).
+    if (argNode.type === 'Identifier' && aliases) {
+      const segs = resolveChain(argNode, aliases);
+      if (segs && segs.length >= 3 && segs[0] === 'globals'
+        && (segs[1] === 'form' || segs[1] === 'fragment')) {
+        return true; // a destructured/aliased named-field target
+      }
+      return false; // an unresolved bare identifier is not judgeable as a sibling
+    }
+    if (argNode.type !== 'MemberExpression') return false;
     // self-write is allowed: globals.field / field (the field the rule is on)
     // sibling-write is a member chain rooted at globals (…fragment/form.<named field>) or a panel var.
     const root = FieldWritesSiblingAnalyzer.rootObjectName(argNode);
@@ -191430,6 +191642,7 @@ class FieldWritesSiblingAnalyzer {
         lib_core.warning(`[FieldWritesSibling] parse failed for ${jsFile.filename}: ${e.message}`);
         continue;
       }
+      const aliases = buildAliasMap(ast);
       simple(ast, {
         CallExpression: (node) => {
           const callee = node.callee;
@@ -191439,7 +191652,7 @@ class FieldWritesSiblingAnalyzer {
           if (!isSetProperty) return;
           const target = node.arguments?.[0];
           const payload = node.arguments?.[1];
-          if (FieldWritesSiblingAnalyzer.isSiblingTarget(target)
+          if (FieldWritesSiblingAnalyzer.isSiblingTarget(target, aliases)
             && FieldWritesSiblingAnalyzer.writesDataContent(payload)) {
             issues.push({
               severity: 'error',
@@ -191629,6 +191842,7 @@ class RequestErrorHandlingAnalyzer {
 
 
 
+
 /**
  * Dispatch-Target Analyzer
  *
@@ -191663,6 +191877,17 @@ class DispatchTargetAnalyzer {
         lib_core.warning(`[DispatchTarget] parse failed for ${jsFile.filename}: ${e.message}`);
         continue;
       }
+      const aliases = buildAliasMap(ast);
+      // target resolves to globals.field — direct (`globals.field`) or via a local
+      // (`const { field } = globals; dispatchEvent(field, …)`).
+      const resolvesToField = (t) => {
+        // Unwrap optional chaining (`globals?.field` → ChainExpression) before shape/alias checks.
+        const node = t?.type === 'ChainExpression' ? t.expression : t;
+        if (node?.type === 'MemberExpression' && node.object?.name === 'globals' && node.property?.name === 'field') return true;
+        // Direct or aliased: resolveChain (optional-chaining aware) → exactly globals.field.
+        const segs = resolveChain(node, aliases);
+        return !!segs && segs.length === 2 && segs[0] === 'globals' && segs[1] === 'field';
+      };
       simple(ast, {
         CallExpression: (node) => {
           const name = DispatchTargetAnalyzer.calleeName(node.callee);
@@ -191672,8 +191897,7 @@ class DispatchTargetAnalyzer {
             const target = node.arguments?.[0];
             const evtArg = node.arguments?.[1];
             const eventName = evtArg?.type === 'Literal' ? String(evtArg.value) : '';
-            const targetIsField = target?.type === 'MemberExpression'
-              && target.object?.name === 'globals' && target.property?.name === 'field';
+            const targetIsField = resolvesToField(target);
             if (targetIsField && eventName.startsWith('custom:')) {
               issues.push({
                 severity: 'error',
@@ -191994,6 +192218,7 @@ class HardcodedConfigAnalyzer {
 
 
 
+
 /**
  * Storage-Class Analyzer
  *
@@ -192092,25 +192317,6 @@ class StorageClassAnalyzer {
     return { key };
   }
 
-  // Ordered segment names of a member/identifier chain, root-first. Handles `.prop` and `['literal']`.
-  // Returns null on a dynamic computed segment (obj[expr]) — the chain can't be statically resolved.
-  //   globals.fragment.root.banner.greetingText → ['globals','fragment','root','banner','greetingText']
-  static chainSegments(node) {
-    const segs = [];
-    let cur = node;
-    while (cur) {
-      if (cur.type === 'Identifier') { segs.unshift(cur.name); return segs; }
-      if (cur.type === 'MemberExpression') {
-        let key;
-        if (!cur.computed && cur.property?.type === 'Identifier') key = cur.property.name;
-        else if (cur.computed && cur.property?.type === 'Literal' && typeof cur.property.value === 'string') key = cur.property.value;
-        else return null;
-        segs.unshift(key);
-        cur = cur.object;
-      } else return null;
-    }
-    return segs;
-  }
 
   // Classify a scope chain by how its target's property bag relates to restorable journey state:
   //   'field'           — the anchor segment is `.field` → component-owned transient (EXEMPT)
@@ -192213,33 +192419,9 @@ class StorageClassAnalyzer {
       // leaves it unresolved → classifyChain → 'unknown' → IN SCOPE → flagged. That is the safe
       // direction — a rare false-positive on an ambiguous alias, never a silent exemption of a real
       // violation. (A name re-declared with the SAME chain is not a conflict.)
-      const aliases = new Map(); // name → segments | null (null = ambiguous/poisoned)
-      simple(ast, {
-        VariableDeclarator: (d) => {
-          if (d.id?.type !== 'Identifier' || !d.init) return;
-          const segs = StorageClassAnalyzer.chainSegments(d.init);
-          if (!segs) return;
-          const name = d.id.name;
-          if (!aliases.has(name)) { aliases.set(name, segs); return; }
-          const prev = aliases.get(name);
-          if (!prev || prev.length !== segs.length || prev.some((s, i) => s !== segs[i])) {
-            aliases.set(name, null); // conflicting bindings → ambiguous
-          }
-        },
-      });
-      // Resolve a scope-arg node to its full segment chain, expanding a leading alias transitively.
-      // A poisoned (null) alias short-circuits to null (unresolved → in scope → flagged).
-      const resolve = (node) => {
-        let segs = StorageClassAnalyzer.chainSegments(node);
-        const seen = new Set();
-        while (segs && aliases.has(segs[0]) && !seen.has(segs[0])) {
-          seen.add(segs[0]);
-          const bound = aliases.get(segs[0]);
-          if (!bound) return null; // ambiguous alias — cannot safely resolve
-          segs = [...bound, ...segs.slice(1)];
-        }
-        return segs;
-      };
+      // Local-alias resolution (simple `const x = chain` + object destructuring) via the shared helper.
+      const aliases = buildAliasMap(ast);
+      const resolve = (node) => resolveChain(node, aliases);
 
       ancestor(ast, {
         CallExpression: (c, ancestors) => {
@@ -192527,6 +192709,7 @@ class CustomFnCorrectnessAnalyzer {
 
 
 
+
 /**
  * Form/Fragment Path-Validator Analyzer
  *
@@ -192619,8 +192802,8 @@ class FragmentPathValidatorAnalyzer {
   // Extract a `globals.<root>.<a>.<b>...` node-name chain (root = 'fragment' | 'form') from a member
   // expression. Returns the node-name segments after `globals.<root>` (stopping at the first non-node
   // tail seg), or null if it isn't a static chain on that root.
-  static chainForRoot(node, root) {
-    const segs = [];
+  static chainForRoot(node, root, aliases = null) {
+    let segs = [];
     let cur = node;
     while (cur && cur.type === 'MemberExpression') {
       if (cur.computed) return null;
@@ -192628,9 +192811,20 @@ class FragmentPathValidatorAnalyzer {
       segs.unshift(cur.property.name);
       cur = cur.object;
     }
-    if (cur?.type !== 'Identifier' || cur.name !== 'globals') return null;
-    if (segs[0] !== root) return null;
-    const after = segs.slice(1);
+    if (cur?.type === 'Identifier' && cur.name === 'globals') {
+      segs.unshift('globals');
+    } else if (cur?.type === 'Identifier' && aliases) {
+      // Leading identifier is a LOCAL alias (simple `const x = globals.<root>...` or a destructured
+      // `const { field } = globals.<root>...`). Expand it to the full `globals.*` chain, then continue.
+      const expanded = resolveChain(cur, aliases);
+      if (!expanded || expanded[0] !== 'globals') return null;
+      segs = [...expanded, ...segs];
+    } else {
+      return null;
+    }
+    // segs now starts with 'globals'; require globals.<root>.*
+    if (segs[1] !== root) return null;
+    const after = segs.slice(2);
     const nodes = [];
     for (const s of after) {
       if (FragmentPathValidatorAnalyzer.NON_NODE_SEG.has(s)) break;
@@ -192672,22 +192866,43 @@ class FragmentPathValidatorAnalyzer {
       const tag = FragmentPathValidatorAnalyzer.readPathTag(file.content);
       const root = tag ? tag.root : null;
 
+      // Local-alias map so a chain reached via a local (simple or destructured) resolves to its full
+      // globals.<root>.* form before validation — `const { cityDropDown } = globals.fragment.root;
+      // cityDropDown.$value` → globals.fragment.root.cityDropDown.
+      const aliases = buildAliasMap(ast);
+
       // Collect MAXIMAL globals.<root>.* chains (depth >= 2). If no tag, probe BOTH roots to decide
       // whether to nudge for an annotation. Skip an inner member whose parent extends the same chain.
       const rootsToScan = root ? [root] : ['fragment', 'form'];
       const chains = [];
       let referencesAnyRoot = false;
+      const takeChain = (node, line) => {
+        for (const r of rootsToScan) {
+          const nodes = FragmentPathValidatorAnalyzer.chainForRoot(node, r, aliases);
+          if (nodes && nodes.length >= 2) {
+            referencesAnyRoot = true;
+            if (root) chains.push({ nodes, line });
+          }
+        }
+      };
       ancestor(ast, {
         MemberExpression: (m, _state, ancestors) => {
           const parent = ancestors[ancestors.length - 2];
           if (parent?.type === 'MemberExpression' && parent.object === m) return; // inner prefix → skip
-          for (const r of rootsToScan) {
-            const nodes = FragmentPathValidatorAnalyzer.chainForRoot(m, r);
-            if (nodes && nodes.length >= 2) {
-              referencesAnyRoot = true;
-              if (root) chains.push({ nodes, line: m.loc?.start.line });
-            }
-          }
+          takeChain(m, m.loc?.start.line);
+        },
+        // A bare alias identifier used directly (e.g. a destructured `cityDropDown` passed to
+        // setProperty) — resolve it too. Skip identifiers that are the object of a MemberExpression
+        // (handled above via the full chain) or the alias's own declaration.
+        Identifier: (id, _state, ancestors) => {
+          const parent = ancestors[ancestors.length - 2];
+          if (parent?.type === 'MemberExpression') return;        // part of a chain → handled above
+          if (parent?.type === 'VariableDeclarator' && parent.id === id) return; // its own binding
+          // Skip an identifier that is a DESTRUCTURE-pattern key/value node (its binding, not a use) —
+          // but NOT an alias used as an object-LITERAL property value (that's a real use we must judge).
+          if (parent?.type === 'Property' && ancestors[ancestors.length - 3]?.type === 'ObjectPattern') return;
+          if (!aliases.has(id.name)) return;
+          takeChain(id, id.loc?.start.line);
         },
       });
 
@@ -192808,6 +193023,7 @@ class FragmentPathValidatorAnalyzer {
 }
 
 ;// CONCATENATED MODULE: ./src/analyzers/foreign-fragment-root-analyzer.js
+
 
 
 
@@ -192957,14 +193173,26 @@ class ForeignFragmentRootAnalyzer {
     }
     const { roots } = FragmentPathValidatorAnalyzer.jsonPathSet(json);
 
-    // Collect maximal globals.<root>.* chains (same extraction path-validator uses).
+    // Collect maximal globals.<root>.* chains (same extraction path-validator uses), alias-aware so a
+    // destructured/simple local resolving to globals.<root>.* is judged too.
+    const aliases = buildAliasMap(ast);
     const chains = [];
     ancestor(ast, {
       MemberExpression: (m, _state, ancestors) => {
         const parent = ancestors[ancestors.length - 2];
         if (parent?.type === 'MemberExpression' && parent.object === m) return; // inner prefix → skip
-        const nodes = FragmentPathValidatorAnalyzer.chainForRoot(m, tag.root);
+        const nodes = FragmentPathValidatorAnalyzer.chainForRoot(m, tag.root, aliases);
         if (nodes && nodes.length >= 1) chains.push({ nodes, line: m.loc?.start.line });
+      },
+      Identifier: (id, _state, ancestors) => {
+        const parent = ancestors[ancestors.length - 2];
+        if (parent?.type === 'MemberExpression') return;
+        if (parent?.type === 'VariableDeclarator' && parent.id === id) return;
+        // destructure-pattern binding (not an alias used as an object-literal value) → skip
+        if (parent?.type === 'Property' && ancestors[ancestors.length - 3]?.type === 'ObjectPattern') return;
+        if (!aliases.has(id.name)) return;
+        const nodes = FragmentPathValidatorAnalyzer.chainForRoot(id, tag.root, aliases);
+        if (nodes && nodes.length >= 1) chains.push({ nodes, line: id.loc?.start.line });
       },
     });
     if (chains.length === 0) return null; // nothing static to judge → defer to heuristic
@@ -196638,6 +196866,7 @@ class AsyncValueRaceAnalyzer {
 
 
 
+
 /**
  * Component-Rule-Form-Scope Analyzer
  *
@@ -196670,13 +196899,6 @@ class ComponentRuleFormScopeAnalyzer {
     return isComponentRule(filename);
   }
 
-  // Is `node` a `globals.form` / `globals.fragment` member expression (the object of a deeper access)?
-  static isFormOrFragmentBase(node) {
-    return node?.type === 'MemberExpression'
-      && node.object?.type === 'Identifier' && node.object.name === 'globals'
-      && (node.property?.name === 'form' || node.property?.name === 'fragment');
-  }
-
   analyze(formJson, jsFiles = []) {
     const issues = [];
     for (const jsFile of jsFiles) {
@@ -196691,36 +196913,71 @@ class ComponentRuleFormScopeAnalyzer {
         continue;
       }
 
+      // Alias map so a destructured/simple local that binds into form/fragment scope is caught too
+      // (`const { loanAmount } = globals.form; return loanAmount;`).
+      const aliases = buildAliasMap(ast);
       const seen = new Set();
+      const flagIfScopeRead = (node, ancestors) => {
+        // Resolve the full chain (through aliases). A READ INTO scope is `globals.<form|fragment>.<X>…`
+        // (length ≥ 3). The bare base `globals.form` (length 2) passed as an arg is allowed — it has no
+        // `.X`, so it never reaches length 3 here.
+        let segs = resolveChain(node, aliases);
+        // Computed/dynamic access (`globals.form[expr]`, or a deeper `globals.form[expr].x`) →
+        // resolveChain returns null (a non-static key breaks the chain). Still a scope reach: walk down
+        // the object chain; if a link's object resolves to exactly globals.form/fragment, flag it.
+        if (!segs) {
+          let cur = node;
+          while (cur?.type === 'MemberExpression') {
+            const objSegs = resolveChain(cur.object, aliases);
+            if (objSegs && objSegs.length === 2 && objSegs[0] === 'globals'
+              && (objSegs[1] === 'form' || objSegs[1] === 'fragment')) {
+              segs = [...objSegs, '<computed>'];
+              break;
+            }
+            cur = cur.object;
+          }
+        }
+        if (!segs || segs.length < 3 || segs[0] !== 'globals') return false;
+        const scope = segs[1];
+        if (scope !== 'form' && scope !== 'fragment') return false;
+        const member = segs[2];
+        const line = node.loc?.start.line;
+        const key = `${scope}.${member}`; // dedup per resolved scope.member (not per line/use)
+        if (seen.has(key)) return true;
+        seen.add(key);
+        issues.push({
+          severity: 'error',
+          type: 'component-rule-reaches-form-scope',
+          file: jsFile.filename,
+          line,
+          message: `A reusable component rule reads \`globals.${scope}.${member}\` — reaching into `
+            + `${scope} scope. This component is embedded in many forms; a form-level value like this `
+            + 'may not exist in every host (it silently reads `undefined`), and traversing another '
+            + "field couples the component to one form's layout. Get the value from the component's OWN "
+            + 'field (`globals.field` / an authored field property) or from an event payload, and '
+            + 'communicate outward by broadcasting `dispatchEvent(globals.form, \'custom:…\', payload, '
+            + 'true)` (passing `globals.form` as an argument is fine; reading through it is not).',
+        });
+        return true;
+      };
       ancestor(ast, {
+        // Match the MAXIMAL chain: skip a MemberExpression that is the object of another (its parent
+        // extends it), then flag the node itself if it resolves to `globals.<form|fragment>.<X>…`.
+        // `globals.form.X.$value` → the outer `.$value` node resolves to length ≥4 (flagged, member X);
+        // bare `globals.form.X` → flagged directly. Aliased locals resolve the same way.
         MemberExpression: (node, _state, ancestors) => {
-          // We want the access whose OBJECT is `globals.form`/`globals.fragment` — i.e. the `.X` in
-          // `globals.form.X`. `node.object` is that base; `node.property` is the accessed member.
-          if (!ComponentRuleFormScopeAnalyzer.isFormOrFragmentBase(node.object)) return;
-          const scope = node.object.property.name; // 'form' | 'fragment'
-
-          // Allowed: `globals.form`/`globals.fragment` passed as a plain ARGUMENT to a call
-          // (dispatchEvent(globals.form, …), getVariable('k', globals.form)) — that's the base node
-          // itself used as an arg, NOT a `.X` access on it. Here we already have a `.X` access, so it's
-          // a read/traversal — flag it. (The bare-arg case never reaches this handler as `node.object`.)
-          const member = node.computed ? '<computed>' : (node.property?.name || '');
-          const line = node.loc?.start.line;
-          const key = `${line}|${scope}.${member}`;
-          if (seen.has(key)) return;
-          seen.add(key);
-          issues.push({
-            severity: 'error',
-            type: 'component-rule-reaches-form-scope',
-            file: jsFile.filename,
-            line,
-            message: `A reusable component rule reads \`globals.${scope}.${member}\` — reaching into `
-              + `${scope} scope. This component is embedded in many forms; a form-level value like this `
-              + 'may not exist in every host (it silently reads `undefined`), and traversing another '
-              + "field couples the component to one form's layout. Get the value from the component's OWN "
-              + 'field (`globals.field` / an authored field property) or from an event payload, and '
-              + 'communicate outward by broadcasting `dispatchEvent(globals.form, \'custom:…\', payload, '
-              + 'true)` (passing `globals.form` as an argument is fine; reading through it is not).',
-          });
+          const parent = ancestors[ancestors.length - 2];
+          if (parent?.type === 'MemberExpression' && parent.object === node) return; // inner prefix
+          flagIfScopeRead(node, ancestors);
+        },
+        // Bare alias identifier used directly (destructured `const { loanAmount } = globals.form;
+        // return loanAmount`). Skip identifiers that are part of a chain / their own binding.
+        Identifier: (id, _state, ancestors) => {
+          const parent = ancestors[ancestors.length - 2];
+          if (parent?.type === 'MemberExpression') return;
+          if (parent?.type === 'VariableDeclarator' && parent.id === id) return;
+          if (parent?.type === 'Property') return;
+          flagIfScopeRead(id, ancestors);
         },
       });
     }
