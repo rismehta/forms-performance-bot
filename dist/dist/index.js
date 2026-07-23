@@ -181127,7 +181127,125 @@ base.MethodDefinition = base.PropertyDefinition = base.Property = function (node
 
 
 
+;// CONCATENATED MODULE: ./src/analyzers/form-file-tiers.js
+/**
+ * Generic, structure-agnostic classification of authored form JS files into ownership tiers.
+ *
+ * Keys off relocatable folder/basename SIGNALS — never a fixed top-level anchor like `blocks/form/`
+ * — so it survives every layout: `blocks/form/scripts/fragment/…`, `blocks/fragment/…`, and the
+ * agreed ACS layout `journeys/<journey>/{fragments,form}/…`.
+ *
+ * Tiers:
+ *  - Component VIEW (`…/components/<name>/<name>.js`, NOT `<name>-rules.js`) — DOM legitimate.
+ *  - Form RUNTIME (basename `form*.js` / `decorateForm.js` / `util.js` / `aem.js`) — DOM legitimate.
+ *  - Custom-fn SURFACE (fragment(s)/ folder, `*-rules.js`, `functions[.source].js`, or scripts/) —
+ *    orchestration code where DOM / navigation / direct field reach is FORBIDDEN.
+ *  - Everything else (site header, router, tests, third-party) — not form code; no opinion.
+ */
+
+const norm = (f) => (f || '').replace(/\\/g, '/');
+const basename = (f) => norm(f).split('/').pop();
+
+/**
+ * Component view file: `…/components/<name>/<file>.js` but NOT a `*-rules.js` (that is a custom-fn
+ * surface). DOM is legitimate here — the component owns its own view.
+ */
+function isComponentView(filename) {
+  const f = norm(filename);
+  return /(^|\/)components\/[^/]+\/[^/]+\.js$/.test(f) && !/-rules\.js$/.test(f);
+}
+
+/**
+ * Component RULE script: a `*-rules.js` that belongs to a reusable component — either co-located
+ * (`…/components/<name>/<name>-rules.js`) or in a shared component-rules folder
+ * (`…/scripts/components/<name>-rules.js`). These provide the THEN-logic a component's `change`/event
+ * rule calls, and are reused across MANY forms — so unlike a fragment (which owns one form JSON) a
+ * component rule must NOT reach into form/fragment scope at all: no `globals.form.<field>` traversal,
+ * no `globals.form.$properties.<key>` read. It gets values from its own field (`globals.field`) or an
+ * event payload, and communicates outward by broadcasting (`dispatchEvent(globals.form, …)`).
+ */
+function isComponentRule(filename) {
+  const f = norm(filename);
+  return /-rules\.js$/.test(f)
+    && (/(^|\/)components\/[^/]+\/[^/]+-rules\.js$/.test(f)   // components/<name>/<name>-rules.js
+      || /(^|\/)scripts\/components\/[^/]+-rules\.js$/.test(f)); // scripts/components/<name>-rules.js
+}
+
+/**
+ * Form-block runtime where DOM is the job. Basename match (folder-agnostic).
+ */
+function isFormRuntime(filename) {
+  return /^(form.*|decorateForm|util|aem)\.js$/.test(basename(filename));
+}
+
+/**
+ * A fragment / custom-function SURFACE: orchestration code where view DOM, navigation DOM, and
+ * cross-fragment field reach are forbidden. Component views and form runtime are excluded (their DOM
+ * is legitimate). Signals — any of:
+ *  - under a fragment folder:      `.../fragment/...` or `.../fragments/...`
+ *  - a rules file:                 `<name>-rules.js`
+ *  - the custom-functions entry:   `functions.js` / `functions.source.js`
+ *  - under a scripts folder:       `.../scripts/...`
+ */
+function isCustomFnSurface(filename) {
+  if (isComponentView(filename) || isFormRuntime(filename)) return false;
+  const f = norm(filename);
+  return /(^|\/)fragments?\//.test(f)
+    || /-rules\.js$/.test(f)
+    || /^functions(\.source)?\.js$/.test(basename(filename))
+    || /(^|\/)scripts\//.test(f);
+}
+
+/**
+ * Does a parsed JSON object have the xwalk component-authoring MODEL shape? A model carries a
+ * `definitions[]` array (with the xwalk `plugins` block that names the resource/template) and/or a
+ * `models[]` array of `{ id, fields[] }`. This is what distinguishes a real component model from any
+ * other `_`-prefixed JSON that happens to sit in a component folder (a fixture, a config blob, etc.).
+ * @param {object} obj - parsed JSON
+ */
+function hasComponentModelShape(obj) {
+  if (!obj || typeof obj !== 'object') return false;
+  const defs = Array.isArray(obj.definitions) ? obj.definitions : [];
+  const models = Array.isArray(obj.models) ? obj.models : [];
+  const defHasXwalk = defs.some((d) => d && typeof d === 'object' && d.plugins && typeof d.plugins === 'object');
+  const modelHasFields = models.some((m) => m && Array.isArray(m.fields));
+  return defHasXwalk || modelHasFields;
+}
+
+/**
+ * Component authoring MODEL JSON: `…/components/<name>/_<file>.json` — the `_`-prefixed model
+ * definition co-located with a component view (e.g. `_loan-range-slider-with-ticks.json`). This is the
+ * xwalk authoring surface (`definitions`/`models`), NOT runtime form JSON, so it must be routed to the
+ * model-aware analyzer rather than the runtime-JSON ones. Shared includes under `…/models/…` are NOT
+ * component models (they have no co-located view) and are excluded.
+ *
+ * Path is necessary but not sufficient — when `content` is supplied it is parsed and validated against
+ * the model shape (see hasComponentModelShape), so a stray `_x.json` in a component folder is NOT
+ * misclassified. Without content (path-only callers) the path check stands alone.
+ * @param {{filename: string, content?: string}|string} file
+ */
+function isComponentModelJson(file) {
+  const filename = typeof file === 'string' ? file : file?.filename;
+  if (!/(^|\/)components\/[^/]+\/_[^/]+\.json$/.test(norm(filename))) return false;
+  const content = typeof file === 'object' ? file?.content : undefined;
+  if (content == null) return true; // path-only caller — can't verify shape, trust the path
+  try { return hasComponentModelShape(JSON.parse(content)); } catch { return false; }
+}
+
+/**
+ * A shared model INCLUDE target: a `_`-prefixed JSON under a `…/models/…` dir (e.g.
+ * `models/form-common/_number-validation-fields.json`). These aren't analyzed themselves, but the
+ * component-model analyzer must SEE them to resolve a model's `...`-includes — otherwise a field a
+ * shared include provides would be falsely flagged as an undeclared read.
+ * @param {{filename: string}|string} file
+ */
+function isModelIncludeJson(file) {
+  const filename = typeof file === 'string' ? file : file?.filename;
+  return /(^|\/)models\/.*\/_[^/]+\.json$/.test(norm(filename)) || /(^|\/)models\/_[^/]+\.json$/.test(norm(filename));
+}
+
 ;// CONCATENATED MODULE: ./src/analyzers/custom-function-analyzer.js
+
 
 
 
@@ -181156,6 +181274,13 @@ class CustomFunctionAnalyzer {
       // Analyze all JS files for exported functions
       const allFunctionAnalyses = [];
       for (const jsFile of jsFiles) {
+        // Component view files are custom-component code, not custom functions. Their view helpers
+        // are *supposed* to manipulate the DOM, so skip them to avoid false-positive dom/window-access
+        // violations. (isComponentView excludes *-rules.js, which do carry custom-fn logic.)
+        if (isComponentView(jsFile.filename)) {
+          lib_core.info(`[CustomFunctions] Skipping component view file (not a custom function): ${jsFile.filename}`);
+          continue;
+        }
         try {
           // Parse with locations enabled to get line numbers
           const ast = acorn_parse(jsFile.content, {
@@ -193229,123 +193354,6 @@ class ForeignFragmentRootAnalyzer {
     const a = after?.violations || 0;
     return { before: b, after: a, delta: a - b, regressed: a > b };
   }
-}
-
-;// CONCATENATED MODULE: ./src/analyzers/form-file-tiers.js
-/**
- * Generic, structure-agnostic classification of authored form JS files into ownership tiers.
- *
- * Keys off relocatable folder/basename SIGNALS — never a fixed top-level anchor like `blocks/form/`
- * — so it survives every layout: `blocks/form/scripts/fragment/…`, `blocks/fragment/…`, and the
- * agreed ACS layout `journeys/<journey>/{fragments,form}/…`.
- *
- * Tiers:
- *  - Component VIEW (`…/components/<name>/<name>.js`, NOT `<name>-rules.js`) — DOM legitimate.
- *  - Form RUNTIME (basename `form*.js` / `decorateForm.js` / `util.js` / `aem.js`) — DOM legitimate.
- *  - Custom-fn SURFACE (fragment(s)/ folder, `*-rules.js`, `functions[.source].js`, or scripts/) —
- *    orchestration code where DOM / navigation / direct field reach is FORBIDDEN.
- *  - Everything else (site header, router, tests, third-party) — not form code; no opinion.
- */
-
-const norm = (f) => (f || '').replace(/\\/g, '/');
-const basename = (f) => norm(f).split('/').pop();
-
-/**
- * Component view file: `…/components/<name>/<file>.js` but NOT a `*-rules.js` (that is a custom-fn
- * surface). DOM is legitimate here — the component owns its own view.
- */
-function isComponentView(filename) {
-  const f = norm(filename);
-  return /(^|\/)components\/[^/]+\/[^/]+\.js$/.test(f) && !/-rules\.js$/.test(f);
-}
-
-/**
- * Component RULE script: a `*-rules.js` that belongs to a reusable component — either co-located
- * (`…/components/<name>/<name>-rules.js`) or in a shared component-rules folder
- * (`…/scripts/components/<name>-rules.js`). These provide the THEN-logic a component's `change`/event
- * rule calls, and are reused across MANY forms — so unlike a fragment (which owns one form JSON) a
- * component rule must NOT reach into form/fragment scope at all: no `globals.form.<field>` traversal,
- * no `globals.form.$properties.<key>` read. It gets values from its own field (`globals.field`) or an
- * event payload, and communicates outward by broadcasting (`dispatchEvent(globals.form, …)`).
- */
-function isComponentRule(filename) {
-  const f = norm(filename);
-  return /-rules\.js$/.test(f)
-    && (/(^|\/)components\/[^/]+\/[^/]+-rules\.js$/.test(f)   // components/<name>/<name>-rules.js
-      || /(^|\/)scripts\/components\/[^/]+-rules\.js$/.test(f)); // scripts/components/<name>-rules.js
-}
-
-/**
- * Form-block runtime where DOM is the job. Basename match (folder-agnostic).
- */
-function isFormRuntime(filename) {
-  return /^(form.*|decorateForm|util|aem)\.js$/.test(basename(filename));
-}
-
-/**
- * A fragment / custom-function SURFACE: orchestration code where view DOM, navigation DOM, and
- * cross-fragment field reach are forbidden. Component views and form runtime are excluded (their DOM
- * is legitimate). Signals — any of:
- *  - under a fragment folder:      `.../fragment/...` or `.../fragments/...`
- *  - a rules file:                 `<name>-rules.js`
- *  - the custom-functions entry:   `functions.js` / `functions.source.js`
- *  - under a scripts folder:       `.../scripts/...`
- */
-function isCustomFnSurface(filename) {
-  if (isComponentView(filename) || isFormRuntime(filename)) return false;
-  const f = norm(filename);
-  return /(^|\/)fragments?\//.test(f)
-    || /-rules\.js$/.test(f)
-    || /^functions(\.source)?\.js$/.test(basename(filename))
-    || /(^|\/)scripts\//.test(f);
-}
-
-/**
- * Does a parsed JSON object have the xwalk component-authoring MODEL shape? A model carries a
- * `definitions[]` array (with the xwalk `plugins` block that names the resource/template) and/or a
- * `models[]` array of `{ id, fields[] }`. This is what distinguishes a real component model from any
- * other `_`-prefixed JSON that happens to sit in a component folder (a fixture, a config blob, etc.).
- * @param {object} obj - parsed JSON
- */
-function hasComponentModelShape(obj) {
-  if (!obj || typeof obj !== 'object') return false;
-  const defs = Array.isArray(obj.definitions) ? obj.definitions : [];
-  const models = Array.isArray(obj.models) ? obj.models : [];
-  const defHasXwalk = defs.some((d) => d && typeof d === 'object' && d.plugins && typeof d.plugins === 'object');
-  const modelHasFields = models.some((m) => m && Array.isArray(m.fields));
-  return defHasXwalk || modelHasFields;
-}
-
-/**
- * Component authoring MODEL JSON: `…/components/<name>/_<file>.json` — the `_`-prefixed model
- * definition co-located with a component view (e.g. `_loan-range-slider-with-ticks.json`). This is the
- * xwalk authoring surface (`definitions`/`models`), NOT runtime form JSON, so it must be routed to the
- * model-aware analyzer rather than the runtime-JSON ones. Shared includes under `…/models/…` are NOT
- * component models (they have no co-located view) and are excluded.
- *
- * Path is necessary but not sufficient — when `content` is supplied it is parsed and validated against
- * the model shape (see hasComponentModelShape), so a stray `_x.json` in a component folder is NOT
- * misclassified. Without content (path-only callers) the path check stands alone.
- * @param {{filename: string, content?: string}|string} file
- */
-function isComponentModelJson(file) {
-  const filename = typeof file === 'string' ? file : file?.filename;
-  if (!/(^|\/)components\/[^/]+\/_[^/]+\.json$/.test(norm(filename))) return false;
-  const content = typeof file === 'object' ? file?.content : undefined;
-  if (content == null) return true; // path-only caller — can't verify shape, trust the path
-  try { return hasComponentModelShape(JSON.parse(content)); } catch { return false; }
-}
-
-/**
- * A shared model INCLUDE target: a `_`-prefixed JSON under a `…/models/…` dir (e.g.
- * `models/form-common/_number-validation-fields.json`). These aren't analyzed themselves, but the
- * component-model analyzer must SEE them to resolve a model's `...`-includes — otherwise a field a
- * shared include provides would be falsely flagged as an undeclared read.
- * @param {{filename: string}|string} file
- */
-function isModelIncludeJson(file) {
-  const filename = typeof file === 'string' ? file : file?.filename;
-  return /(^|\/)models\/.*\/_[^/]+\.json$/.test(norm(filename)) || /(^|\/)models\/_[^/]+\.json$/.test(norm(filename));
 }
 
 ;// CONCATENATED MODULE: ./src/analyzers/navigation-in-custom-fn-analyzer.js
