@@ -189309,8 +189309,20 @@ class FormCSSAnalyzer {
     const issues = [];
 
     this.forEachSelector(content, (selector, index) => {
-      // Count selector depth (number of descendant/child/sibling combinators).
-      const depth = (selector.match(/[\s>+~]+/g) || []).length;
+      // A comma groups INDEPENDENT selectors — the comma is a separator, not a combinator. Depth is
+      // the max over the grouped selectors, not the sum (summing scales with how many selectors you
+      // group, so a group of trivial selectors would falsely read as "deep").
+      let deepest = '';
+      let depth = 0;
+      for (const part of selector.split(',')) {
+        const single = part.trim();
+        if (!single) continue;
+        const d = (single.match(/[\s>+~]+/g) || []).length;
+        if (d > depth) {
+          depth = d;
+          deepest = single;
+        }
+      }
 
       // Flag selectors deeper than 5 levels.
       if (depth > 5) {
@@ -189321,8 +189333,8 @@ class FormCSSAnalyzer {
           type: 'deep-selector',
           file: filename,
           line: lineNumber,
-          message: `Overly specific selector (depth: ${depth}): "${selector.substring(0, 80)}..."`,
-          selector: selector,
+          message: `Overly specific selector (depth: ${depth}): "${deepest.substring(0, 80)}..."`,
+          selector: deepest,
           depth,
           recommendation: 'Use BEM or utility classes to reduce selector depth. Deep selectors slow down CSS matching in forms with many elements.',
         });
@@ -193897,13 +193909,17 @@ class FragmentRuleFormRefAnalyzer {
  * event, or an `fd:rules`/`fd:events` expression). If someone writes the handler but forgets to
  * author the wiring, the handler is dead — the button/field does nothing at runtime, silently.
  *
- * Flags an exported function when ALL hold:
+ * Flags an exported FUNCTION when ALL hold:
  *   1. it lives in a fragment / custom-fn surface JS file (form-file-tiers.isCustomFnSurface),
- *   2. its name matches a HANDLER/RULE shape (handle* / on* / *Init / *Change / *Click / *Continue /
- *      *Back / *Selected / *Submit — the convention for functions authored INTO events/rules),
- *   3. it is NOT referenced by name in the paired fragment JSON's rule/event expressions, AND
- *   4. it is NOT called internally by another function in the same JS (pure helpers exported only for
+ *   2. it is NOT referenced by name in the paired fragment JSON's rule/event expressions, AND
+ *   3. it is NOT called internally by another function in the same JS (pure helpers exported only for
  *      unit tests are called internally → exempt).
+ *
+ * No name-shape heuristic: because a fragment JS is a `@fragmentPath`-owned file paired to its ONE
+ * JSON, an unwired-and-uncalled exported function is dead HERE regardless of its name — the "maybe
+ * it's a globally-registered custom function wired in some OTHER form" excuse (which motivates a
+ * name gate for generic custom-fn files) does not apply to a single-owner fragment. Exported
+ * non-functions (const maps, objects) are ignored — only a function can be a dead handler.
  *
  * Pairing: a fragment JS `.../fragment(s)/<name>.js` is matched to a fragment JSON whose basename is
  * `<name>.json` (any `/fragments/` path). If NO paired JSON is present in the analyzed set, the file
@@ -193916,9 +193932,6 @@ class OrphanFragmentHandlerAnalyzer {
     this.config = config;
   }
 
-  // Handler / rule-function name shape — the convention for fns authored into events/rules.
-  static HANDLER_RE = /^(handle|on)[A-Z]|(Init|Change|Click|Continue|Back|Selected|Submit|Toggle|Blur|Focus)$/;
-
   static isFragmentJs(filename) {
     const f = (filename || '').replace(/\\/g, '/');
     return /(^|\/)fragments?\//.test(f) && isCustomFnSurface(f);
@@ -193928,23 +193941,50 @@ class OrphanFragmentHandlerAnalyzer {
     return (filename || '').replace(/\\/g, '/').split('/').pop().replace(/\.(js|mjs|json)$/, '');
   }
 
-  // Collect exported function names + internally-called names from a JS AST.
+  // Collect exported FUNCTION names + internally-called names from a JS AST. Exported non-functions
+  // (const maps, objects) are excluded — only a function can be an unwired handler. We collect the
+  // declared-function set first, then keep only the export specifiers whose local name is a function
+  // (arrow/function-expression consts assigned to a function also count).
   static collectJs(ast) {
-    const exported = new Map(); // name → line
-    const declaredFns = new Set();
+    const exportedAll = new Map(); // name → line (every named export)
+    const fnNames = new Set();     // names bound to a function (declaration or fn/arrow const)
     const calledInternally = new Set();
     simple(ast, {
       ExportNamedDeclaration: (n) => {
         if (n.declaration?.type === 'FunctionDeclaration' && n.declaration.id) {
-          exported.set(n.declaration.id.name, n.declaration.loc?.start.line);
+          const nm = n.declaration.id.name;
+          exportedAll.set(nm, n.declaration.loc?.start.line);
+          fnNames.add(nm);
         }
-        for (const s of n.specifiers || []) exported.set(s.local.name, s.local.loc?.start.line);
+        // `export const foo = () => …` / `export const foo = function …`
+        if (n.declaration?.type === 'VariableDeclaration') {
+          for (const d of n.declaration.declarations || []) {
+            if (d.id?.type === 'Identifier') {
+              exportedAll.set(d.id.name, d.id.loc?.start.line);
+              if (d.init?.type === 'ArrowFunctionExpression' || d.init?.type === 'FunctionExpression') {
+                fnNames.add(d.id.name);
+              }
+            }
+          }
+        }
+        for (const s of n.specifiers || []) exportedAll.set(s.local.name, s.local.loc?.start.line);
       },
-      FunctionDeclaration: (n) => { if (n.id?.name) declaredFns.add(n.id.name); },
+      FunctionDeclaration: (n) => { if (n.id?.name) fnNames.add(n.id.name); },
+      VariableDeclarator: (d) => {
+        if (d.id?.type === 'Identifier'
+          && (d.init?.type === 'ArrowFunctionExpression' || d.init?.type === 'FunctionExpression')) {
+          fnNames.add(d.id.name);
+        }
+      },
       CallExpression: (c) => {
         if (c.callee?.type === 'Identifier') calledInternally.add(c.callee.name);
       },
     });
+    // Keep only exports that are functions — an exported const map/object can't be a dead handler.
+    const exported = new Map();
+    for (const [name, line] of exportedAll) {
+      if (fnNames.has(name)) exported.set(name, line);
+    }
     return { exported, calledInternally };
   }
 
@@ -194013,16 +194053,19 @@ class OrphanFragmentHandlerAnalyzer {
       const { exported, calledInternally } = OrphanFragmentHandlerAnalyzer.collectJs(ast);
 
       for (const [name, line] of exported) {
-        if (!OrphanFragmentHandlerAnalyzer.HANDLER_RE.test(name)) continue; // not a handler/rule shape
-        if (calledInternally.has(name)) continue; // pure helper called internally → exempt
+        if (calledInternally.has(name)) continue; // helper called internally (incl. test-only) → exempt
         if (refs.has(name)) continue; // wired to an event/rule in the JSON → fine
+        // No name-shape gate: this is a `@fragmentPath`-owned fragment file paired to its ONE JSON, so
+        // an exported function that's neither wired nor called internally is dead here — the "maybe
+        // it's a globally-registered helper wired in some other form" excuse doesn't apply to a
+        // single-owner fragment. Dead handler = functional bug → error.
         issues.push({
           severity: 'error',
           type: 'orphan-fragment-handler',
-          message: `Exported handler \`${name}\` in this fragment is wired to no event/rule in the `
-            + 'fragment JSON and is never called internally — a `handle*`/rule-shaped function that '
-            + 'isn\'t stitched is dead (the control does nothing at runtime). Author the '
-            + `click/change/custom:* event (or rule) that calls \`${name}()\`, or remove it.`,
+          message: `Exported function \`${name}\` in this fragment is wired to no event/rule in the `
+            + 'fragment JSON and is never called internally — a fragment function that isn\'t stitched '
+            + 'is dead (the control does nothing at runtime). Author the click/change/custom:* event '
+            + `(or rule) that calls \`${name}()\`, or remove it.`,
           file: file.filename,
           line,
           functionName: name,
