@@ -194793,11 +194793,426 @@ class FormEventsAnalyzer {
 }
 
 
+;// CONCATENATED MODULE: ./src/analyzers/alias-resolver.js
+
+
+/**
+ * Shared local-alias resolution for the field-chain analyzers.
+ *
+ * Many analyzers decide behaviour by matching a `globals.fragment/form/field.<...>` member chain (or a
+ * `window.location` / `document` chain). But authors routinely bind an intermediate node to a local
+ * first — by simple assignment OR by object destructuring — and then use the local:
+ *
+ *     const city = globals.fragment.root.panel.cityDropDown;   // simple alias
+ *     const { cityDropDown: city } = globals.fragment.root.panel; // destructure (rename)
+ *     const { slider } = globals.fragment.root.wrapper;          // destructure (shorthand)
+ *     ... setProperty(city, …) / city.$value ...
+ *
+ * A raw MemberExpression match sees only `city.$value` (a bare Identifier root), not the full chain, so
+ * the analyzer silently misses the case. This module expands those aliases so a consumer can recover
+ * the FULL segment chain a local ultimately refers to.
+ *
+ * Ambiguity is handled the safe way: a name re-bound to a DIFFERENT chain in the same file is "poisoned"
+ * (mapped to null) so it resolves to `null` (unknown) rather than a wrong chain — never a silent wrong
+ * exemption. Only ONE level of destructuring is tracked (nested/computed/rest patterns → unknown).
+ *
+ * SCOPE OF THIS PASS (deliberate): this is a best-effort LOCAL-alias resolver, NOT full data-flow.
+ * ESLint/espree give the AST but no value tracking, so an AST-shape rule misses aliased chains unless it
+ * resolves them itself — which is what this does for the common cases (simple `const x = chain`, object
+ * destructuring, transitive aliases). It does NOT follow values through function returns, reassigned
+ * `let`s, or conditional branches. Anything it can't resolve returns `null` (unknown) — a MISSED
+ * detection, never a false positive. Full data-flow would need a type engine (typescript-eslint), which
+ * is disproportionate for untyped form JS.
+ */
+
+/**
+ * Flatten a member/identifier chain to its dotted segments, ROOT-first (`globals.form.a.b` →
+ * `['globals','form','a','b']`, so `segs[0]` is the root identifier). Returns null for a non-static
+ * shape (a call in the middle, a computed non-string key, etc.).
+ * @param {object} node - an acorn AST node (Identifier | MemberExpression | ChainExpression)
+ * @returns {string[]|null}
+ */
+function chainSegments(node) {
+  // Unwrap optional-chaining: `a?.b` parses as ChainExpression wrapping the MemberExpression.
+  let cur = node?.type === 'ChainExpression' ? node.expression : node;
+  const segs = [];
+  while (cur) {
+    if (cur.type === 'ChainExpression') { cur = cur.expression; continue; }
+    if (cur.type === 'Identifier') { segs.unshift(cur.name); return segs; }
+    if (cur.type === 'MemberExpression') {
+      let key;
+      if (!cur.computed && cur.property?.type === 'Identifier') key = cur.property.name;
+      else if (cur.computed && cur.property?.type === 'Literal' && typeof cur.property.value === 'string') key = cur.property.value;
+      else return null;
+      segs.unshift(key);
+      cur = cur.object;
+    } else return null;
+  }
+  return segs;
+}
+
+/**
+ * Build the alias map for an AST: every `const/let/var` local that binds a static member/identifier
+ * chain — via a plain assignment OR one level of object destructuring — mapped to its full segment
+ * chain. A name bound to conflicting chains is mapped to `null` (ambiguous).
+ * @param {object} ast - parsed program
+ * @returns {Map<string, string[]|null>}
+ */
+function buildAliasMap(ast) {
+  const aliases = new Map();
+  const bind = (name, segs) => {
+    if (!name || !segs) return;
+    if (!aliases.has(name)) { aliases.set(name, segs); return; }
+    const prev = aliases.get(name);
+    if (!prev || prev.length !== segs.length || prev.some((s, i) => s !== segs[i])) {
+      aliases.set(name, null); // conflicting re-binding → ambiguous
+    }
+  };
+  // Poison a name to `null` (ambiguous → never resolves). Used for a binding we can't statically
+  // resolve, so a SAME name that IS a valid alias elsewhere doesn't get wrongly expanded through it.
+  const poison = (name) => { if (name) aliases.set(name, null); };
+  simple(ast, {
+    VariableDeclarator: (d) => {
+      if (!d.init) return;
+      const initSegs = chainSegments(d.init);
+      // `const x = <chain>` — alias; `const x = <non-chain>` (a call, etc.) — poison, don't ignore.
+      if (d.id?.type === 'Identifier') {
+        if (initSegs) bind(d.id.name, initSegs); else poison(d.id.name);
+        return;
+      }
+      // `const { key: local, shorthand } = <chain>` — each property aliases the chain + its key. If the
+      // init isn't a static chain, poison every bound local (same safety reasoning).
+      if (d.id?.type === 'ObjectPattern') {
+        for (const prop of d.id.properties) {
+          if (prop.type !== 'Property' || prop.computed) continue;
+          const keyName = prop.key?.type === 'Identifier' ? prop.key.name
+            : (prop.key?.type === 'Literal' && typeof prop.key.value === 'string' ? prop.key.value : null);
+          const localName = prop.value?.type === 'Identifier' ? prop.value.name : null; // rename or shorthand
+          if (!localName) continue;
+          if (initSegs && keyName) bind(localName, [...initSegs, keyName]);
+          else poison(localName);
+        }
+      }
+    },
+  });
+  return aliases;
+}
+
+/**
+ * Resolve a node's chain through the alias map, expanding a leading alias transitively. Returns the
+ * fully-expanded segment chain, or null when the node isn't a static chain or hits an ambiguous alias.
+ * @param {object} node
+ * @param {Map<string, string[]|null>} aliases - from buildAliasMap
+ * @returns {string[]|null}
+ */
+function resolveChain(node, aliases) {
+  let segs = chainSegments(node);
+  const seen = new Set();
+  while (segs && aliases.has(segs[0]) && !seen.has(segs[0])) {
+    seen.add(segs[0]);
+    const bound = aliases.get(segs[0]);
+    if (!bound) return null; // ambiguous alias — cannot safely resolve
+    segs = [...bound, ...segs.slice(1)];
+  }
+  return segs;
+}
+
+;// CONCATENATED MODULE: ./src/analyzers/setproperty-scan.js
+/**
+ * Shared AST scan for `setProperty(<field>, { <prop>: <value> })` calls and direct `<field>.<prop> = …`
+ * assignments — the single source of truth for HiddenFieldsAnalyzer (`visible`) and
+ * DisabledFieldsAnalyzer (`enabled`). Replaces the per-analyzer regex "Pattern 1/2/3/5/6" families.
+ *
+ * WHY AST (over the old regexes): regex could only match `setProperty` shapes someone had already
+ * enumerated (globals-prefixed, aliased-with-backref, single-token local, bare-destructured). The AST
+ * walk recognises the CALL by resolving its callee — so it also catches shapes the regexes missed:
+ *   - `const sp = globals.functions.setProperty; sp(field, …)`      (indirect binding)
+ *   - `globals.functions['setProperty'](field, …)`                  (computed member)
+ *   - `const { functions: { setProperty } } = globals; setProperty(…)` (nested destructure)
+ * and it parses the field arg as a real member chain (optional-chaining / string-computed keys) instead
+ * of a brittle character class.
+ *
+ * TARGET-ALIAS resolution deliberately keeps the LOOSE last-segment heuristic the analyzers already
+ * relied on (`var modal = root.emailOtpModal` → `emailOtpModal`, even though `root = fragRoot(globals)`
+ * is a call the SAFE alias-resolver would poison to null). For THIS finding direction a missed
+ * visibility/enabled change becomes a FALSE "unnecessary" flag, so the loose heuristic is the
+ * false-positive-safe choice — it is used ONLY to name a single-token target, never to prove an
+ * exemption on a full member chain.
+ */
+
+
+
+
+
+
+// AF scope roots that prefix a field chain (`globals.form.x`, `<alias>.fragment.y`). The field path is
+// whatever follows the LAST such marker; a leading bare `globals` is stripped too.
+const SCOPE_WORDS = new Set(['form', 'fragment', '$form']);
+const JS_KEYWORDS = new Set([
+  'var', 'const', 'let', 'function', 'return', 'if', 'else', 'new', 'this',
+  'true', 'false', 'null', 'undefined', 'globals', 'window', 'document',
+  'typeof', 'instanceof', 'void', 'delete', 'in', 'of', 'for', 'while',
+  'do', 'switch', 'case', 'break', 'continue', 'try', 'catch', 'finally',
+  'throw', 'class', 'extends', 'import', 'export', 'default', 'async', 'await',
+]);
+
+// Strip the AF scope prefix from a raw segment chain: everything up to and including the last
+// `form`/`fragment`/`$form` marker, else a leading `globals`. `globals.form.a.b` → `['a','b']`;
+// `utils.form.x` → `['x']`; `step2Panel.iconDone` (no marker) → unchanged.
+function stripScopePrefix(segs) {
+  let lastMarker = -1;
+  for (let i = 0; i < segs.length; i += 1) if (SCOPE_WORDS.has(segs[i])) lastMarker = i;
+  if (lastMarker >= 0 && lastMarker < segs.length - 1) return segs.slice(lastMarker + 1);
+  if (segs[0] === 'globals' && segs.length > 1) return segs.slice(1);
+  return segs;
+}
+
+// Best-effort single-token alias map: local identifier → last field-like identifier of its RHS. Skips
+// declarations whose RHS uses dynamic (computed, non-literal) member access — unresolvable, like the
+// old regex. NOT the safe alias-resolver map (see file header).
+function buildLooseAliasMap(ast) {
+  const map = {};
+  simple(ast, {
+    VariableDeclarator: (d) => {
+      if (!d.init || d.id?.type !== 'Identifier') return;
+      const alias = d.id.name;
+      // Collect every identifier-like token in the RHS with its source position: bare Identifiers AND
+      // the property names of non-computed member accesses (acorn-walk does NOT visit the latter). Reject
+      // dynamic access (e.g. fieldsPanel[bankFields[i]]) — unresolvable, like the legacy regex.
+      let dynamic = false;
+      const idents = [];
+      simple(d.init, {
+        MemberExpression: (m) => {
+          if (m.computed) {
+            if (m.property?.type === 'Literal' && typeof m.property.value === 'string') {
+              idents.push({ name: m.property.value, start: m.property.start });
+            } else { dynamic = true; }
+          } else if (m.property?.type === 'Identifier') {
+            idents.push({ name: m.property.name, start: m.property.start });
+          }
+        },
+        Identifier: (n) => { idents.push({ name: n.name, start: n.start }); },
+      });
+      if (dynamic) return;
+      // SOURCE ORDER (by node start) — the last field-like identifier is the resolved field name,
+      // matching the legacy regex which split the RHS text left-to-right and took the last token.
+      const fieldLike = idents
+        .sort((a, b) => a.start - b.start)
+        .map((n) => n.name)
+        .filter((n) => !JS_KEYWORDS.has(n) && n !== alias);
+      if (fieldLike.length === 0) return;
+      const fieldName = fieldLike[fieldLike.length - 1];
+      if (alias === fieldName) return;
+      if (!map[alias] || fieldName.length > map[alias].length) map[alias] = fieldName;
+    },
+  });
+  return map;
+}
+
+// The set of local names bound to `<...>.functions.setProperty` (so a bare/indirect call to one of them
+// is recognised as a setProperty call).
+function collectSetPropertyNames(ast) {
+  const names = new Set();
+  // AF bindings only: the chain must be rooted at `globals` (e.g. `globals.functions.setProperty`,
+  // `const { functions } = globals`). This rejects unrelated `<obj>.functions.setProperty` /
+  // `const { functions: { setProperty } } = <someObj>` that merely happen to have a `functions` property.
+  const rootedInGlobals = (segs) => segs && segs[0] === 'globals';
+  const endsWithFnSetProp = (segs) => rootedInGlobals(segs) && segs.length >= 2
+    && segs[segs.length - 1] === 'setProperty' && segs[segs.length - 2] === 'functions';
+  const objectChainEndsFunctions = (initSegs) => rootedInGlobals(initSegs)
+    && initSegs[initSegs.length - 1] === 'functions';
+  simple(ast, {
+    VariableDeclarator: (d) => {
+      if (!d.init) return;
+      const initSegs = chainSegments(d.init);
+      // const sp = globals.functions.setProperty
+      if (d.id?.type === 'Identifier' && endsWithFnSetProp(initSegs)) { names.add(d.id.name); return; }
+      if (d.id?.type !== 'ObjectPattern') return;
+      for (const prop of d.id.properties) {
+        if (prop.type !== 'Property' || prop.computed) continue;
+        const keyName = prop.key?.type === 'Identifier' ? prop.key.name
+          : (prop.key?.type === 'Literal' ? prop.key.value : null);
+        // const { setProperty } = globals.functions   (or renamed: { setProperty: sp })
+        if (keyName === 'setProperty' && objectChainEndsFunctions(initSegs) && prop.value?.type === 'Identifier') {
+          names.add(prop.value.name);
+        }
+        // const { functions: { setProperty } } = globals   (nested) — only when the RHS IS globals.
+        if (keyName === 'functions' && prop.value?.type === 'ObjectPattern'
+          && initSegs && initSegs.length === 1 && initSegs[0] === 'globals') {
+          for (const inner of prop.value.properties) {
+            if (inner.type !== 'Property' || inner.computed) continue;
+            const innerKey = inner.key?.type === 'Identifier' ? inner.key.name
+              : (inner.key?.type === 'Literal' ? inner.key.value : null);
+            if (innerKey === 'setProperty' && inner.value?.type === 'Identifier') names.add(inner.value.name);
+          }
+        }
+      }
+    },
+  });
+  return names;
+}
+
+// Classify a CallExpression's callee. Returns { match, alias } where match is true for a setProperty
+// call (member `<chain>.functions.setProperty`, computed `<chain>.functions['setProperty']`, or a
+// bare/indirect identifier bound to functions.setProperty), and `alias` is the scope root the callee
+// was reached through (`globals`, or the leading segment of `<chain>.functions`), or null for a bare
+// identifier call. `alias` lets the caller reproduce the legacy Pattern-3 rule: a NON-globals call
+// alias must match the field arg's scope alias, else the call is ignored (contrived cross-alias case).
+function classifySetPropertyCallee(callee, spNames) {
+  if (!callee) return { match: false };
+  if (callee.type === 'Identifier') return { match: spNames.has(callee.name), alias: null };
+  if (callee.type === 'MemberExpression') {
+    const key = !callee.computed && callee.property?.type === 'Identifier' ? callee.property.name
+      : (callee.computed && callee.property?.type === 'Literal' ? callee.property.value : null);
+    if (key !== 'setProperty') return { match: false };
+    const objSegs = chainSegments(callee.object);
+    // Require `<prefix>.functions.setProperty` with at least one explicit prefix segment before
+    // `functions` (`globals.functions…`, `utils.globalPath.functions…`). A BARE `functions.setProperty`
+    // (no prefix) is NOT an AF call — legacy Patterns 1/3 never matched it, and matching it would
+    // misclassify unrelated `functions` objects and suppress real findings.
+    if (!objSegs || objSegs.length < 2 || objSegs[objSegs.length - 1] !== 'functions') return { match: false };
+    const alias = objSegs.slice(0, -1).join('.'); // e.g. `globals` or `utils.globalPath`
+    return { match: true, alias };
+  }
+  return { match: false };
+}
+
+// Read the target `<prop>` boolean from an ObjectExpression arg. Returns true/false, or null if the
+// prop is absent. A NON-literal value (a variable) counts as `true` only when allowVariableValue
+// (visibility can be driven by a computed flag; `enabled` is literal-only, matching the old regex).
+function readPropValue(objExpr, propName, allowVariableValue) {
+  if (!objExpr || objExpr.type !== 'ObjectExpression') return null;
+  for (const p of objExpr.properties) {
+    if (p.type !== 'Property' || p.computed) continue;
+    const k = p.key?.type === 'Identifier' ? p.key.name : (p.key?.type === 'Literal' ? p.key.value : null);
+    if (k !== propName) continue;
+    const v = p.value;
+    if (v?.type === 'Literal' && typeof v.value === 'boolean') return v.value;
+    if (allowVariableValue && v?.type === 'Identifier') return true; // e.g. { visible: isAssisted }
+    return null;
+  }
+  return null;
+}
+
+/**
+ * Scan JS files for setProperty calls + direct assignments that change `<propName>`.
+ * @param {Array<{filename:string, content:string}>} jsFiles
+ * @param {object} opts
+ * @param {string} opts.propName - 'visible' | 'enabled'
+ * @param {string} opts.changedKey - result key set on each change entry ('madeVisible'/'madeHidden' or
+ *   'madeEnabled'/'madeDisabled'); pass { onTrue, onFalse } via opts.flags.
+ * @param {{onTrue:string, onFalse:string}} opts.flags
+ * @param {boolean} [opts.allowVariableValue=false]
+ * @param {string} [opts.tag='SetPropertyScan'] - log prefix
+ * @returns {Object} changes map: key(name|path) → { files:[{filename, [propName], line}], onTrue:bool, onFalse:bool }
+ */
+function scanSetPropertyChanges(jsFiles, opts) {
+  const { propName, flags, allowVariableValue = false, tag = 'SetPropertyScan' } = opts;
+  const changes = {};
+
+  const record = (fieldName, fullPath, value, line, filename) => {
+    // Record under both the bare name and the full path, but de-dupe: when a target has no path beyond
+    // its name (`globals.form.myField`), fieldName === fullPath and we must not push the same entry twice.
+    const keys = fullPath && fullPath !== fieldName ? [fieldName, fullPath] : [fieldName];
+    keys.forEach((key) => {
+      if (!key) return;
+      if (!changes[key]) changes[key] = { files: [], [flags.onTrue]: false, [flags.onFalse]: false };
+      changes[key].files.push({ filename, [propName]: value, line });
+      if (value) changes[key][flags.onTrue] = true;
+      else changes[key][flags.onFalse] = true;
+    });
+  };
+
+  (Array.isArray(jsFiles) ? jsFiles : []).forEach((file) => {
+    if (!file?.filename || file.content == null) return;
+    let ast;
+    try {
+      ast = acorn_parse(file.content, { ecmaVersion: 'latest', sourceType: 'module', locations: true });
+    } catch (e) {
+      lib_core.warning(`[${tag}] parse failed for ${file.filename}: ${e.message}`);
+      return;
+    }
+    const looseAlias = buildLooseAliasMap(ast);
+    const spNames = collectSetPropertyNames(ast);
+
+    // Resolve arg0 (the field target) → { fieldName, fullPath, scopeAlias } using raw chain + loose
+    // single-token alias. scopeAlias is the segment(s) before the `form`/`fragment` marker (null when
+    // there is no scope marker), used to enforce the legacy call-alias-must-match-arg-alias rule.
+    const targetOf = (argNode) => {
+      const raw = chainSegments(argNode);
+      if (!raw) return null; // non-static target (conditional, call, etc.) — cannot attribute
+      if (raw.length === 1) {
+        const fieldName = looseAlias[raw[0]] || raw[0];
+        return { fieldName, fullPath: null, scopeAlias: null };
+      }
+      let markerIdx = -1;
+      for (let i = 0; i < raw.length; i += 1) if (SCOPE_WORDS.has(raw[i])) markerIdx = i;
+      const scopeAlias = markerIdx > 0 ? raw.slice(0, markerIdx).join('.')
+        : (markerIdx === 0 ? 'globals' : null);
+      const segs = stripScopePrefix(raw);
+      return { fieldName: segs[segs.length - 1], fullPath: segs.join('.'), scopeAlias };
+    };
+
+    simple(ast, {
+      CallExpression: (node) => {
+        const { match, alias } = classifySetPropertyCallee(node.callee, spNames);
+        if (!match) return;
+        const [arg0, arg1] = node.arguments || [];
+        const value = readPropValue(arg1, propName, allowVariableValue);
+        if (value === null) return;
+        const tgt = targetOf(arg0);
+        if (!tgt) return;
+        // Legacy Pattern-3 guard: when BOTH the call and the field arg carry an explicit non-globals
+        // scope alias, they must match (`utils.functions.setProperty(utils.form.x, …)`); a mismatched
+        // pair (`A.functions.setProperty(B.form.x, …)`) is treated as unrelated and ignored.
+        if (alias && alias !== 'globals' && tgt.scopeAlias && tgt.scopeAlias !== 'globals'
+          && alias !== tgt.scopeAlias) return;
+        record(tgt.fieldName, tgt.fullPath, value, node.loc?.start.line, file.filename);
+      },
+      // Direct assignment: `<chain>.<propName> = true|false` (literal only, matching legacy Pattern 2).
+      AssignmentExpression: (node) => {
+        if (node.operator !== '=' || node.left?.type !== 'MemberExpression' || node.left.computed) return;
+        if (node.left.property?.name !== propName) return;
+        if (node.right?.type !== 'Literal' || typeof node.right.value !== 'boolean') return;
+        const raw = chainSegments(node.left.object);
+        if (!raw || raw.length === 0) return;
+        const segs = raw.length === 1 ? raw : stripScopePrefix(raw);
+        record(segs[segs.length - 1], segs.length === 1 ? null : segs.join('.'),
+          node.right.value, node.loc?.start.line, file.filename);
+      },
+      // Batch-payload object literal (legacy Patterns 4a/4b): `{ <targetKey>: <chain>, data: { <prop>: bool } }`
+      // — a project-specific bulk setProperty descriptor. The `<prop>` value must be a literal boolean
+      // (variables not honoured here, matching legacy). Each non-`data` property whose value is a static
+      // chain is a target. `data: <variable>` or `data: { … }` without `<prop>` → no match.
+      ObjectExpression: (node) => {
+        const dataProp = node.properties.find((p) => p.type === 'Property' && !p.computed
+          && (p.key?.name === 'data' || p.key?.value === 'data'));
+        if (!dataProp) return;
+        const value = readPropValue(dataProp.value, propName, false);
+        if (value === null) return;
+        for (const p of node.properties) {
+          if (p.type !== 'Property' || p.computed || p === dataProp) continue;
+          const key = p.key?.type === 'Identifier' ? p.key.name : (p.key?.type === 'Literal' ? p.key.value : null);
+          if (key === 'data') continue;
+          const raw = chainSegments(p.value);
+          if (!raw || raw.length === 0) continue;
+          const segs = stripScopePrefix(raw);
+          record(segs[segs.length - 1], segs.join('.'), value, node.loc?.start.line, file.filename);
+        }
+      },
+    });
+  });
+
+  return changes;
+}
+
 ;// CONCATENATED MODULE: ./src/analyzers/hidden-fields-analyzer.js
 /**
  * Analyzes hidden fields to detect unnecessary DOM bloat
  * Detects fields that are always hidden and only used for data storage
  */
+
+
 
 
 class HiddenFieldsAnalyzer {
@@ -194975,346 +195390,21 @@ class HiddenFieldsAnalyzer {
   }
 
   /**
-   * Analyze JavaScript files for setProperty calls that change visibility
+   * Analyze JS files for setProperty calls / direct assignments that change visibility.
+   * Delegates to the shared AST scanner (src/analyzers/setproperty-scan.js) — the single source of
+   * truth also used by DisabledFieldsAnalyzer. `allowVariableValue` keeps the legacy behaviour that a
+   * non-literal `visible: <var>` counts as "made visible" (it CAN be shown).
    * @param {Array} jsFiles - Array of {filename, content} objects
-   * @returns {Object} Field visibility changes found in JS
+   * @returns {Object} Field visibility changes found in JS, keyed by field name and full path.
    */
   analyzeJSForVisibilityChanges(jsFiles) {
-    const visibilityChanges = {};
-    let totalMatches = 0;
-
     lib_core.info(`[HiddenFields] Scanning ${jsFiles.length} JS file(s) for visibility changes...`);
-
-    jsFiles.forEach(file => {
-      const { filename, content } = file;
-      let fileMatches = 0;
-
-      // Pre-pass: build alias map for this file.
-      // Maps variable names → actual field names for patterns like:
-      //   var modal = root.emailOtpModal;
-      //   globals.functions.setProperty(modal, { visible: true });
-      // Without this, Pattern 5 records 'modal' instead of 'emailOtpModal'.
-      const aliasMap = this.buildAliasMap(content);
-
-      // Pattern 1: globals.functions.setProperty(globals.form.fieldName, { visible: true/false/variable })
-      // Matches literal true/false AND variable identifiers (e.g. visible: isAssisted)
-      const setPropertyPattern = /globals\.functions\.setProperty\s*\(\s*globals\.form(?:\?\.)?([a-zA-Z0-9_.?]+)\s*,\s*\{[^}]*visible\s*:\s*(true|false|[a-zA-Z_$][a-zA-Z0-9_$]*)[^}]*\}/g;
-
-      let match;
-      while ((match = setPropertyPattern.exec(content)) !== null) {
-        const fieldPath = match[1];
-        // Variable value (not a literal) → treat as madeVisible=true since it can be shown
-        const visibleValue = match[2] === 'false' ? false : true;
-        fileMatches++;
-        totalMatches++;
-        
-        // Extract both field name AND full path for matching
-        // e.g., "?.panel?.subPanel?.email" → path: "panel.subPanel.email", name: "email"
-        const pathSegments = fieldPath.split(/[.?]/).filter(Boolean);
-        const fieldName = pathSegments[pathSegments.length - 1];
-        const fullPath = pathSegments.join('.');
-        
-        // Store by both name and full path
-        // This allows matching by name (for simple cases) and path (for duplicates)
-        const keys = [fieldName, fullPath];
-        
-        keys.forEach(key => {
-          if (!visibilityChanges[key]) {
-            visibilityChanges[key] = {
-              files: [],
-              madeVisible: false,
-              madeHidden: false,
-            };
-          }
-
-          visibilityChanges[key].files.push({
-            filename,
-            visible: visibleValue,
-            line: this.getLineNumber(content, match.index),
-          });
-
-          if (visibleValue) {
-            visibilityChanges[key].madeVisible = true;
-          } else {
-            visibilityChanges[key].madeHidden = true;
-          }
-        });
-      }
-
-      // Pattern 2: Direct property assignment like field.visible = true
-      const directAssignmentPattern = /globals\.form(?:\?\.)?([a-zA-Z0-9_.?]+)\.visible\s*=\s*(true|false)/g;
-
-      while ((match = directAssignmentPattern.exec(content)) !== null) {
-        const fieldPath = match[1];
-        const visibleValue = match[2] === 'true';
-
-        const pathSegments = fieldPath.split(/[.?]/).filter(Boolean);
-        const fieldName = pathSegments[pathSegments.length - 1];
-        const fullPath = pathSegments.join('.');
-
-        const keys = [fieldName, fullPath];
-
-        keys.forEach(key => {
-          if (!visibilityChanges[key]) {
-            visibilityChanges[key] = {
-              files: [],
-              madeVisible: false,
-              madeHidden: false,
-            };
-          }
-
-          visibilityChanges[key].files.push({
-            filename,
-            visible: visibleValue,
-            line: this.getLineNumber(content, match.index),
-          });
-
-          if (visibleValue) {
-            visibilityChanges[key].madeVisible = true;
-          } else {
-            visibilityChanges[key].madeHidden = true;
-          }
-        });
-      }
-
-      // Pattern 3: Aliased setProperty — same shape as Pattern 1 but with any matching prefix
-      // e.g. registerPLAUtils.globalPath.functions.setProperty(registerPLAUtils.globalPath.form.X, { visible: true })
-      // \1 backref ensures the call alias matches the form-arg alias; skip 'globals' (handled by Pattern 1).
-      const aliasedSetPropertyPattern =
-        /([\w$]+(?:\.[\w$]+)*)\.functions\.setProperty\s*\(\s*\1\.form(?:\?\.)?([a-zA-Z0-9_.?]+)\s*,\s*\{[^}]*visible\s*:\s*(true|false|[a-zA-Z_$][a-zA-Z0-9_$]*)[^}]*\}/g;
-
-      while ((match = aliasedSetPropertyPattern.exec(content)) !== null) {
-        if (match[1] === 'globals') continue;
-        const fieldPath = match[2];
-        const visibleValue = match[3] === 'false' ? false : true;
-        fileMatches++;
-        totalMatches++;
-
-        const pathSegments = fieldPath.split(/[.?]/).filter(Boolean);
-        const fieldName = pathSegments[pathSegments.length - 1];
-        const fullPath = pathSegments.join('.');
-
-        const keys = [fieldName, fullPath];
-
-        keys.forEach(key => {
-          if (!visibilityChanges[key]) {
-            visibilityChanges[key] = {
-              files: [],
-              madeVisible: false,
-              madeHidden: false,
-            };
-          }
-
-          visibilityChanges[key].files.push({
-            filename,
-            visible: visibleValue,
-            line: this.getLineNumber(content, match.index),
-          });
-
-          if (visibleValue) {
-            visibilityChanges[key].madeVisible = true;
-          } else {
-            visibilityChanges[key].madeHidden = true;
-          }
-        });
-      }
-
-      // Pattern 4a: Object-literal entry with key-then-data shape
-      // { <anyKey>: <chain>, data: { visible: true|false } }
-      // Key name is project-specific (fieldPath / path / target / ref / etc) — skip when literally 'data'.
-      const objectLiteralKeyFirstPattern =
-        /\b(\w+)\s*:\s*([\w$.?]+)\s*,\s*data\s*:\s*\{[^{}]*\bvisible\s*:\s*(true|false)[^{}]*\}/g;
-
-      while ((match = objectLiteralKeyFirstPattern.exec(content)) !== null) {
-        if (match[1] === 'data') continue;
-        const fieldPath = match[2];
-        const visibleValue = match[3] === 'true';
-        fileMatches++;
-        totalMatches++;
-
-        const pathSegments = fieldPath.split(/[.?]/).filter(Boolean);
-        const fieldName = pathSegments[pathSegments.length - 1];
-        const fullPath = pathSegments.join('.');
-
-        const keys = [fieldName, fullPath];
-
-        keys.forEach(key => {
-          if (!visibilityChanges[key]) {
-            visibilityChanges[key] = {
-              files: [],
-              madeVisible: false,
-              madeHidden: false,
-            };
-          }
-
-          visibilityChanges[key].files.push({
-            filename,
-            visible: visibleValue,
-            line: this.getLineNumber(content, match.index),
-          });
-
-          if (visibleValue) {
-            visibilityChanges[key].madeVisible = true;
-          } else {
-            visibilityChanges[key].madeHidden = true;
-          }
-        });
-      }
-
-      // Pattern 5: globals.functions.setProperty(<localVar>, { visible: true|false })
-      // Catches fragment-local field references not prefixed with globals.form.
-      // Two sub-cases:
-      //   5a — multi-segment chain: setProperty(step2Panel.step2IconDone, ...) → extract last segment
-      //   5b — single-token alias:  setProperty(modal, ...)                   → resolve via aliasMap
-      // Must run AFTER Patterns 1-4 to avoid double-counting globals.form.X matches.
-      const localVarSetPropertyPattern =
-        /globals\.functions\.setProperty\s*\(\s*([\w$][\w$.?]*)\s*,\s*\{[^}]*visible\s*:\s*(true|false|[a-zA-Z_$][a-zA-Z0-9_$]*)[^}]*\}/g;
-
-      while ((match = localVarSetPropertyPattern.exec(content)) !== null) {
-        const rawArg = match[1];
-        // Skip if already covered by Pattern 1 (globals.form prefix) or Pattern 3 (aliased prefix)
-        if (/^globals[.?]form/.test(rawArg) || /\.form[.?]/.test(rawArg)) continue;
-        const visibleValue = match[2] === 'false' ? false : true;
-        fileMatches++;
-        totalMatches++;
-
-        const pathSegments = rawArg.split(/[.?]/).filter(Boolean);
-        let fieldName;
-
-        if (pathSegments.length === 1) {
-          // 5b — single-token alias: look up in aliasMap to get the real field name
-          fieldName = aliasMap[rawArg] || rawArg;
-        } else {
-          // 5a — multi-segment chain: last segment is the field name
-          fieldName = pathSegments[pathSegments.length - 1];
-        }
-
-        if (!visibilityChanges[fieldName]) {
-          visibilityChanges[fieldName] = { files: [], madeVisible: false, madeHidden: false };
-        }
-        visibilityChanges[fieldName].files.push({
-          filename,
-          visible: visibleValue,
-          line: this.getLineNumber(content, match.index),
-        });
-        if (visibleValue) {
-          visibilityChanges[fieldName].madeVisible = true;
-        } else {
-          visibilityChanges[fieldName].madeHidden = true;
-        }
-      }
-
-      // Pattern 4b: Object-literal entry with data-then-key shape
-      // { data: { visible: true|false }, <anyKey>: <chain> }
-      const objectLiteralDataFirstPattern =
-        /\bdata\s*:\s*\{[^{}]*\bvisible\s*:\s*(true|false)[^{}]*\}\s*,\s*(\w+)\s*:\s*([\w$.?]+)/g;
-
-      while ((match = objectLiteralDataFirstPattern.exec(content)) !== null) {
-        if (match[2] === 'data') continue;
-        const visibleValue = match[1] === 'true';
-        const fieldPath = match[3];
-        fileMatches++;
-        totalMatches++;
-
-        const pathSegments = fieldPath.split(/[.?]/).filter(Boolean);
-        const fieldName = pathSegments[pathSegments.length - 1];
-        const fullPath = pathSegments.join('.');
-
-        const keys = [fieldName, fullPath];
-
-        keys.forEach(key => {
-          if (!visibilityChanges[key]) {
-            visibilityChanges[key] = {
-              files: [],
-              madeVisible: false,
-              madeHidden: false,
-            };
-          }
-
-          visibilityChanges[key].files.push({
-            filename,
-            visible: visibleValue,
-            line: this.getLineNumber(content, match.index),
-          });
-
-          if (visibleValue) {
-            visibilityChanges[key].madeVisible = true;
-          } else {
-            visibilityChanges[key].madeHidden = true;
-          }
-        });
-      }
+    return scanSetPropertyChanges(jsFiles, {
+      propName: 'visible',
+      flags: { onTrue: 'madeVisible', onFalse: 'madeHidden' },
+      allowVariableValue: true,
+      tag: 'HiddenFields',
     });
-
-    return visibilityChanges;
-  }
-
-  /**
-   * Build a per-file alias map: variable name → resolved field name.
-   *
-   * Resolves patterns like:
-   *   var modal       = root.emailOtpModal;             → { modal: 'emailOtpModal' }
-   *   var manualPanel = addrPanel.manualAddressPanel;   → { manualPanel: 'manualAddressPanel' }
-   *   var loaderWrapper = globals && globals.form && globals.form.xplLoaderWrapper;
-   *                                                     → { loaderWrapper: 'xplLoaderWrapper' }
-   *
-   * Strategy: for each var/const/let declaration, extract the last valid identifier
-   * from the RHS (skipping JS keywords and the alias itself). This covers dot-chains,
-   * optional-chaining, and &&-guarded assignments regardless of depth.
-   *
-   * Limitations:
-   * - Dynamic access (e.g. fieldsPanel[bankFields[i]]) cannot be resolved → skipped.
-   * - When the same alias is declared in multiple scopes, the longest field name wins
-   *   (heuristic: longer names are more specific and less likely to be an intermediate panel).
-   * - Does not track scope boundaries; treats the whole file as one flat namespace.
-   *
-   * @param {string} content - JavaScript source
-   * @returns {Object} alias → fieldName map
-   */
-  buildAliasMap(content) {
-    const aliasMap = {};
-    const JS_KEYWORDS = new Set([
-      'var', 'const', 'let', 'function', 'return', 'if', 'else', 'new', 'this',
-      'true', 'false', 'null', 'undefined', 'globals', 'window', 'document',
-      'typeof', 'instanceof', 'void', 'delete', 'in', 'of', 'for', 'while',
-      'do', 'switch', 'case', 'break', 'continue', 'try', 'catch', 'finally',
-      'throw', 'class', 'extends', 'import', 'export', 'default', 'async', 'await',
-    ]);
-
-    // [^;]+ captures multi-line RHS because [^;] matches \n
-    const varDeclPattern = /(?:var|const|let)\s+(\w+)\s*=\s*([^;]+);/g;
-    let match;
-    while ((match = varDeclPattern.exec(content)) !== null) {
-      const alias = match[1];
-      const rhs = match[2].replace(/\s+/g, ' ').trim();
-
-      // Skip dynamic array access — cannot resolve statically
-      if (/\[[^\]]*[a-zA-Z_$][^\]]*\]/.test(rhs)) continue;
-
-      // Extract all identifier tokens from RHS; take the last non-keyword one
-      const identifiers = rhs
-        .split(/[^a-zA-Z0-9_$]+/)
-        .filter(s => s.length > 0 && /^[a-zA-Z_$]/.test(s) && !JS_KEYWORDS.has(s));
-
-      if (identifiers.length === 0) continue;
-      const fieldName = identifiers[identifiers.length - 1];
-
-      // Skip trivial mappings (alias === fieldName already handled by last-segment extraction)
-      if (alias === fieldName) continue;
-
-      // When the same alias appears in multiple scopes, prefer the longer (more specific) field name
-      if (!aliasMap[alias] || fieldName.length > aliasMap[alias].length) {
-        aliasMap[alias] = fieldName;
-      }
-    }
-    return aliasMap;
-  }
-
-  /**
-   * Get line number from content and index
-   */
-  getLineNumber(content, index) {
-    return content.substring(0, index).split('\n').length;
   }
 
   /**
@@ -195494,6 +195584,8 @@ class HiddenFieldsAnalyzer {
  * Analyzes disabled fields in adaptive forms.
  * Disabled fields do not submit their data; use readOnly when the value should be included in submission.
  */
+
+
 
 
 class DisabledFieldsAnalyzer {
@@ -195677,62 +195769,18 @@ class DisabledFieldsAnalyzer {
   }
 
   /**
-   * Analyze JavaScript for setProperty / direct assignment that change enabled
+   * Analyze JS files for setProperty calls / direct assignments that change `enabled`.
+   * Delegates to the shared AST scanner (src/analyzers/setproperty-scan.js) — the single source of
+   * truth also used by HiddenFieldsAnalyzer. `enabled` is literal-only (a `{ enabled: <var> }` is NOT
+   * treated as a change), matching the prior regex behaviour.
    */
   analyzeJSForEnabledChanges(jsFiles) {
-    const changes = {};
-    jsFiles.forEach((file) => {
-      const { filename, content } = file;
-      const setPropertyPattern =
-        /globals\.functions\.setProperty\s*\(\s*globals\.form(?:\?\.)?([a-zA-Z0-9_.?]+)\s*,\s*\{[^}]*enabled\s*:\s*(true|false)[^}]*\}/g;
-      let match;
-      while ((match = setPropertyPattern.exec(content)) !== null) {
-        const fieldPath = match[1];
-        const enabledValue = match[2] === 'true';
-        const pathSegments = fieldPath.split(/[.?]/).filter(Boolean);
-        const fieldName = pathSegments[pathSegments.length - 1];
-        const fullPath = pathSegments.join('.');
-        [fieldName, fullPath].forEach((key) => {
-          if (!key) return;
-          if (!changes[key]) {
-            changes[key] = { files: [], madeEnabled: false, madeDisabled: false };
-          }
-          changes[key].files.push({
-            filename,
-            enabled: enabledValue,
-            line: this.getLineNumber(content, match.index),
-          });
-          if (enabledValue) changes[key].madeEnabled = true;
-          else changes[key].madeDisabled = true;
-        });
-      }
-      const directPattern = /globals\.form(?:\?\.)?([a-zA-Z0-9_.?]+)\.enabled\s*=\s*(true|false)/g;
-      while ((match = directPattern.exec(content)) !== null) {
-        const fieldPath = match[1];
-        const enabledValue = match[2] === 'true';
-        const pathSegments = fieldPath.split(/[.?]/).filter(Boolean);
-        const fieldName = pathSegments[pathSegments.length - 1];
-        const fullPath = pathSegments.join('.');
-        [fieldName, fullPath].forEach((key) => {
-          if (!key) return;
-          if (!changes[key]) {
-            changes[key] = { files: [], madeEnabled: false, madeDisabled: false };
-          }
-          changes[key].files.push({
-            filename,
-            enabled: enabledValue,
-            line: this.getLineNumber(content, match.index),
-          });
-          if (enabledValue) changes[key].madeEnabled = true;
-          else changes[key].madeDisabled = true;
-        });
-      }
+    return scanSetPropertyChanges(jsFiles, {
+      propName: 'enabled',
+      flags: { onTrue: 'madeEnabled', onFalse: 'madeDisabled' },
+      allowVariableValue: false,
+      tag: 'DisabledFields',
     });
-    return changes;
-  }
-
-  getLineNumber(content, index) {
-    return content.substring(0, index).split('\n').length;
   }
 
   normalizeEventPath(path) {
@@ -199199,130 +199247,6 @@ class RuntimeCLSAnalyzer {
   }
 }
 
-;// CONCATENATED MODULE: ./src/analyzers/alias-resolver.js
-
-
-/**
- * Shared local-alias resolution for the field-chain analyzers.
- *
- * Many analyzers decide behaviour by matching a `globals.fragment/form/field.<...>` member chain (or a
- * `window.location` / `document` chain). But authors routinely bind an intermediate node to a local
- * first — by simple assignment OR by object destructuring — and then use the local:
- *
- *     const city = globals.fragment.root.panel.cityDropDown;   // simple alias
- *     const { cityDropDown: city } = globals.fragment.root.panel; // destructure (rename)
- *     const { slider } = globals.fragment.root.wrapper;          // destructure (shorthand)
- *     ... setProperty(city, …) / city.$value ...
- *
- * A raw MemberExpression match sees only `city.$value` (a bare Identifier root), not the full chain, so
- * the analyzer silently misses the case. This module expands those aliases so a consumer can recover
- * the FULL segment chain a local ultimately refers to.
- *
- * Ambiguity is handled the safe way: a name re-bound to a DIFFERENT chain in the same file is "poisoned"
- * (mapped to null) so it resolves to `null` (unknown) rather than a wrong chain — never a silent wrong
- * exemption. Only ONE level of destructuring is tracked (nested/computed/rest patterns → unknown).
- *
- * SCOPE OF THIS PASS (deliberate): this is a best-effort LOCAL-alias resolver, NOT full data-flow.
- * ESLint/espree give the AST but no value tracking, so an AST-shape rule misses aliased chains unless it
- * resolves them itself — which is what this does for the common cases (simple `const x = chain`, object
- * destructuring, transitive aliases). It does NOT follow values through function returns, reassigned
- * `let`s, or conditional branches. Anything it can't resolve returns `null` (unknown) — a MISSED
- * detection, never a false positive. Full data-flow would need a type engine (typescript-eslint), which
- * is disproportionate for untyped form JS.
- */
-
-/**
- * Flatten a member/identifier chain to its dotted segments, ROOT-first (`globals.form.a.b` →
- * `['globals','form','a','b']`, so `segs[0]` is the root identifier). Returns null for a non-static
- * shape (a call in the middle, a computed non-string key, etc.).
- * @param {object} node - an acorn AST node (Identifier | MemberExpression | ChainExpression)
- * @returns {string[]|null}
- */
-function chainSegments(node) {
-  // Unwrap optional-chaining: `a?.b` parses as ChainExpression wrapping the MemberExpression.
-  let cur = node?.type === 'ChainExpression' ? node.expression : node;
-  const segs = [];
-  while (cur) {
-    if (cur.type === 'ChainExpression') { cur = cur.expression; continue; }
-    if (cur.type === 'Identifier') { segs.unshift(cur.name); return segs; }
-    if (cur.type === 'MemberExpression') {
-      let key;
-      if (!cur.computed && cur.property?.type === 'Identifier') key = cur.property.name;
-      else if (cur.computed && cur.property?.type === 'Literal' && typeof cur.property.value === 'string') key = cur.property.value;
-      else return null;
-      segs.unshift(key);
-      cur = cur.object;
-    } else return null;
-  }
-  return segs;
-}
-
-/**
- * Build the alias map for an AST: every `const/let/var` local that binds a static member/identifier
- * chain — via a plain assignment OR one level of object destructuring — mapped to its full segment
- * chain. A name bound to conflicting chains is mapped to `null` (ambiguous).
- * @param {object} ast - parsed program
- * @returns {Map<string, string[]|null>}
- */
-function buildAliasMap(ast) {
-  const aliases = new Map();
-  const bind = (name, segs) => {
-    if (!name || !segs) return;
-    if (!aliases.has(name)) { aliases.set(name, segs); return; }
-    const prev = aliases.get(name);
-    if (!prev || prev.length !== segs.length || prev.some((s, i) => s !== segs[i])) {
-      aliases.set(name, null); // conflicting re-binding → ambiguous
-    }
-  };
-  // Poison a name to `null` (ambiguous → never resolves). Used for a binding we can't statically
-  // resolve, so a SAME name that IS a valid alias elsewhere doesn't get wrongly expanded through it.
-  const poison = (name) => { if (name) aliases.set(name, null); };
-  simple(ast, {
-    VariableDeclarator: (d) => {
-      if (!d.init) return;
-      const initSegs = chainSegments(d.init);
-      // `const x = <chain>` — alias; `const x = <non-chain>` (a call, etc.) — poison, don't ignore.
-      if (d.id?.type === 'Identifier') {
-        if (initSegs) bind(d.id.name, initSegs); else poison(d.id.name);
-        return;
-      }
-      // `const { key: local, shorthand } = <chain>` — each property aliases the chain + its key. If the
-      // init isn't a static chain, poison every bound local (same safety reasoning).
-      if (d.id?.type === 'ObjectPattern') {
-        for (const prop of d.id.properties) {
-          if (prop.type !== 'Property' || prop.computed) continue;
-          const keyName = prop.key?.type === 'Identifier' ? prop.key.name
-            : (prop.key?.type === 'Literal' && typeof prop.key.value === 'string' ? prop.key.value : null);
-          const localName = prop.value?.type === 'Identifier' ? prop.value.name : null; // rename or shorthand
-          if (!localName) continue;
-          if (initSegs && keyName) bind(localName, [...initSegs, keyName]);
-          else poison(localName);
-        }
-      }
-    },
-  });
-  return aliases;
-}
-
-/**
- * Resolve a node's chain through the alias map, expanding a leading alias transitively. Returns the
- * fully-expanded segment chain, or null when the node isn't a static chain or hits an ambiguous alias.
- * @param {object} node
- * @param {Map<string, string[]|null>} aliases - from buildAliasMap
- * @returns {string[]|null}
- */
-function resolveChain(node, aliases) {
-  let segs = chainSegments(node);
-  const seen = new Set();
-  while (segs && aliases.has(segs[0]) && !seen.has(segs[0])) {
-    seen.add(segs[0]);
-    const bound = aliases.get(segs[0]);
-    if (!bound) return null; // ambiguous alias — cannot safely resolve
-    segs = [...bound, ...segs.slice(1)];
-  }
-  return segs;
-}
-
 ;// CONCATENATED MODULE: ./src/analyzers/fragment-qualified-name-analyzer.js
 
 
@@ -200937,6 +200861,10 @@ class HardcodedConfigAnalyzer {
  *      Class-3/4 flow-UI state; `uistate._` = ephemeral scratch). The journey-state-model requires
  *      positive namespaces (not the old "persists-unless-`_`") so the restore channel is unambiguous.
  *      A bare name (e.g. `pinCityId`) is unclassified — it must be `data.pinCityId` or `uistate.…`.
+ *      For fieldless Class-1 DATA the recommended write is the `$data` accessor
+ *      (`<scope>.$data.<field> = …`, where `<scope>` is whatever node applies in context — `globals.form`,
+ *      `globals.fragment.<root>`, a panel, etc.), which lands directly on form data;
+ *      `setVariable('data.<name>')` remains the equivalent named-variable form.
  *  (c) write-only variable: a `setVariable('<name>', …)` whose `<name>` is never read anywhere in the
  *      analyzed JS → likely a dead Class-3 write. A "read" counts as: `getVariable('<name>')`, a
  *      `$properties.<name>` / `$properties['<name>']` access, OR the literal `'<name>'` passed as a
@@ -201203,7 +201131,9 @@ class StorageClassAnalyzer {
           type: 'variable-not-namespaced',
           message: `setVariable('${site.name}', …) is a form-scoped variable with no `
             + 'positive namespace prefix. Per journey-state-model, name it `data.'
-            + `${site.name}\` (fieldless Class-1 data that migrates to form.$data) or \`uistate.`
+            + `${site.name}\` (fieldless Class-1 data that migrates to \`$data\` — preferably write it `
+            + 'directly via the `$data` accessor, `<scope>.$data.'
+            + `${site.name} = …\`) or \`uistate.`
             + `${site.name}\` (persisted Class-3/4 flow-UI state; \`uistate._${site.name}\` if `
             + 'ephemeral scratch). A bare name is unclassified — the restore channel is ambiguous.',
           file: site.file,
@@ -201470,7 +201400,7 @@ class FragmentPathValidatorAnalyzer {
   }
 
   // Runtime accessors / non-node tail segments that are NOT JSON hierarchy nodes.
-  static NON_NODE_SEG = new Set(['$value', '$properties', 'properties', '$name', '$qualifiedName', 'value', '$items']);
+  static NON_NODE_SEG = new Set(['$value', '$properties', 'properties', '$name', '$qualifiedName', 'value', '$items', '$data']);
 
   // Build the set of valid parent→child name-chains from a form/fragment JSON (dot-joined, root-relative).
   // Also records NESTED-FRAGMENT BOUNDARIES: a node carrying a `fragmentPath` property is a nested
@@ -204557,6 +204487,27 @@ function conceptTokens(name) {
   return new Set(concept_tokens_tokenize(name).map((t) => TOKEN_SYNONYM[t] || t));
 }
 
+// Decorator tokens a custom name may append to an OOTB concept and STILL mean that OOTB concept:
+// `minValue`/`maxValue`/`stepValue` = OOTB concept + `value`; `maxFileCount` = maxItems + `file` (the
+// items ARE files — `file` just names the item kind, it adds no new constraint dimension). Any OTHER
+// extra token makes the name a DISTINCT concept, not a duplicate — `maxRepeatedChars`
+// (maximum + `repeated` + length) and `tickValues` (`tick` + enum) carry a MEANINGFUL extra token that
+// changes the constraint measure, so they are genuinely custom.
+const DECORATOR_TOKENS = new Set(['value', 'file']);
+
+// Does `keyConcepts` DUPLICATE the OOTB `nameConcepts`? True only when the key covers every OOTB
+// concept token AND every EXTRA token the key adds is a pure decorator (not a meaningful qualifier).
+// This is the shared source of truth for both ootb-property-shadow and component-model (which used to
+// keep its own copy). `maxRepeatedChars` does NOT duplicate `maxLength` — `repeated` is meaningful.
+function coversAsDuplicate(keyConcepts, nameConcepts) {
+  if (nameConcepts.size === 0) return false;
+  for (const t of nameConcepts) if (!keyConcepts.has(t)) return false;
+  for (const t of keyConcepts) {
+    if (!nameConcepts.has(t) && !DECORATOR_TOKENS.has(t)) return false;
+  }
+  return true;
+}
+
 ;// CONCATENATED MODULE: ./src/analyzers/ootb-property-shadow-analyzer.js
 // The OOTB property matrix, embedded as a .js module (not .json) so ncc inlines it into the released
 // bundle — a runtime .json read (createRequire / fs) is NOT bundled and breaks the shipped CLI.
@@ -204640,11 +204591,13 @@ class OotbPropertyShadowAnalyzer {
     return { names, conceptByName };
   }
 
-  // Does `keyConcepts` cover the OOTB `nameConcepts` (i.e. every OOTB concept token is present)?
+  // Does `keyConcepts` DUPLICATE the OOTB `nameConcepts`? Delegates to the shared decorator-guarded
+  // matcher: a key that adds a MEANINGFUL extra token (maxRepeatedChars = maxLength + `repeated`,
+  // tickValues = enum + `tick`) is a DISTINCT custom concept, not a duplicate — only pure decorator
+  // tokens (DECORATOR_TOKENS in concept-tokens.js: `value`, `file`) may differ, so `maxFileCount` still
+  // duplicates `maxItems`. (Was a loose superset check → false positives on such names.)
   static covers(keyConcepts, nameConcepts) {
-    if (nameConcepts.size === 0) return false;
-    for (const t of nameConcepts) if (!keyConcepts.has(t)) return false;
-    return true;
+    return coversAsDuplicate(keyConcepts, nameConcepts);
   }
 
   // Generic single-token OOTB concepts that must match on EXACT name only (else `minValue`/`maxItems`
@@ -205060,34 +205013,18 @@ class ComponentModelAnalyzer {
   // would over-match, mirroring ootb-property-shadow's GENERIC_EXACT guard). Used to catch a
   // differently-named duplicate (minValue → minimum).
   static GENERIC_EXACT = new Set(['value', 'type', 'name', 'index', 'parent', 'default', 'format', 'lang', 'label', 'description', 'tooltip']);
-  // Decorator tokens a custom name may append to an OOTB concept and still MEAN that OOTB concept:
-  // `minValue`/`maxValue`/`stepValue` = OOTB concept + `value`. Any OTHER extra token makes the name a
-  // DISTINCT concept, not a duplicate — `tickValues` (= tick + [values→]enum) has the meaningful extra
-  // token `tick`, so it is genuinely custom and must NOT be flagged as an `enum` duplicate.
-  static DECORATOR_TOKENS = new Set(['value']);
-
-  // `keyConcepts` covers `nameConcepts` AND every extra token (key − name) is a pure decorator — i.e.
-  // the custom name is the OOTB concept plus only decoration, not a broader/different concept.
-  static coversAsDuplicate(keyConcepts, nameConcepts) {
-    if (nameConcepts.size === 0) return false;
-    for (const t of nameConcepts) if (!keyConcepts.has(t)) return false;
-    for (const t of keyConcepts) {
-      if (!nameConcepts.has(t) && !ComponentModelAnalyzer.DECORATOR_TOKENS.has(t)) return false;
-    }
-    return true;
-  }
-
   // Does model-field `name` duplicate an OOTB property for `fieldType`? Returns the OOTB name or null.
   duplicatesOotb(name, ootbNames) {
     if (component_model_analyzer_FRAMEWORK_KEY_RE.test(name) || component_model_analyzer_FRAMEWORK_EXACT.has(name)) return null;
     // exact OOTB name declared as a custom field → duplicate.
     if (ootbNames.has(name)) return name;
-    // concept-cover against each OOTB name, but ONLY when the extra tokens are pure decorators
-    // (minValue covers minimum; tickValues does NOT cover enum because `tick` is meaningful).
+    // concept-cover against each OOTB name via the shared decorator-guarded matcher, but ONLY when the
+    // extra tokens are pure decorators (minValue covers minimum; tickValues does NOT cover enum because
+    // `tick` is meaningful). Same matcher ootb-property-shadow uses (single source of truth).
     const keyConcepts = conceptTokens(name);
     for (const ootbName of ootbNames) {
       if (ComponentModelAnalyzer.GENERIC_EXACT.has(ootbName)) continue;
-      if (ComponentModelAnalyzer.coversAsDuplicate(keyConcepts, conceptTokens(ootbName))) return ootbName;
+      if (coversAsDuplicate(keyConcepts, conceptTokens(ootbName))) return ootbName;
     }
     return null;
   }
@@ -205110,19 +205047,24 @@ class ComponentModelAnalyzer {
     return null;
   }
 
-  // The set of authored field `name`s declared directly in this model's `models[].fields[]` (own
-  // fields only — NOT include refs, which are resolved separately). Each entry is { name, isOwn }.
+  // The set of authored field `name`s declared in this model's `models[].fields[]` (own fields only —
+  // NOT `...`-include refs, which are resolved separately). RECURSES through nested container `fields[]`:
+  // the standard xwalk authoring shape GROUPS custom props inside container fields (a `validation`
+  // container holding `regexPattern`, etc.), so the real props live at `fields[].fields[]`, not depth 1.
+  // Container names are harmless in the set (they're just names a read would never match). `...`-include
+  // refs are collected at ANY depth too (an include nested inside a container still contributes fields).
   static ownFieldNames(model) {
     const names = new Set();
     const includeRefs = [];
-    for (const m of Array.isArray(model?.models) ? model.models : []) {
-      for (const f of Array.isArray(m?.fields) ? m.fields : []) {
-        if (f && typeof f === 'object') {
-          if (typeof f['...'] === 'string') includeRefs.push(f['...']);
-          else if (typeof f.name === 'string' && f.name) names.add(f.name);
-        }
+    const walkFields = (fields) => {
+      for (const f of Array.isArray(fields) ? fields : []) {
+        if (!f || typeof f !== 'object') continue;
+        if (typeof f['...'] === 'string') includeRefs.push(f['...']);
+        else if (typeof f.name === 'string' && f.name) names.add(f.name);
+        if (Array.isArray(f.fields)) walkFields(f.fields); // descend into a container's own fields
       }
-    }
+    };
+    for (const m of Array.isArray(model?.models) ? model.models : []) walkFields(m?.fields);
     return { names, includeRefs };
   }
 
