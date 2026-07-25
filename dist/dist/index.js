@@ -192790,12 +192790,13 @@ If you want to optimize development server performance, you can manually bundle 
       fragmentRuleFormRef: 'Fragment rule references $form (must be independent of the parent form)',
       orphanFragmentHandler: 'Fragment handler wired to no event/rule (forgot to stitch)',
       contentInCode: 'Copy/validation message hardcoded in code (use dynamic-text / constraintMessages)',
+      contentLayer: 'User-facing copy in the wrong layer (CSS content: / view DOM — author a text component)',
       displayFormatInCode: 'Display value formatted in code (use displayFormat / displayValueExpression)',
       ruleOrderingRace: 'Rule/event ordering race (dispatch-before-write / async cross-event read)',
       ootbPropertyShadow: 'Custom property/event duplicates an OOTB one (reuse the built-in)',
       fragmentPathValidator: 'globals.fragment path not found in the linked fragment JSON hierarchy',
       componentModelConcern: 'Component view reinvents a model-owned concern (display format / constraint / DOM change)',
-      componentModelDrift: 'Component model duplicates an OOTB prop, or the view reads a properties.<key> the model never declares',
+      componentModelDrift: 'Component view reads a properties.<key> the model never declares (→ undefined at runtime)',
       interactiveChangeGuard: 'UI side effect not gated on an interactive change (fires on a form.importData restore)',
       asyncValueRace: 'Async value read before it resolves, or an empty value written on .catch (silent data loss)',
       componentRuleFormScope: 'Reusable component rule reaches into form/fragment scope (use its own field or an event payload)',
@@ -202716,6 +202717,209 @@ class ContentInCodeAnalyzer {
   }
 }
 
+;// CONCATENATED MODULE: ./src/analyzers/content-layer-analyzer.js
+
+
+
+
+
+
+
+
+/**
+ * Content-Layer Analyzer
+ *
+ * User-facing copy belongs in an AUTHORED content component (a text component / `dynamic-text`
+ * template in the form model) — where it is authorable, localizable, and accessible. Two shortcuts
+ * skills reach for instead push that copy into the WRONG layer, and neither is caught by the other
+ * content analyzers:
+ *
+ *   (1) `content-text-in-css` (error): visible prose injected via a CSS `content:` declaration on a
+ *       `::before` / `::after` pseudo-element (or the `:before`/`:after` single-colon legacy form).
+ *       CSS-injected text is NOT translatable (stylesheets aren't localized), NOT reliably exposed to
+ *       assistive tech (pseudo-element text is unselectable and skipped by many screen readers), and
+ *       NOT authorable (a content author can't change it without a code deploy). Icon glyphs, quotes,
+ *       counters and `attr()` are legitimate — only PROSE (>= 2 words) is flagged.
+ *
+ *   (2) `content-text-in-view-js` (error): prose baked into a component view's `decorate()` and pushed
+ *       into the DOM directly — `el.textContent = 'copy'`, `el.innerHTML = '<p>copy</p>'`,
+ *       `createTextNode('copy')`, `insertAdjacentHTML/Text(pos, 'copy')`. Same problem: hardcoded,
+ *       un-authorable, un-localizable copy. Author a text component and let the model own the string.
+ *
+ * Division of labour with content-in-code: that analyzer owns FRAGMENT / custom-fn surfaces and the
+ * `return '<prose>'` / `setProperty(field, {value:<prose>})` sinks. This analyzer owns the CSS layer
+ * and the COMPONENT-VIEW DOM-text sinks it explicitly excludes (`isCustomFnSurface` skips component
+ * views) — so a string is flagged by exactly one of them.
+ *
+ * Detection is deterministic (no LLM); prose = `isProse` (shared with content-in-code / display-format).
+ * Severity: error.
+ */
+
+// CSS `content` values that are decoration, not copy — never flagged regardless of the prose gate.
+const CSS_CONTENT_KEYWORDS = new Set([
+  'none', 'normal', 'open-quote', 'close-quote', 'no-open-quote', 'no-close-quote', 'inherit',
+  'initial', 'unset', 'revert',
+]);
+// Pseudo-element that renders generated content into the box. Single-colon `:before`/`:after` is the
+// legacy spelling of the same thing and is still honoured by browsers.
+const PSEUDO_ELEMENT_RE = /::?(before|after)\b/i;
+
+class ContentLayerAnalyzer {
+  constructor(config = null) {
+    this.config = config;
+  }
+
+  // ── CSS: prose in a pseudo-element `content:` ────────────────────────────────────────────────
+
+  // Unwrap the CSS string token(s) in a `content` value → the concatenated visible text, or null if
+  // the value carries no string literal (pure keyword / function). Handles `"a" "b"` concatenation
+  // and a leading counter/attr mixed with a string (the string part is still authored copy).
+  static contentText(rawValue) {
+    if (typeof rawValue !== 'string') return null;
+    const strings = rawValue.match(/"([^"]*)"|'([^']*)'/g);
+    if (!strings) return null;
+    return strings.map((s) => s.slice(1, -1)).join(' ');
+  }
+
+  detectCssFile(filename, root) {
+    const issues = [];
+    root.walkDecls('content', (decl) => {
+      const rule = decl.parent;
+      const selector = rule && rule.type === 'rule' ? (rule.selector || '') : '';
+      if (!PSEUDO_ELEMENT_RE.test(selector)) return;               // only generated-content pseudo-els
+      const value = (decl.value || '').trim();
+      if (CSS_CONTENT_KEYWORDS.has(value.toLowerCase())) return;
+      // A pure functional value (attr()/counter()/url()/var()) carries no string literal, so contentText
+      // returns null and it's skipped — but a MIXED value (`"Step " counter(n)`) keeps its authored copy.
+      const text = ContentLayerAnalyzer.contentText(value);
+      if (!isProse(text)) return;                                  // icon glyph / single token / no string → not copy
+      issues.push({
+        severity: 'error',
+        type: 'content-text-in-css',
+        file: filename,
+        line: decl.source?.start?.line,
+        message: `CSS injects visible copy via \`content: ${value}\` on a `
+          + `\`${selector.trim()}\` pseudo-element. CSS-injected text is not localizable, not `
+          + `authorable, and not reliably exposed to assistive tech (pseudo-element text is skipped by `
+          + `many screen readers). Author this copy as a text component / \`dynamic-text\` in the form `
+          + `model instead of a stylesheet.`,
+      });
+    });
+    return issues;
+  }
+
+  analyzeCss(cssFiles = []) {
+    const issues = [];
+    for (const file of Array.isArray(cssFiles) ? cssFiles : []) {
+      if (!file?.filename || file.content == null) continue;
+      let root;
+      try { root = lib_postcss.parse(file.content || ''); } catch (e) { continue; } // unparseable → formCSS reports it
+      issues.push(...this.detectCssFile(file.filename, root));
+    }
+    return issues;
+  }
+
+  // ── JS: prose baked into a component view's DOM ──────────────────────────────────────────────
+
+  static calleeName(callee) {
+    if (!callee) return '';
+    if (callee.type === 'Identifier') return callee.name;
+    if (callee.type === 'MemberExpression') return callee.property?.name || '';
+    return '';
+  }
+
+  // Static text of a string/template/concat literal (a variable part → ''), or null.
+  static staticText(node) {
+    if (!node) return null;
+    if (node.type === 'Literal') return typeof node.value === 'string' ? node.value : null;
+    if (node.type === 'TemplateLiteral') return node.quasis.map((q) => q.value.cooked).join(' ');
+    if (node.type === 'BinaryExpression' && node.operator === '+') {
+      const l = ContentLayerAnalyzer.staticText(node.left);
+      const r = ContentLayerAnalyzer.staticText(node.right);
+      if (l == null && r == null) return null;
+      return `${l || ''} ${r || ''}`;
+    }
+    return null;
+  }
+
+  // Is the node a prose string/template/concat (or a ternary with a prose branch)?
+  static isProseLiteral(node) {
+    if (!node) return false;
+    if (node.type === 'ConditionalExpression') {
+      return ContentLayerAnalyzer.isProseLiteral(node.consequent)
+        || ContentLayerAnalyzer.isProseLiteral(node.alternate);
+    }
+    if (node.type !== 'Literal' && node.type !== 'TemplateLiteral' && node.type !== 'BinaryExpression') return false;
+    if (node.type === 'Literal' && typeof node.value !== 'string') return false;
+    return isProse(ContentLayerAnalyzer.staticText(node));
+  }
+
+  // DOM-text sink method calls that carry the copy as an argument (arg index varies). Limited to
+  // UNAMBIGUOUS DOM text APIs — generic names like append/prepend/write are excluded because they
+  // collide with non-DOM APIs (FormData.append, URLSearchParams.append, a custom write()).
+  static SINK_CALLS = new Map([
+    ['createTextNode', 0],      // document.createTextNode('copy')
+    ['insertAdjacentHTML', 1],  // el.insertAdjacentHTML(pos, '<p>copy</p>')
+    ['insertAdjacentText', 1],  // el.insertAdjacentText(pos, 'copy')
+  ]);
+  // DOM-text sink PROPERTIES assigned a copy value.
+  static SINK_PROPS = new Set(['textContent', 'innerText', 'innerHTML', 'outerHTML']);
+
+  analyzeJs(jsFiles = []) {
+    const issues = [];
+    for (const jsFile of Array.isArray(jsFiles) ? jsFiles : []) {
+      if (!jsFile?.filename || jsFile.content == null) continue;
+      if (!isComponentView(jsFile.filename)) continue;             // view DOM only (frag/custom-fn → content-in-code)
+      let ast;
+      try {
+        ast = acorn_parse(jsFile.content, { ecmaVersion: 'latest', sourceType: 'module', locations: true });
+      } catch (e) {
+        lib_core.warning(`[ContentLayer] JS parse failed for ${jsFile.filename}: ${e.message}`);
+        continue;
+      }
+      const seen = new Set(); // dedupe by line
+      const flag = (line, how) => {
+        if (line == null || seen.has(line)) return; seen.add(line);
+        issues.push({
+          severity: 'error',
+          type: 'content-text-in-view-js',
+          file: jsFile.filename,
+          line,
+          message: `Component view builds user-facing copy in code (${how}). Hardcoded view copy is not `
+            + `authorable or localizable — author a text component / \`dynamic-text\` in the form model `
+            + `and let the model own the string, rather than writing it into the DOM from decorate().`,
+        });
+      };
+
+      simple(ast, {
+        // el.textContent = 'copy' / el.innerHTML = '<p>copy</p>'
+        AssignmentExpression: (n) => {
+          if (n.operator !== '=' && n.operator !== '+=') return;
+          const t = n.left;
+          if (t?.type !== 'MemberExpression' || t.computed) return;
+          if (!ContentLayerAnalyzer.SINK_PROPS.has(t.property?.name)) return;
+          if (!ContentLayerAnalyzer.isProseLiteral(n.right)) return;
+          flag(n.loc?.start.line, `assigns prose to \`.${t.property.name}\``);
+        },
+        // createTextNode('copy') / insertAdjacentHTML(pos, 'copy')
+        CallExpression: (c) => {
+          const name = ContentLayerAnalyzer.calleeName(c.callee);
+          if (!ContentLayerAnalyzer.SINK_CALLS.has(name)) return;
+          const argIdx = ContentLayerAnalyzer.SINK_CALLS.get(name);
+          if (!ContentLayerAnalyzer.isProseLiteral(c.arguments?.[argIdx])) return;
+          flag(c.loc?.start.line, `passes prose to \`${name}()\``);
+        },
+      });
+    }
+    return issues;
+  }
+
+  analyze(cssFiles = [], jsFiles = []) {
+    const issues = [...this.analyzeCss(cssFiles), ...this.analyzeJs(jsFiles)];
+    return { violations: issues.length, issues };
+  }
+}
+
 ;// CONCATENATED MODULE: ./src/analyzers/format-detection.js
 
 
@@ -204949,23 +205153,20 @@ class ComponentOwnsModelConcernAnalyzer {
 
 
 
-
 /**
  * Component-Model Analyzer
  *
  * A custom component ships TWO artefacts that must agree: the view JS (`components/<name>/<name>.js`)
  * and its co-located authoring model (`components/<name>/_<name>.json`, the xwalk `definitions`/`models`
- * surface). Two silent drifts live in the gap between them — neither is caught by the runtime-JSON
- * analyzers (ootb-property-shadow et al.), because the model file is authoring-shaped, not runtime form
- * JSON: props are `models[].fields[]` entries keyed by `name`, not a runtime `properties{}` bag.
+ * surface). A silent drift lives in the gap between them — not caught by the runtime-JSON analyzers
+ * (ootb-property-shadow et al.), because the model file is authoring-shaped, not runtime form JSON:
+ * props are `models[].fields[]` entries keyed by `name`, not a runtime `properties{}` bag.
  *
- * Finding `component-model-prop-duplicates-ootb` (error): a model field whose `name` concept-maps to an
- * OOTB property/constraint for the component's field type (`minValue`→`minimum`, `maxValue`→`maximum`,
- * `stepValue`→`step`). The OOTB base already provides it (a slider's model `...`-includes
- * `_number-validation-fields.json` = minimum/maximum), so the custom field is a DUPLICATE second source
- * of truth that bypasses native validation. Field type is read from the template
- * (`plugins.xwalk.page.template.fieldType`); the OOTB concept set is derived from
- * `src/data/runtime-property-matrix.js` — same source of truth as ootb-property-shadow.
+ * NOTE: an OOTB property/constraint MAY be legitimately re-declared in a component model to OVERRIDE it
+ * (relabel, re-widget, pin a value). That is a supported authoring pattern — the model is a single live
+ * source, not a redundant "second copy" — so a name collision with an OOTB prop is NOT flagged. (This
+ * analyzer previously emitted `component-model-prop-duplicates-ootb` on any such collision; that flagged
+ * legitimate overrides — e.g. `placeholder`, `type` — and was removed.)
  *
  * Finding `component-model-prop-missing` (error): a `properties.<key>` the view JS READS at runtime
  * (`fieldJson?.properties?.<key>`) that the model does NOT declare (after resolving `...`-includes). A
@@ -205007,26 +205208,6 @@ class ComponentModelAnalyzer {
     }
     for (const it of (p.fieldTypeAdditional || {})[fieldType] || []) if (it && it.name) names.add(it.name);
     return names;
-  }
-
-  // Concept-token sets of the OOTB CONSTRAINT/property names (skip generic single-token names that
-  // would over-match, mirroring ootb-property-shadow's GENERIC_EXACT guard). Used to catch a
-  // differently-named duplicate (minValue → minimum).
-  static GENERIC_EXACT = new Set(['value', 'type', 'name', 'index', 'parent', 'default', 'format', 'lang', 'label', 'description', 'tooltip']);
-  // Does model-field `name` duplicate an OOTB property for `fieldType`? Returns the OOTB name or null.
-  duplicatesOotb(name, ootbNames) {
-    if (component_model_analyzer_FRAMEWORK_KEY_RE.test(name) || component_model_analyzer_FRAMEWORK_EXACT.has(name)) return null;
-    // exact OOTB name declared as a custom field → duplicate.
-    if (ootbNames.has(name)) return name;
-    // concept-cover against each OOTB name via the shared decorator-guarded matcher, but ONLY when the
-    // extra tokens are pure decorators (minValue covers minimum; tickValues does NOT cover enum because
-    // `tick` is meaningful). Same matcher ootb-property-shadow uses (single source of truth).
-    const keyConcepts = conceptTokens(name);
-    for (const ootbName of ootbNames) {
-      if (ComponentModelAnalyzer.GENERIC_EXACT.has(ootbName)) continue;
-      if (coversAsDuplicate(keyConcepts, conceptTokens(ootbName))) return ootbName;
-    }
-    return null;
   }
 
   // Parse a model JSON string/object. Returns the object or null (logged) on parse failure.
@@ -205179,26 +205360,10 @@ class ComponentModelAnalyzer {
         issues.push({ file: modelEntry.filename, ...o });
       };
 
-      // 1) duplicate-of-OOTB: an OWN model field that duplicates an OOTB prop for this field type.
-      for (const name of ownNames) {
-        const ootb = this.duplicatesOotb(name, ootbNames);
-        if (!ootb) continue;
-        flag({
-          severity: 'error',
-          type: 'component-model-prop-duplicates-ootb',
-          name,
-          message: `Model declares custom field \`${name}\`, which duplicates the OOTB property `
-            + `\`${ootb}\` for field type \`${fieldType}\`. The OOTB base (already included via `
-            + `\`_number-validation-fields.json\` / the number-input base) provides it — a parallel custom `
-            + `field is a second source of truth that bypasses native validation / DoR. Drop it and use the `
-            + `OOTB \`${ootb}\`. (OOTB set from src/data/runtime-property-matrix.js.)`,
-        });
-      }
-
-      // 2) missing-in-model: a properties.<key> the JS reads that the model never declares → undefined.
+      // missing-in-model: a properties.<key> the JS reads that the model never declares → undefined.
       // Fail-safe: if any `...`-include couldn't be resolved (not in the analyzed set), skip this check
       // entirely — the read could be provided by the unresolved include, and a false "missing" is worse
-      // than a miss. (The duplicate-OOTB check above is unaffected: it only inspects OWN model fields.)
+      // than a miss.
       for (const { key, line } of allResolved ? ComponentModelAnalyzer.propertyReads(ast) : []) {
         if (component_model_analyzer_FRAMEWORK_KEY_RE.test(key) || component_model_analyzer_FRAMEWORK_EXACT.has(key)) continue;
         if (MESSAGE_LABEL_RE.test(key)) continue;
@@ -205766,6 +205931,7 @@ class ComponentRuleFormScopeAnalyzer {
 
 
 
+
 const DEFAULT_LOGGER = {
   info:    msg => console.log(msg),
   warning: msg => console.warn(msg),
@@ -205857,6 +206023,9 @@ async function runAnalysis(beforeData, afterData, jsFiles = [], cssFiles = [], c
   // Needs BOTH fragment JS and its paired JSON; skips a JS file whose JSON isn't in the set.
   const orphanFragmentHandlerResult = new OrphanFragmentHandlerAnalyzer(config).analyze(formJson, jsFiles, jsonFiles);
   const contentInCodeResult        = new ContentInCodeAnalyzer(config).analyze(formJson, jsFiles);
+  // Content in the wrong layer: prose in a CSS pseudo-element `content:`, or copy baked into a
+  // component view's DOM (textContent/innerHTML/createTextNode). Author a text component instead.
+  const contentLayerResult         = new ContentLayerAnalyzer(config).analyze(cssFiles, jsFiles);
   const displayFormatInCodeResult  = new DisplayFormatInCodeAnalyzer(config).analyze(formJson, jsFiles);
   // Rule-ordering races (dispatch-before-write / async cross-event read) — needs the form JSON's
   // events/rules; a no-op when formJson is absent. jsFiles let it see races buried in the custom
@@ -205869,9 +206038,9 @@ async function runAnalysis(beforeData, afterData, jsFiles = [], cssFiles = [], c
   // Component-view tier: view-side reinvention of model-owned concerns (display format, constraints,
   // synthetic DOM change). Pure JS analysis (component-view files); no form JSON needed.
   const componentModelResult = new ComponentOwnsModelConcernAnalyzer(config).analyze(formJson, jsFiles);
-  // Component view ↔ co-located authoring model (`_<name>.json`) consistency: model fields that
-  // duplicate an OOTB prop, and properties.<key> reads the model doesn't declare (→ undefined). Needs
-  // the component model JSON in jsonFiles; skips a view whose model isn't in the analyzed set.
+  // Component view ↔ co-located authoring model (`_<name>.json`) consistency: properties.<key> reads
+  // the model doesn't declare (→ undefined). Needs the component model JSON in jsonFiles; skips a view
+  // whose model isn't in the analyzed set. (OOTB overrides in the model are allowed — not flagged.)
   const componentModelDriftResult = new ComponentModelAnalyzer(config).analyze(formJson, jsFiles, jsonFiles);
 
   if (hasFormData) {
@@ -205993,6 +206162,7 @@ async function runAnalysis(beforeData, afterData, jsFiles = [], cssFiles = [], c
     fragmentRuleFormRef: { after: fragmentRuleFormRefResult, newIssues: fragmentRuleFormRefResult.issues ?? [], resolvedIssues: [] },
     orphanFragmentHandler: { after: orphanFragmentHandlerResult, newIssues: orphanFragmentHandlerResult.issues ?? [], resolvedIssues: [] },
     contentInCode: { after: contentInCodeResult, newIssues: contentInCodeResult.issues ?? [], resolvedIssues: [] },
+    contentLayer: { after: contentLayerResult, newIssues: contentLayerResult.issues ?? [], resolvedIssues: [] },
     displayFormatInCode: { after: displayFormatInCodeResult, newIssues: displayFormatInCodeResult.issues ?? [], resolvedIssues: [] },
     ruleOrderingRace: { after: eventImpactResult, newIssues: eventImpactResult.issues ?? [], resolvedIssues: [] },
     ootbPropertyShadow: { after: ootbShadowResult, newIssues: ootbShadowResult.issues ?? [], resolvedIssues: [] },
@@ -206109,12 +206279,13 @@ const DESIGN_CANON_KEYS = {
   fragmentRuleFormRef: 'fragment rule references the absolute form root $form (breaks standalone / on re-embed)',
   orphanFragmentHandler: 'exported fragment handler wired to no event/rule (forgot to stitch — control does nothing)',
   contentInCode: 'user-facing copy / validation message hardcoded in a fn (author as dynamic-text template / constraintMessages)',
+  contentLayer: 'user-facing copy in the wrong layer — CSS pseudo-element content: prose, or copy baked into a component view\'s DOM (author a text component)',
   displayFormatInCode: 'display value formatted in a fn — numeric decorated with unit/currency/% (use displayFormat / displayValueExpression)',
   ruleOrderingRace: 'rule/event ordering race — dispatch-before-write, or a read of a var written async by another event (reorder / use an atomic source)',
   ootbPropertyShadow: 'custom property/constraint-message or event duplicates an OOTB one (reuse the built-in; OOTB set from src/data/runtime-property-matrix.js)',
   fragmentPathValidator: 'globals.fragment.<path> reference does not exist in the linked fragment JSON hierarchy (@fragmentPath) — resolves to undefined',
   componentModelConcern: 'component view reinvents a model-owned concern — display format / OOTB constraint hardcoded, or a synthetic DOM change event (set model.value)',
-  componentModelDrift: 'component model _<name>.json duplicates an OOTB prop, or the view reads a properties.<key> the model never declares (→ undefined at runtime)',
+  componentModelDrift: 'component view reads a properties.<key> the model _<name>.json never declares (→ undefined at runtime)',
 };
 
 /**
@@ -209969,7 +210140,8 @@ async function loadConfig(configPath = null) {
 const RULE_TYPES = {
   'component-owns-model-concern': ['component-formats-display-value', 'component-reinvents-constraint', 'component-dispatches-dom-change'],
   'component-value-sync': ['component-ignores-value-change'],
-  'component-model': ['component-model-prop-duplicates-ootb', 'component-model-prop-missing'],
+  'content-layer': ['content-text-in-css', 'content-text-in-view-js'],
+  'component-model': ['component-model-prop-missing'],
   'custom-fn-correctness': ['async-custom-function-ignored', 'field-parent-not-dollar-parent', 'jsonmodel-direct-read'],
   'custom-function': ['bulk-set-property-use-import-data', 'custom-event-in-custom-function', 'custom-functions-not-analyzed', 'direct-properties-mutation', 'dom-access-in-custom-function', 'http-request-in-custom-function', 'set-property-form-properties', 'window', 'window-access-in-custom-function'],
   'dispatch-target': ['dispatch-on-field-not-form', 'dispatch-plain-object-not-customevent'],
