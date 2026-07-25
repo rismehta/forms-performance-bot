@@ -203544,9 +203544,14 @@ class EventImpactAnalyzer {
           severity: 'warning',
           type: 'rule-ordering-race',
           message: `Handler '${eventType}' on '${sourceField}' reads getVariable('${v}'), but '${v}' is `
-            + `written only by [${[...writers].join(', ')}] — a different custom event with no ordering `
-            + `guarantee. The read can race ahead of the async write and see an empty value. Prefer an `
-            + `atomically-set source (e.g. the OTP-VAL payload) over a var written by another event. ${DOC}`,
+            + `written only by [${[...writers].join(', ')}] — a different event with no guaranteed order. `
+            + `The read can run before the write and see an empty/stale value (e.g. prefill restores this `
+            + `field before the other event resolves). Don't pass an async result between events through a `
+            + `shared variable. Instead, derive '${v}' reactively: express it as a rule that reads its `
+            + `dependencies directly, so the runtime re-runs it whenever a dependency changes — no manual `
+            + `ordering. For fetched options, author an async enum rule that returns the list once its `
+            + `inputs are ready; for validity, use an async validation expression and let the action await `
+            + `it. Either way the value is resolved where it's used, not carried across events.`,
           file: `formJson:${sourceField}`,
           functionName: eventType,
         });
