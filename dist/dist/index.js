@@ -210279,6 +210279,20 @@ function ruleFor(resolved, ruleName) {
  * @returns {Promise<Array|null>}
  */
 async function loadFlatConfig(cwd, explicitPath) {
+  return (await loadFlatConfigWithPath(cwd, explicitPath)).config;
+}
+
+/**
+ * Like `loadFlatConfig`, but also returns the resolved absolute path of the config file that was
+ * loaded (or null when none). The path is needed to resolve config-relative options such as
+ * `formJsonRoot` against the CONFIG's directory rather than process.cwd() — a relative
+ * `formJsonRoot` is a companion of the config, so it must resolve the same regardless of the cwd the
+ * CLI is invoked from (CI / a wrapper passes an absolute --config from an unrelated cwd).
+ * @param {string} cwd
+ * @param {string} [explicitPath]
+ * @returns {Promise<{ config: Array|null, path: string|null }>}
+ */
+async function loadFlatConfigWithPath(cwd, explicitPath) {
   const { resolve } = await Promise.resolve(/* import() */).then(__nccwpck_require__.t.bind(__nccwpck_require__, 76760, 19));
   const { existsSync } = await Promise.resolve(/* import() */).then(__nccwpck_require__.t.bind(__nccwpck_require__, 73024, 19));
   const { pathToFileURL } = await Promise.resolve(/* import() */).then(__nccwpck_require__.t.bind(__nccwpck_require__, 73136, 19));
@@ -210290,10 +210304,10 @@ async function loadFlatConfig(cwd, explicitPath) {
     try {
       const mod = await __nccwpck_require__(19869)(pathToFileURL(p).href);
       const cfg = mod.default ?? mod;
-      return Array.isArray(cfg) ? cfg : null;
-    } catch { return null; }
+      return { config: Array.isArray(cfg) ? cfg : null, path: p };
+    } catch { return { config: null, path: p }; }
   }
-  return null;
+  return { config: null, path: null };
 }
 
 /**
