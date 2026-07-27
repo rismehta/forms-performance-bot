@@ -202016,6 +202016,14 @@ class NavigationInCustomFnAnalyzer {
  *    elements). Subscribe to the model, don't query the view.
  *  - `createElement` (EXCEPT 'form') + `.innerHTML`/`.style`/`.classList` mutation — building/mutating
  *    view DOM (slider ticks, markers). Belongs in the owning component.
+ *  - `fragment-value-normalization` (WARNING) — a value sink (`return { value }` /
+ *    `setProperty(field, { value })`) whose value traces back to a STRING NORMALIZATION of the field's
+ *    OWN value (`globals.field.$value.toUpperCase()`, `.trim()`, `.replace(/…/, …)`, …). Case/whitespace/
+ *    char-strip sanitization of a field's input is a keystroke concern owned by that field's component
+ *    (its input/keydown handler in `decorate`) or expressible as a native field constraint
+ *    (`pattern` / `format`) — not orchestration code. This is DATA normalization (the SUBMITTED value),
+ *    distinct from display-format-in-code (which owns presentation-only decoration). Warning, not error:
+ *    a DELIBERATE one-off submit-time normalization is legitimate and unprovable statically.
  *
  * Scope guards (via form-file-tiers.isCustomFnSurface — layout-agnostic, NOT a fixed path):
  *  - Runs on custom-fn surfaces: fragment(s)/ folders, scripts/, functions[.source].js, *-rules.js —
@@ -202042,6 +202050,173 @@ class ShouldBeComponentAnalyzer {
     return '';
   }
 
+  // String-normalization methods whose application to a field's OWN value is a keystroke/input-
+  // sanitization concern (owned by the field's component or a native `pattern`/`format` constraint),
+  // not orchestration. Case, whitespace, char-strip, padding, unicode-normalize.
+  static NORMALIZE_METHODS = new Set([
+    'toUpperCase', 'toLowerCase', 'toLocaleUpperCase', 'toLocaleLowerCase',
+    'trim', 'trimStart', 'trimEnd', 'replace', 'replaceAll', 'padStart', 'padEnd', 'normalize',
+  ]);
+
+  // Structural (regex-free) test: is `node` the `<...>.field` receiver of a value read? `globals.field`
+  // → MemberExpression(property=field); a bare `field` → Identifier. (`this.field`, `x.field` too.)
+  static endsWithField(node) {
+    if (!node) return false;
+    if (node.type === 'Identifier') return node.name === 'field';
+    if (node.type === 'MemberExpression') return node.property?.name === 'field';
+    return false;
+  }
+
+  // A read of a FIELD'S OWN value. Two accepted shapes:
+  //  - `<any>.$value` — `$value` is the AF field-MODEL accessor (a plain/external object uses `.code`/
+  //    `.name`, never `$value`), so it is reliably a field read regardless of the receiver's local name
+  //    (`crmField.$value`, `field.$value`, `bankUseFieldsPanel.lgCode.$value`).
+  //  - `<...>.field.value` — generic `.value` is trusted only when the receiver is clearly a `field`
+  //    (bare `field` / `x.field`), so a DOM/plain-object `.value` isn't misread as a field value.
+  static isFieldValueRead(node) {
+    if (node?.type !== 'MemberExpression') return false;
+    const prop = node.property?.name;
+    if (prop === '$value') return true;
+    if (prop === 'value') return ShouldBeComponentAnalyzer.endsWithField(node.object);
+    return false;
+  }
+
+  // Dotted member path of a field reference, e.g. `globals.field` / `bankAccountSection.ifscCode`
+  // / `crmField`. Computed (`x[i]`) segments abort to null (can't compare paths reliably). Used to
+  // confirm the normalized SOURCE field is the same field the sink WRITES (else it's a derive-and-
+  // distribute, not a self-normalization — e.g. splitAddress reads fullAddress, writes addressLine1).
+  static memberPath(node) {
+    if (!node) return null;
+    if (node.type === 'Identifier') return node.name;
+    if (node.type === 'MemberExpression') {
+      if (node.computed) return null;
+      const o = ShouldBeComponentAnalyzer.memberPath(node.object);
+      const p = node.property?.name;
+      return o && p ? `${o}.${p}` : null;
+    }
+    return null;
+  }
+
+  // The path of the FIELD whose `$value`/`.value` `node` reads (the receiver of the value accessor),
+  // tracing through wrapper calls / defaults / ternaries / locals like tracesToFieldValue. Returns the
+  // first such field path, or null. (For `crmField.$value` → "crmField"; for `x.field.value` → "x.field".)
+  static fieldPathOf(node, resolve, seen = new Set()) {
+    if (!node) return null;
+    switch (node.type) {
+      case 'MemberExpression':
+        if (ShouldBeComponentAnalyzer.isFieldValueRead(node)) return ShouldBeComponentAnalyzer.memberPath(node.object);
+        return ShouldBeComponentAnalyzer.fieldPathOf(node.object, resolve, seen);
+      case 'CallExpression': {
+        if (node.callee?.type === 'MemberExpression') {
+          const p = ShouldBeComponentAnalyzer.fieldPathOf(node.callee.object, resolve, seen);
+          if (p) return p;
+        }
+        for (const a of node.arguments || []) {
+          const p = ShouldBeComponentAnalyzer.fieldPathOf(a, resolve, seen);
+          if (p) return p;
+        }
+        return null;
+      }
+      case 'Identifier': {
+        if (seen.has(node.name)) return null;
+        seen.add(node.name);
+        for (const init of resolve(node.name)) {
+          const p = ShouldBeComponentAnalyzer.fieldPathOf(init, resolve, seen);
+          if (p) return p;
+        }
+        return null;
+      }
+      case 'ConditionalExpression':
+        return ShouldBeComponentAnalyzer.fieldPathOf(node.consequent, resolve, seen)
+          ?? ShouldBeComponentAnalyzer.fieldPathOf(node.alternate, resolve, seen);
+      case 'LogicalExpression':
+        return ShouldBeComponentAnalyzer.fieldPathOf(node.left, resolve, seen)
+          ?? ShouldBeComponentAnalyzer.fieldPathOf(node.right, resolve, seen);
+      default:
+        return null;
+    }
+  }
+
+  // Does `node` (or a local it traces through) apply a NORMALIZE_METHODS call to a receiver tracing to
+  // a field's own value? If so, return that source field's path (for same-field matching against the
+  // sink target); else null. Catches `field.$value.toUpperCase()`, `String(field.$value).replace(…)`,
+  // and the split-local form (`const v = String(field.$value); const u = v.toUpperCase();`).
+  static normalizedFieldPath(node, resolve, seen = new Set()) {
+    if (!node) return null;
+    switch (node.type) {
+      case 'CallExpression': {
+        const callee = node.callee;
+        if (callee?.type === 'MemberExpression'
+          && ShouldBeComponentAnalyzer.NORMALIZE_METHODS.has(callee.property?.name)) {
+          const p = ShouldBeComponentAnalyzer.fieldPathOf(callee.object, resolve);
+          if (p) return p;
+        }
+        if (callee?.type === 'MemberExpression') {
+          const p = ShouldBeComponentAnalyzer.normalizedFieldPath(callee.object, resolve, seen);
+          if (p) return p;
+        }
+        for (const a of node.arguments || []) {
+          const p = ShouldBeComponentAnalyzer.normalizedFieldPath(a, resolve, seen);
+          if (p) return p;
+        }
+        return null;
+      }
+      case 'Identifier': {
+        if (seen.has(node.name)) return null;
+        seen.add(node.name);
+        for (const init of resolve(node.name)) {
+          const p = ShouldBeComponentAnalyzer.normalizedFieldPath(init, resolve, seen);
+          if (p) return p;
+        }
+        return null;
+      }
+      case 'MemberExpression':
+        return ShouldBeComponentAnalyzer.normalizedFieldPath(node.object, resolve, seen);
+      case 'ConditionalExpression':
+        return ShouldBeComponentAnalyzer.normalizedFieldPath(node.consequent, resolve, seen)
+          ?? ShouldBeComponentAnalyzer.normalizedFieldPath(node.alternate, resolve, seen);
+      case 'LogicalExpression':
+        return ShouldBeComponentAnalyzer.normalizedFieldPath(node.left, resolve, seen)
+          ?? ShouldBeComponentAnalyzer.normalizedFieldPath(node.right, resolve, seen);
+      default:
+        return null;
+    }
+  }
+
+  // A scope-defining node (its body introduces a new variable scope).
+  static isScopeNode(node) {
+    return node && (node.type === 'Program'
+      || node.type === 'FunctionDeclaration'
+      || node.type === 'FunctionExpression'
+      || node.type === 'ArrowFunctionExpression');
+  }
+
+  // The nearest enclosing scope node in an `ancestors` chain (ordered Program→…→node), EXCLUDING the
+  // node itself (last element). Program is always present, so a scope is always found.
+  static enclosingScope(ancestors) {
+    for (let i = ancestors.length - 2; i >= 0; i -= 1) {
+      if (ShouldBeComponentAnalyzer.isScopeNode(ancestors[i])) return ancestors[i];
+    }
+    return ancestors[0];
+  }
+
+  // The `value` property value(s) of the async-apply `{ value: … }` shape — unwrapping a ternary /
+  // logical return (`cond ? { value: x } : undefined`, `x && { value: y }`) to reach each object branch.
+  static valueProps(node) {
+    if (!node) return [];
+    if (node.type === 'ObjectExpression') {
+      const p = node.properties.find((x) => (x.key?.name === 'value' || x.key?.value === 'value'));
+      return p ? [p.value] : [];
+    }
+    if (node.type === 'ConditionalExpression') {
+      return [...ShouldBeComponentAnalyzer.valueProps(node.consequent), ...ShouldBeComponentAnalyzer.valueProps(node.alternate)];
+    }
+    if (node.type === 'LogicalExpression') {
+      return [...ShouldBeComponentAnalyzer.valueProps(node.left), ...ShouldBeComponentAnalyzer.valueProps(node.right)];
+    }
+    return [];
+  }
+
   analyze(formJson, jsFiles = []) {
     const issues = [];
     for (const jsFile of jsFiles) {
@@ -202064,8 +202239,66 @@ class ShouldBeComponentAnalyzer {
         line,
       });
 
-      simple(ast, {
-        CallExpression: (c) => {
+      // SCOPE-AWARE variable → initializer(s) map, keyed by the enclosing scope node then name. A `val`
+      // in function A and a `val` in function B are distinct entries, so a trace through one function's
+      // local never resolves to a same-named local in another (the file-global map used to false-match).
+      // walk.ancestor gives the scope chain per node; we bucket each declarator/assignment under its
+      // nearest enclosing scope (Program / function). `seenInit` de-dupes when both passes visit a node.
+      const scopeVars = new Map(); // scopeNode → Map<name, init[]>
+      const addInit = (scopeNode, name, expr) => {
+        if (!scopeNode || !name || !expr) return;
+        let byName = scopeVars.get(scopeNode);
+        if (!byName) { byName = new Map(); scopeVars.set(scopeNode, byName); }
+        if (!byName.has(name)) byName.set(name, []);
+        byName.get(name).push(expr);
+      };
+      ancestor(ast, {
+        VariableDeclarator(d, _st, ancestors) {
+          if (d.id?.type === 'Identifier' && d.init) addInit(ShouldBeComponentAnalyzer.enclosingScope(ancestors), d.id.name, d.init);
+        },
+        AssignmentExpression(a, _st, ancestors) {
+          if (a.left?.type === 'Identifier' && a.right) addInit(ShouldBeComponentAnalyzer.enclosingScope(ancestors), a.left.name, a.right);
+        },
+      });
+
+      // Resolve a name to its init(s) using the scope chain of the SINK (inner scopes shadow outer):
+      // walk outward from the sink's enclosing scope to Program, returning the first scope that declares
+      // the name. Returns [] when unresolved (a param, an import, or an outer-scope-only var we don't
+      // track) — the trace then simply doesn't extend through that name (conservative under-match).
+      const makeResolve = (sinkAncestors) => {
+        const chain = [];
+        for (let i = sinkAncestors.length - 1; i >= 0; i -= 1) {
+          if (ShouldBeComponentAnalyzer.isScopeNode(sinkAncestors[i])) chain.push(sinkAncestors[i]);
+        }
+        return (name) => {
+          for (const scope of chain) {
+            const byName = scopeVars.get(scope);
+            if (byName?.has(name)) return byName.get(name);
+          }
+          return [];
+        };
+      };
+
+      const seenNorm = new Set();
+      const pushNormalization = (line) => {
+        if (line == null || seenNorm.has(line)) return;
+        seenNorm.add(line);
+        issues.push({
+          severity: 'warning',
+          type: 'fragment-value-normalization',
+          message: 'A field\'s OWN value is string-normalized (case / whitespace / char-strip) in '
+            + 'orchestration code and written back as the submitted value. Input sanitization is a '
+            + 'keystroke concern owned by the field\'s component (its input/keydown handler in decorate), '
+            + 'or is expressible declaratively as the field\'s native `pattern` / `format` constraint — '
+            + 'not a fragment/custom-fn. If this is a deliberate one-off submit-time normalization, ignore '
+            + 'this. (Distinct from display-format-in-code: this changes the DATA, not the presentation.)',
+          file: jsFile.filename,
+          line,
+        });
+      };
+
+      ancestor(ast, {
+        CallExpression(c, _st, ancestors) {
           const name = ShouldBeComponentAnalyzer.calleeName(c.callee);
           if (name === 'addEventListener') {
             push('fragment-dom-event-listener', c.loc?.start.line, 'DOM addEventListener');
@@ -202083,9 +202316,32 @@ class ShouldBeComponentAnalyzer {
             if (c.callee?.type === 'MemberExpression' && c.callee.object?.property?.name === 'classList') {
               push('fragment-dom-mutation', c.loc?.start.line, `DOM classList.${name}`);
             }
+          } else if (name === 'setProperty') {
+            // setProperty(<target>, { value: <normalized field value> }): flag only when the normalized
+            // SOURCE field IS the target field — a self-normalization. A different source→target
+            // (splitAddress: read fullAddress, write addressLine1) is derive-and-distribute, not this.
+            const vals = ShouldBeComponentAnalyzer.valueProps(c.arguments?.[1]);
+            const targetPath = ShouldBeComponentAnalyzer.memberPath(c.arguments?.[0]);
+            const resolve = makeResolve(ancestors);
+            const srcPath = vals.map((v) => ShouldBeComponentAnalyzer.normalizedFieldPath(v, resolve)).find(Boolean);
+            if (srcPath && targetPath && srcPath === targetPath) {
+              pushNormalization(c.loc?.start.line);
+            }
           }
         },
-        AssignmentExpression: (a) => {
+        // return { value: <normalized field value> } — the async-apply sink. The value applies to the
+        // CURRENT field (globals.field), so this is a self-normalization only when the normalized source
+        // IS the current field (path is `field` / ends in `.field`); normalizing ANOTHER field and
+        // returning it is deriving the current field from another (not flagged here).
+        ReturnStatement(r, _st, ancestors) {
+          const vals = ShouldBeComponentAnalyzer.valueProps(r.argument);
+          const resolve = makeResolve(ancestors);
+          const srcPath = vals.map((v) => ShouldBeComponentAnalyzer.normalizedFieldPath(v, resolve)).find(Boolean);
+          if (srcPath && (srcPath === 'field' || srcPath.endsWith('.field'))) {
+            pushNormalization(r.loc?.start.line);
+          }
+        },
+        AssignmentExpression(a) {
           const left = a.left;
           if (left?.type !== 'MemberExpression') return;
           // el.innerHTML / el.outerHTML = …
