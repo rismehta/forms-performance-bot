@@ -205208,6 +205208,14 @@ class OotbPropertyShadowAnalyzer {
  *     event (`input.dispatchEvent(new Event('change'))`) to move a value into the model / sync a second
  *     input. Warning, not error — a DELIBERATE deferred commit (transient view sync, model committed on
  *     release/blur) is legitimate and unprovable statically. Message states both sides.
+ *
+ *  4. `component-hardcodes-constraint` (WARNING): a native constraint attribute is written with a
+ *     LITERAL (`input.step = 1`, `input.setAttribute('max', '100')`). A literal has no runtime
+ *     provenance — it's fixed at author time, exactly when the model constraint should be authored
+ *     (`minimum`/`maximum`/`step`/`maxLength`/`minLength`). Distinct from #2 (which needs a custom
+ *     `properties.*` read) and from the exemption below: a NON-literal RHS (`input.step = payload.step`)
+ *     is the legitimate forced runtime re-apply and is NOT flagged. Warning — a genuinely-fixed constant
+ *     is a defensible one-off, and intent isn't statically provable.
  */
 class ComponentOwnsModelConcernAnalyzer {
   constructor(config = null) {
@@ -205228,6 +205236,24 @@ class ComponentOwnsModelConcernAnalyzer {
   // Bare exact OOTB names (a MISPLACEMENT owned by ootb-property-shadow, not a reinvention) — don't
   // double-report these here.
   static EXACT_OOTB = new Set(['minimum', 'maximum', 'step', 'enum', 'enumnames', 'enumNames', 'maxlength', 'minlength', 'maxitems', 'minitems']);
+
+  // Native constraint attributes a component writes onto a rendered input, → the OOTB model constraint
+  // that should carry the value instead. Keyed by the LOWERCASED attr (matches both `input.maxLength`
+  // and `setAttribute('maxlength', …)`). Common numeric constraints only — pattern/placeholder/required
+  // are follow-ups (prose/regex overlap with content analyzers).
+  static NATIVE_CONSTRAINT_ATTRS = {
+    min: 'minimum', max: 'maximum', step: 'step', maxlength: 'maxLength', minlength: 'minLength',
+  };
+
+  // Is `node` a provably AUTHOR-TIME constant (a literal, a numeric-string literal, or `-<literal>`)?
+  // Only a literal RHS is flagged for a native constraint: a runtime-sourced value (`payload.step`,
+  // `model.minimum`, `computeStep()`) is the legitimate forced-reconfigure case the exemption protects.
+  static isConstantLiteral(node) {
+    if (!node) return false;
+    if (node.type === 'Literal') return typeof node.value === 'number' || (typeof node.value === 'string' && node.value.trim() !== '' && !Number.isNaN(Number(node.value)));
+    if (node.type === 'UnaryExpression' && (node.operator === '-' || node.operator === '+')) return ComponentOwnsModelConcernAnalyzer.isConstantLiteral(node.argument);
+    return false;
+  }
 
   static reinventedConstraint(key) {
     if (/message|msg|label|text/i.test(key)) return null;
@@ -205322,14 +205348,36 @@ class ComponentOwnsModelConcernAnalyzer {
         //        `.value`/DOM-numeric core (`` `${input.value} months` ``) — inside a value-box render
         //        the core is inherently the field value, so a DOM `.value` counts as the numeric core.
         //
-        // NOTE: `input.min|max|step = <v>` is deliberately NOT flagged. OOTB `setConstraints`
-        // (blocks/form/util.js) applies min/max/step from the model ONCE at decorate and is never re-run on change;
-        // these sliders receive their bounds at RUNTIME (offer payload / per-tenure reconfigure), so the
-        // component MUST re-set the native input's min/max/step then — a forced, legitimate pattern with
-        // no OOTB re-apply path. The real violation is the CUSTOM constraint PROP existing
-        // (`properties.minValue` vs OOTB `minimum`), caught by the MemberExpression read below.
+        // NOTE: `input.min|max|step = <v>` is NOT flagged when <v> is a RUNTIME value. OOTB
+        // `setConstraints` (blocks/form/util.js) applies min/max/step from the model ONCE at decorate and is never
+        // re-run on change; these sliders receive their bounds at RUNTIME (offer payload / per-tenure
+        // reconfigure), so the component MUST re-set the native input's min/max/step then — a forced,
+        // legitimate pattern with no OOTB re-apply path. A LITERAL RHS (`input.step = 1`) is different:
+        // it has no runtime provenance, so it IS flagged (component-hardcodes-constraint) — that fixed
+        // value should be an authored model constraint. The custom constraint PROP existing
+        // (`properties.minValue` vs OOTB `minimum`) is caught separately by the MemberExpression read below.
         AssignmentExpression: (n) => {
           if (n.operator !== '=') return;
+          // 4) native constraint attr written with a literal → author it as the model constraint.
+          if (n.left?.type === 'MemberExpression' && !n.left.computed) {
+            const attr = n.left.property?.name?.toLowerCase();
+            const ootb = attr && ComponentOwnsModelConcernAnalyzer.NATIVE_CONSTRAINT_ATTRS[attr];
+            const objPath = ComponentOwnsModelConcernAnalyzer.memberPath(n.left.object) || '';
+            const isModel = /(^|\.)(model|fieldModel|field)$/.test(objPath);
+            if (ootb && !isModel && ComponentOwnsModelConcernAnalyzer.isConstantLiteral(n.right)) {
+              flag({
+                severity: 'warning',
+                type: 'component-hardcodes-constraint',
+                name: n.left.property.name,
+                line: n.loc?.start.line,
+                message: `Component hardcodes native \`input.${n.left.property.name} = <literal>\` in the view. `
+                  + `A literal constraint has no runtime provenance — author it as the OOTB model constraint `
+                  + `\`${ootb}\` on the field so it rides the model (single source, localizable, applied by OOTB `
+                  + `setConstraints (blocks/form/util.js) at decorate). Setting \`input.${n.left.property.name}\` `
+                  + `from a RUNTIME value (offer payload / model read) is fine — only a hardcoded literal is flagged.`,
+              });
+            }
+          }
           if (!ComponentOwnsModelConcernAnalyzer.isRenderSink(n.left)) return;
           const isFmt = isDisplayFormatSink(n.right)
             || ComponentOwnsModelConcernAnalyzer.isDecoratedValueBox(n.right);
@@ -205372,7 +205420,29 @@ class ComponentOwnsModelConcernAnalyzer {
         },
 
         // 3) synthetic DOM change/input dispatch to move a value into the model (warning).
+        // 4b) setAttribute('min'|'max'|'step'|…, <literal>) — the call-form of the native-constraint write.
         CallExpression: (c) => {
+          if (c.callee?.type === 'MemberExpression' && c.callee.property?.name === 'setAttribute') {
+            const attrArg = c.arguments?.[0];
+            const attr = attrArg?.type === 'Literal' && typeof attrArg.value === 'string' ? attrArg.value.toLowerCase() : null;
+            const ootb = attr && ComponentOwnsModelConcernAnalyzer.NATIVE_CONSTRAINT_ATTRS[attr];
+            const objPath = ComponentOwnsModelConcernAnalyzer.memberPath(c.callee.object) || '';
+            const isModel = /(^|\.)(model|fieldModel|field)$/.test(objPath);
+            if (ootb && !isModel && ComponentOwnsModelConcernAnalyzer.isConstantLiteral(c.arguments?.[1])) {
+              flag({
+                severity: 'warning',
+                type: 'component-hardcodes-constraint',
+                name: attr,
+                line: c.loc?.start.line,
+                message: `Component hardcodes native \`setAttribute('${attr}', <literal>)\` in the view. `
+                  + `A literal constraint has no runtime provenance — author it as the OOTB model constraint `
+                  + `\`${ootb}\` on the field so it rides the model (single source, localizable, applied by OOTB `
+                  + `setConstraints (blocks/form/util.js) at decorate). Setting the attribute from a RUNTIME value `
+                  + `(offer payload / model read) is fine — only a hardcoded literal is flagged.`,
+              });
+            }
+            return;
+          }
           if (c.callee?.type !== 'MemberExpression' || c.callee.property?.name !== 'dispatchEvent') return;
           const arg = c.arguments?.[0];
           // new Event('change'|'input', …) / new CustomEvent('change'|'input', …)
@@ -210399,7 +210469,7 @@ async function loadConfig(configPath = null) {
  * Keep in sync when an analyzer adds a finding type — the test in test-flat-config guards drift.
  */
 const RULE_TYPES = {
-  'component-owns-model-concern': ['component-formats-display-value', 'component-reinvents-constraint', 'component-dispatches-dom-change'],
+  'component-owns-model-concern': ['component-formats-display-value', 'component-reinvents-constraint', 'component-dispatches-dom-change', 'component-hardcodes-constraint'],
   'component-value-sync': ['component-ignores-value-change'],
   'content-layer': ['content-text-in-css', 'content-text-in-view-js'],
   'component-model': ['component-model-prop-missing'],
