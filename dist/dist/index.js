@@ -189170,6 +189170,47 @@ function tokenizer(input, options) {
 
 
 
+;// CONCATENATED MODULE: ./src/utils/parse-cache.js
+/**
+ * Shared, process-lifetime acorn.parse() cache.
+ *
+ * Every analyzer parses its own `jsFiles`/`file.content` independently via `acorn.parse`. Under the
+ * ESLint-plugin surface (`analyzerRule`, see eslint-plugin/analyzer-rule.js), ESLint runs each
+ * `aem-forms/*` rule as a SEPARATE rule against the SAME file — a fragment file with ~15 wired rules
+ * gets re-parsed ~15 times over, once per analyzer, on top of ESLint's own parse for its own AST. The
+ * bot CLI runs the same analyzer classes across its own multi-analyzer pipeline and pays the same cost.
+ *
+ * Cache key is the raw source string (content is already read once per file by the caller; identical
+ * content — same file, or two callers on the same file within one process — hits the cache). Options
+ * are the UNION every analyzer needs: `locations` and `ranges` are both always requested, since they're
+ * additive AST fields — a caller that doesn't read `.loc`/`.range` is unaffected by their presence, so
+ * every analyzer can share one cached tree regardless of which subset of fields it actually reads.
+ *
+ * Not evicted: bounded by the number of distinct file contents parsed in one process run (a single
+ * ESLint or bot CLI invocation), not by wall-clock time or process lifetime beyond that.
+ */
+
+
+const cache = new Map();
+
+/**
+ * Parse `content` with acorn, reusing a cached AST for identical content.
+ * @param {string} content - JS source to parse
+ * @returns {object} the acorn Program node (throws the same as `acorn.parse` on invalid syntax)
+ */
+function parseCached(content) {
+  const cached = cache.get(content);
+  if (cached) return cached;
+  const ast = acorn_parse(content, {
+    ecmaVersion: 'latest',
+    sourceType: 'module',
+    locations: true,
+    ranges: true,
+  });
+  cache.set(content, ast);
+  return ast;
+}
+
 ;// CONCATENATED MODULE: ./node_modules/acorn-walk/dist/walk.mjs
 // AST walker module for ESTree compatible trees
 
@@ -189825,11 +189866,7 @@ class CustomFunctionAnalyzer {
         }
         try {
           // Parse with locations enabled to get line numbers
-          const ast = acorn_parse(jsFile.content, {
-            ecmaVersion: 'latest',  // Support all modern JavaScript including class fields
-            sourceType: 'module',
-            locations: true  // ← CRITICAL: Required for line numbers!
-          });
+          const ast = parseCached(jsFile.content);
           // Build declaration map once per file — used for re-export resolution (Gap 1)
           // and transitive call following (Gap 2).
           const fileDeclarations = this.buildFileDeclarations(ast);
@@ -189962,7 +189999,7 @@ class CustomFunctionAnalyzer {
     let count = 0;
     for (const file of jsFiles) {
       try {
-        const ast = acorn_parse(file.content, { ecmaVersion: 'latest', sourceType: 'module', locations: true });
+        const ast = parseCached(file.content);
         // Build declaration map so we can verify export { X } specifiers are actually functions.
         const fileDeclarations = this.buildFileDeclarations(ast);
         simple(ast, {
@@ -190091,11 +190128,7 @@ class CustomFunctionAnalyzer {
     for (const file of jsFiles) {
       try {
         // Parse JavaScript file
-        const ast = acorn_parse(file.content, {
-          ecmaVersion: 'latest',  // Support all modern JavaScript including class fields
-          sourceType: 'module',
-          locations: true,
-        });
+        const ast = parseCached(file.content);
 
         const fileDeclarations = this.buildFileDeclarations(ast);
 
@@ -195128,7 +195161,7 @@ function scanSetPropertyChanges(jsFiles, opts) {
     if (!file?.filename || file.content == null) return;
     let ast;
     try {
-      ast = acorn_parse(file.content, { ecmaVersion: 'latest', sourceType: 'module', locations: true });
+      ast = parseCached(file.content);
     } catch (e) {
       lib_core.warning(`[${tag}] parse failed for ${file.filename}: ${e.message}`);
       return;
@@ -198422,11 +198455,7 @@ class RuntimeCLSAnalyzer {
     // Parse JavaScript
     let ast;
     try {
-      ast = acorn_parse(content, {
-        ecmaVersion: 'latest',
-        sourceType: 'module',
-        locations: true,
-      });
+      ast = parseCached(content);
     } catch (error) {
       // Skip files that can't be parsed
       return issues;
@@ -199331,11 +199360,7 @@ class FragmentQualifiedNameAnalyzer {
     for (const file of jsFiles) {
       let ast;
       try {
-        ast = acorn_parse(file.content, {
-          ecmaVersion: 'latest',
-          sourceType: 'module',
-          locations: true,
-        });
+        ast = parseCached(file.content);
       } catch (err) {
         lib_core.warning(`[FragmentQualifiedName] Failed to parse ${file.filename}: ${err.message}`);
         continue;
@@ -199645,11 +199670,7 @@ class FragmentGlobalsScopeAnalyzer {
 
       let ast;
       try {
-        ast = acorn_parse(file.content, {
-          ecmaVersion: 'latest',
-          sourceType: 'module',
-          locations: true,
-        });
+        ast = parseCached(file.content);
       } catch (err) {
         lib_core.warning(`[FragmentGlobalsScope] Failed to parse ${file.filename}: ${err.message}`);
         continue;
@@ -200025,11 +200046,7 @@ class BlockDecoratorAnalyzer {
     const issues = [];
     for (const file of blockFiles) {
       try {
-        const ast = acorn_parse(file.content, {
-          ecmaVersion: 'latest',
-          sourceType: 'module',
-          locations: true,
-        });
+        const ast = parseCached(file.content);
         this.checkFile(ast, file, issues);
       } catch (err) {
         lib_core.warning(`[BlockDecorator] Failed to parse ${file.filename}: ${err.message}`);
@@ -200262,7 +200279,7 @@ class FieldWritesSiblingAnalyzer {
     for (const jsFile of jsFiles) {
       let ast;
       try {
-        ast = acorn_parse(jsFile.content, { ecmaVersion: 'latest', sourceType: 'module', locations: true });
+        ast = parseCached(jsFile.content);
       } catch (e) {
         lib_core.warning(`[FieldWritesSibling] parse failed for ${jsFile.filename}: ${e.message}`);
         continue;
@@ -200395,7 +200412,7 @@ class RequestErrorHandlingAnalyzer {
     for (const jsFile of jsFiles) {
       let ast;
       try {
-        ast = acorn_parse(jsFile.content, { ecmaVersion: 'latest', sourceType: 'module', locations: true });
+        ast = parseCached(jsFile.content);
       } catch (e) {
         lib_core.warning(`[RequestErrorHandling] parse failed for ${jsFile.filename}: ${e.message}`);
         continue;
@@ -200497,7 +200514,7 @@ class DispatchTargetAnalyzer {
     for (const jsFile of jsFiles) {
       let ast;
       try {
-        ast = acorn_parse(jsFile.content, { ecmaVersion: 'latest', sourceType: 'module', locations: true });
+        ast = parseCached(jsFile.content);
       } catch (e) {
         lib_core.warning(`[DispatchTarget] parse failed for ${jsFile.filename}: ${e.message}`);
         continue;
@@ -200677,15 +200694,10 @@ class RuleVsCodeAnalyzer {
       out.push({
         severity: 'error',
         type: 'value-visibility-logic-in-js',
-        message: `Function '${fnName}' only sets value/visible/enabled on the model (no async/DOM/`
-          + 'request). If this is a DERIVED value (recomputes from other fields), author it as a '
-          + 'value/visibility RULE (fd:rules expression) — component JS is web-only and a rule rides '
-          + 'the model. EXCEPTION — keep it imperative if this is a ONE-SHOT SEED of user-editable '
-          + 'data (e.g. prefilling an address/name from a goldenRecord snapshot at init): that value is '
-          + 'Class-1 dataRef data, restored via importData on resume and editable by the user. A value '
-          + 'rule would reclassify it as derived (Class-2) and RE-FIRE on every input change — '
-          + "overwriting the user's edit / the restored value on resume. If that's the case, this is a "
-          + 'false positive; suppress it with `// eslint-disable-next-line aem-forms/rule-vs-code`.',
+        message: `Function '${fnName}' only sets value/visible/enabled with no async/DOM/request — `
+          + 'likely a derived value; author it as a value/visibility rule so it re-evaluates '
+          + 'automatically. Exception: a one-time prefill of user-editable data (e.g. from a saved '
+          + 'snapshot) is fine left as JS.',
         file,
         line: setLine,
       });
@@ -200694,9 +200706,9 @@ class RuleVsCodeAnalyzer {
       out.push({
         severity: 'error',
         type: 'markfieldasinvalid-instead-of-validationexpression',
-        message: `Function '${fnName}' calls markFieldAsInvalid. Model validity as the field's `
-          + '`validationExpression` (boolean / {valid,errorMessage} / Promise) so validate()/'
-          + 'validateAsync()/submit pick it up — an imperative mark fights the validity slot.',
+        message: `Function '${fnName}' calls markFieldAsInvalid imperatively — model this instead as `
+          + "the field's validationExpression, so validate()/submit pick up the invalid state "
+          + 'automatically.',
         file,
         line: markInvalidLine,
       });
@@ -200709,7 +200721,7 @@ class RuleVsCodeAnalyzer {
     for (const jsFile of jsFiles) {
       let ast;
       try {
-        ast = acorn_parse(jsFile.content, { ecmaVersion: 'latest', sourceType: 'module', locations: true });
+        ast = parseCached(jsFile.content);
       } catch (e) {
         lib_core.warning(`[RuleVsCode] parse failed for ${jsFile.filename}: ${e.message}`);
         continue;
@@ -200783,7 +200795,7 @@ class HardcodedConfigAnalyzer {
     for (const jsFile of jsFiles) {
       let ast;
       try {
-        ast = acorn_parse(jsFile.content, { ecmaVersion: 'latest', sourceType: 'module', locations: true });
+        ast = parseCached(jsFile.content);
       } catch (e) {
         lib_core.warning(`[HardcodedConfig] parse failed for ${jsFile.filename}: ${e.message}`);
         continue;
@@ -201033,7 +201045,7 @@ class StorageClassAnalyzer {
     for (const jsFile of jsFiles) {
       let ast;
       try {
-        ast = acorn_parse(jsFile.content, { ecmaVersion: 'latest', sourceType: 'module', locations: true });
+        ast = parseCached(jsFile.content);
       } catch (e) {
         lib_core.warning(`[StorageClass] parse failed for ${jsFile.filename}: ${e.message}`);
         continue;
@@ -201117,9 +201129,9 @@ class StorageClassAnalyzer {
         issues.push({
           severity: 'error',
           type: 'form-data-in-variable',
-          message: `setVariable('${site.name}', …) — a field with this name is dataRef-bound (Class-1 `
-            + 'form data). Let the dataRef carry it (importData / binding); never copy form data into a '
-            + 'variable.',
+          message: `setVariable('${site.name}', …) copies data from a field of the same name into a `
+            + 'separate variable — that field already writes back to the form itself, so read/write it '
+            + 'directly (or via importData) instead of duplicating its value into a variable.',
           file: site.file,
           line: site.line,
         });
@@ -201130,13 +201142,10 @@ class StorageClassAnalyzer {
         issues.push({
           severity: 'error',
           type: 'variable-not-namespaced',
-          message: `setVariable('${site.name}', …) is a form-scoped variable with no `
-            + 'positive namespace prefix. Per journey-state-model, name it `data.'
-            + `${site.name}\` (fieldless Class-1 data that migrates to \`$data\` — preferably write it `
-            + 'directly via the `$data` accessor, `<scope>.$data.'
-            + `${site.name} = …\`) or \`uistate.`
-            + `${site.name}\` (persisted Class-3/4 flow-UI state; \`uistate._${site.name}\` if `
-            + 'ephemeral scratch). A bare name is unclassified — the restore channel is ambiguous.',
+          message: `setVariable('${site.name}', …) has no 'data.' or 'uistate.' prefix, so it's `
+            + "unclear whether this value should be restored when the user resumes the form. Prefix "
+            + `it 'data.${site.name}' if it holds saved form data, or 'uistate.${site.name}' for `
+            + `temporary flow/UI state ('uistate._${site.name}' if it should never be saved).`,
           file: site.file,
           line: site.line,
         });
@@ -201149,9 +201158,8 @@ class StorageClassAnalyzer {
         issues.push({
           severity: 'warning',
           type: 'write-only-variable',
-          message: `setVariable('${site.name}', …) is never read by any getVariable('${site.name}') `
-            + 'in the analyzed JS — a dead Class-3 write. Remove it, or if it is consumed by an '
-            + 'authored rule/another module, confirm the reader exists.',
+          message: `setVariable('${site.name}', …) is never read anywhere in this file — likely dead `
+            + "code, unless it's read by an authored rule or another file this scan can't see.",
           file: site.file,
           line: site.line,
         });
@@ -201171,10 +201179,9 @@ class StorageClassAnalyzer {
         issues.push({
           severity: 'error',
           type: 'getvariable-in-init',
-          message: `${readExpr} inside init handler '${site.enclosingFn}'. On init/resume a fragment `
-            + 'must not read form state directly. The orchestrator builds the `custom:*Init` event '
-            + 'payload from state; read it via `globals.event.payload` instead. Ownership: the '
-            + 'orchestrator owns state→payload, the fragment consumes the payload.',
+          message: `${readExpr} runs inside '${site.enclosingFn}', a handler that runs when the form `
+            + 'initializes or resumes — reading form state directly here can return stale data. Read '
+            + 'it from the event payload (globals.event.payload) that triggered this handler instead.',
           file: site.file,
           line: site.line,
         });
@@ -201185,10 +201192,8 @@ class StorageClassAnalyzer {
         issues.push({
           severity: 'error',
           type: 'getvariable-not-namespaced',
-          message: `${readExpr} reads a form-scoped property with no positive namespace prefix. Name `
-            + `it \`data.${site.name}\` or \`uistate.${site.name}\` (journey-state-model). Ideally a `
-            + 'fragment receives this value via an event payload the caller builds '
-            + '(globals.event.payload), not a direct form read.',
+          message: `${readExpr} has no 'data.' or 'uistate.' prefix — same ambiguity as an `
+            + `unnamespaced write. Rename it 'data.${site.name}' or 'uistate.${site.name}'.`,
           file: site.file,
           line: site.line,
         });
@@ -201260,7 +201265,7 @@ class CustomFnCorrectnessAnalyzer {
     for (const jsFile of jsFiles) {
       let ast;
       try {
-        ast = acorn_parse(jsFile.content, { ecmaVersion: 'latest', sourceType: 'module', locations: true });
+        ast = parseCached(jsFile.content);
       } catch (e) {
         lib_core.warning(`[CustomFnCorrectness] parse failed for ${jsFile.filename}: ${e.message}`);
         continue;
@@ -201488,7 +201493,7 @@ class FragmentPathValidatorAnalyzer {
 
       let ast;
       try {
-        ast = acorn_parse(file.content, { ecmaVersion: 'latest', sourceType: 'module', locations: true });
+        ast = parseCached(file.content);
       } catch (e) {
         lib_core.warning(`[FragmentPathValidator] JS parse failed for ${file.filename}: ${e.message}`);
         continue;
@@ -201736,7 +201741,7 @@ class ForeignFragmentRootAnalyzer {
       // below. (Only AEM Forms custom-fn code writes globals.fragment.X, so non-form JS never matches.)
       let ast;
       try {
-        ast = acorn_parse(jsFile.content, { ecmaVersion: 'latest', sourceType: 'module', locations: true });
+        ast = parseCached(jsFile.content);
       } catch (e) {
         lib_core.warning(`[ForeignFragmentRoot] parse failed for ${jsFile.filename}: ${e.message}`);
         continue;
@@ -201797,7 +201802,7 @@ class ForeignFragmentRootAnalyzer {
   _analyzeWithJson(jsFile, tag, json) {
     let ast;
     try {
-      ast = acorn_parse(jsFile.content, { ecmaVersion: 'latest', sourceType: 'module', locations: true });
+      ast = parseCached(jsFile.content);
     } catch (e) {
       lib_core.warning(`[ForeignFragmentRoot] parse failed for ${jsFile.filename}: ${e.message}`);
       return null;
@@ -201919,7 +201924,7 @@ class NavigationInCustomFnAnalyzer {
       if (!NavigationInCustomFnAnalyzer.isCustomFnSurface(jsFile.filename)) continue;
       let ast;
       try {
-        ast = acorn_parse(jsFile.content, { ecmaVersion: 'latest', sourceType: 'module', locations: true });
+        ast = parseCached(jsFile.content);
       } catch (e) {
         lib_core.warning(`[NavigationInCustomFn] parse failed for ${jsFile.filename}: ${e.message}`);
         continue;
@@ -202223,7 +202228,7 @@ class ShouldBeComponentAnalyzer {
       if (!ShouldBeComponentAnalyzer.isCustomFnSurface(jsFile.filename)) continue;
       let ast;
       try {
-        ast = acorn_parse(jsFile.content, { ecmaVersion: 'latest', sourceType: 'module', locations: true });
+        ast = parseCached(jsFile.content);
       } catch (e) {
         lib_core.warning(`[ShouldBeComponent] parse failed for ${jsFile.filename}: ${e.message}`);
         continue;
@@ -202231,10 +202236,8 @@ class ShouldBeComponentAnalyzer {
       const push = (type, line, detail) => issues.push({
         severity: 'error',
         type,
-        message: `${detail} in orchestration code — view/keystroke DOM belongs in a component's `
-          + 'decorate (e.g. the slider/input component owns its own DOM). A fragment/custom-fn '
-          + 'orchestrates only: react to the component via model subscribe / rule change, don\'t query '
-          + 'or build its elements.',
+        message: `${detail} found in a fragment or custom-function file — this kind of view/DOM `
+          + "code should live in the owning component's own decorate function instead.",
         file: jsFile.filename,
         line,
       });
@@ -202286,12 +202289,10 @@ class ShouldBeComponentAnalyzer {
         issues.push({
           severity: 'warning',
           type: 'fragment-value-normalization',
-          message: 'A field\'s OWN value is string-normalized (case / whitespace / char-strip) in '
-            + 'orchestration code and written back as the submitted value. Input sanitization is a '
-            + 'keystroke concern owned by the field\'s component (its input/keydown handler in decorate), '
-            + 'or is expressible declaratively as the field\'s native `pattern` / `format` constraint — '
-            + 'not a fragment/custom-fn. If this is a deliberate one-off submit-time normalization, ignore '
-            + 'this. (Distinct from display-format-in-code: this changes the DATA, not the presentation.)',
+          message: "A field's own value is being reformatted here (case, whitespace, or character "
+            + 'changes) and written back as the saved value — this kind of input cleanup belongs in '
+            + "the field's own component, or as a native pattern/format constraint, not in a fragment "
+            + 'or custom-function file.',
           file: jsFile.filename,
           line,
         });
@@ -202479,7 +202480,7 @@ class ComponentValueSyncAnalyzer {
       if (!isComponentView(jsFile.filename)) continue;
       let ast;
       try {
-        ast = acorn_parse(jsFile.content, { ecmaVersion: 'latest', sourceType: 'module', locations: true });
+        ast = parseCached(jsFile.content);
       } catch (e) {
         lib_core.warning(`[ComponentValueSync] parse failed for ${jsFile.filename}: ${e.message}`);
         continue;
@@ -202783,7 +202784,7 @@ class OrphanFragmentHandlerAnalyzer {
 
       let ast;
       try {
-        ast = acorn_parse(file.content, { ecmaVersion: 'latest', sourceType: 'module', locations: true });
+        ast = parseCached(file.content);
       } catch (e) {
         lib_core.warning(`[OrphanFragmentHandler] JS parse failed for ${file.filename} — skipping: ${e.message}`);
         continue;
@@ -202915,7 +202916,7 @@ class ContentInCodeAnalyzer {
       if (!isCustomFnSurface(jsFile.filename)) continue;
       let ast;
       try {
-        ast = acorn_parse(jsFile.content, { ecmaVersion: 'latest', sourceType: 'module', locations: true });
+        ast = parseCached(jsFile.content);
       } catch (e) {
         lib_core.warning(`[ContentInCode] parse failed for ${jsFile.filename}: ${e.message}`);
         continue;
@@ -203128,7 +203129,7 @@ class ContentLayerAnalyzer {
       if (!isComponentView(jsFile.filename)) continue;             // view DOM only (frag/custom-fn → content-in-code)
       let ast;
       try {
-        ast = acorn_parse(jsFile.content, { ecmaVersion: 'latest', sourceType: 'module', locations: true });
+        ast = parseCached(jsFile.content);
       } catch (e) {
         lib_core.warning(`[ContentLayer] JS parse failed for ${jsFile.filename}: ${e.message}`);
         continue;
@@ -203349,7 +203350,7 @@ class DisplayFormatInCodeAnalyzer {
       if (!isCustomFnSurface(jsFile.filename)) continue;
       let ast;
       try {
-        ast = acorn_parse(jsFile.content, { ecmaVersion: 'latest', sourceType: 'module', locations: true });
+        ast = parseCached(jsFile.content);
       } catch (e) {
         lib_core.warning(`[DisplayFormatInCode] parse failed for ${jsFile.filename}: ${e.message}`);
         continue;
@@ -203479,7 +203480,7 @@ class EventImpactAnalyzer {
     for (const jsFile of jsFiles || []) {
       let ast;
       try {
-        ast = acorn_parse(jsFile.content, { ecmaVersion: 'latest', sourceType: 'module' });
+        ast = parseCached(jsFile.content);
       } catch { continue; } // unparseable file → skip, never throw
 
       // A function is relevant if it is declared at any level and named; we key by name. Inner helper
@@ -205328,7 +205329,7 @@ class ComponentOwnsModelConcernAnalyzer {
 
       let ast;
       try {
-        ast = acorn_parse(file.content, { ecmaVersion: 'latest', sourceType: 'module', locations: true });
+        ast = parseCached(file.content);
       } catch (e) {
         lib_core.warning(`[ComponentOwnsModelConcern] parse failed for ${file.filename}: ${e.message}`);
         continue;
@@ -205672,7 +205673,7 @@ class ComponentModelAnalyzer {
 
       let ast;
       try {
-        ast = acorn_parse(file.content, { ecmaVersion: 'latest', sourceType: 'module', locations: true });
+        ast = parseCached(file.content);
       } catch (e) {
         lib_core.warning(`[ComponentModel] JS parse failed for ${file.filename}: ${e.message}`);
         continue;
@@ -205825,7 +205826,7 @@ class InteractiveChangeGuardAnalyzer {
       if (!InteractiveChangeGuardAnalyzer.isCustomFnSurface(jsFile.filename)) continue;
       let ast;
       try {
-        ast = acorn_parse(jsFile.content, { ecmaVersion: 'latest', sourceType: 'module', locations: true, ranges: true });
+        ast = parseCached(jsFile.content);
       } catch (e) {
         lib_core.warning(`[InteractiveChangeGuard] parse failed for ${jsFile.filename}: ${e.message}`);
         continue;
@@ -205984,7 +205985,7 @@ class AsyncValueRaceAnalyzer {
       if (!AsyncValueRaceAnalyzer.isCustomFnSurface(jsFile.filename)) continue;
       let ast;
       try {
-        ast = acorn_parse(jsFile.content, { ecmaVersion: 'latest', sourceType: 'module', locations: true });
+        ast = parseCached(jsFile.content);
       } catch (e) {
         lib_core.warning(`[AsyncValueRace] parse failed for ${jsFile.filename}: ${e.message}`);
         continue;
@@ -206124,7 +206125,7 @@ class ComponentRuleFormScopeAnalyzer {
 
       let ast;
       try {
-        ast = acorn_parse(jsFile.content, { ecmaVersion: 'latest', sourceType: 'module', locations: true });
+        ast = parseCached(jsFile.content);
       } catch (e) {
         lib_core.warning(`[ComponentRuleFormScope] parse failed for ${jsFile.filename}: ${e.message}`);
         continue;
