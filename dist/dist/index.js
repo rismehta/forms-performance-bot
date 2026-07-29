@@ -195240,6 +195240,881 @@ function scanSetPropertyChanges(jsFiles, opts) {
   return changes;
 }
 
+;// CONCATENATED MODULE: ./src/analyzers/event-impact-analyzer.js
+/**
+ * Event Impact Analyzer
+ * Generates impact analysis showing which events affect which fields
+ * Useful for understanding ripple effects when modifying events.
+ *
+ * Also detects RULE-ORDERING RACES in the form's event/rule expressions — the class of bug that
+ * `test/integration/helpers/backend-rewrite.js` patches on the wire (see
+ * docs/test-only-patches-backend-rewrite.md). Two shapes:
+ *
+ *   A. dispatch-before-write (error): a handler array runs `dispatchEvent($form,'custom:E',…)` at
+ *      index i and `setVariable('V',…)` at index j > i in the SAME array, and the `custom:E` handler
+ *      READS `V` (via `getVariable('V')`). The dispatched handler sees the stale/unset `V` → wrong
+ *      branch. This is the `fixDecryptSuccessOrdering` bug. Fix: move the setVariable before the
+ *      dispatch. Confident + local → error.
+ *
+ *   B. async cross-event read-before-write (warning): a handler reads `getVariable('V')` where `V` is
+ *      written ONLY inside a DIFFERENT `custom:*` handler (no synchronous ordering guarantee), so the
+ *      read can race ahead of the async write. This is the `fixRedirectFullName` bug. Static timing
+ *      can't be proven → warning (prefer an atomically-set source, e.g. an OTP-VAL payload field).
+ *
+ * Both shapes ALSO fire when the dispatchEvent / setVariable / getVariable calls are not inline in the
+ * JSON handler string but buried in a CUSTOM FUNCTION the handler invokes (e.g. a handler runs
+ * `handleContinueCTA(globals)` where handleContinueCTA() reads getVariable('isNewFieldValid'), and a
+ * different handler runs `validateNewField(globals)` which setVariable's it). We resolve the form's
+ * `customFunctionsPath` JS, extract each exported function's reads/writes/dispatches, and treat a
+ * handler that calls `fn(globals)` AS IF the handler contained fn's calls. This requires `jsFiles`; when
+ * none are supplied (the default) the analyzer degrades to the inline-JSON behaviour only — no change.
+ */
+
+
+
+
+class EventImpactAnalyzer {
+  constructor(config = null) {
+    this.config = config;
+  }
+
+  // Ordered statements of interest in a single handler array. Each entry: {kind, name, index}.
+  // kind: 'dispatch' (custom event name), 'setVar' (variable written), plus we scan reads separately.
+  static parseHandlerStatements(handlerArray) {
+    const stmts = [];
+    handlerArray.forEach((handler, index) => {
+      if (typeof handler !== 'string') return;
+      // Target-agnostic: the dispatch target (first arg) can be $form / globals.form / globals.field /
+      // a field var / globals.fragment.root.x / a minified identifier — we don't constrain it. The
+      // `custom:` prefix on the captured event NAME (2nd string arg) is what distinguishes a form
+      // custom-event dispatch from a DOM dispatch like dispatchEvent(new Event('change')).
+      for (const m of handler.matchAll(/dispatchEvent\s*\(\s*[^,]+,\s*(?:\\?['"]|\\u0027)(custom:[a-zA-Z0-9_]+)/g)) {
+        stmts.push({ kind: 'dispatch', name: m[1], index });
+      }
+      for (const m of handler.matchAll(/setVariable\s*\(\s*(?:\\?['"]|\\u0027)([a-zA-Z0-9_]+)/g)) {
+        stmts.push({ kind: 'setVar', name: m[1], index });
+      }
+    });
+    return stmts;
+  }
+
+  // Variable names READ in an expression string via getVariable('V'). (Only the getVariable form is
+  // detected — bare $V / .V property accesses are ambiguous in AF expressions and would false-positive.)
+  static variablesRead(text) {
+    const names = new Set();
+    if (typeof text !== 'string') return names;
+    for (const m of text.matchAll(/getVariable\s*\(\s*(?:\\?['"]|\\u0027)([a-zA-Z0-9_]+)/g)) names.add(m[1]);
+    return names;
+  }
+
+  // Function names CALLED in a handler string, e.g. `handleContinueCTA(globals)` → 'handleContinueCTA'.
+  // Only bare identifier calls are collected (member calls like globals.functions.setProperty(...) are
+  // AF built-ins, not custom functions, and are handled by the inline scanners). Used to bridge a
+  // handler to the custom-function bodies whose reads/writes/dispatches it inherits.
+  static calledFunctionNames(text) {
+    const names = new Set();
+    if (typeof text !== 'string') return names;
+    for (const m of text.matchAll(/(?:^|[^.\w$])([a-zA-Z_$][a-zA-Z0-9_$]*)\s*\(/g)) names.add(m[1]);
+    return names;
+  }
+
+  /**
+   * Parse the custom-functions JS and, for each top-level function declaration, collect the variable
+   * effects it performs anywhere in its body (including nested/inner calls to helpers in the same file):
+   *   reads      — getVariable('V')
+   *   writes     — setVariable('V', …)
+   *   dispatches — dispatchEvent($form, 'custom:E', …)
+   * Returns a Map<functionName, {reads:Set, writes:Set, dispatches:Set}>. Best-effort: a file that
+   * fails to parse is skipped (never throws — resilience in the gate is a hard requirement).
+   * @param {Array<{filename:string, content:string}>} jsFiles
+   * @returns {Map<string, {reads:Set<string>, writes:Set<string>, dispatches:Set<string>}>}
+   */
+  static collectFunctionEffects(jsFiles) {
+    const effects = new Map();
+    for (const jsFile of jsFiles || []) {
+      let ast;
+      try {
+        ast = parseCached(jsFile.content);
+      } catch { continue; } // unparseable file → skip, never throw
+
+      // A function is relevant if it is declared at any level and named; we key by name. Inner helper
+      // calls are followed by scanning the WHOLE body subtree of each named function, so a helper's
+      // effects are attributed to the exported function that (transitively) contains its call site only
+      // when the helper is defined inside it. Cross-function helper calls are resolved in a second pass.
+      const byName = new Map(); // name → function node
+      simple(ast, {
+        FunctionDeclaration: (node) => { if (node.id?.name) byName.set(node.id.name, node); },
+        VariableDeclarator: (node) => {
+          if (node.id?.type === 'Identifier'
+              && (node.init?.type === 'FunctionExpression' || node.init?.type === 'ArrowFunctionExpression')) {
+            byName.set(node.id.name, node.init);
+          }
+        },
+      });
+
+      // Direct (own-body) effects + the set of same-file functions each one calls.
+      const direct = new Map(); // name → {reads,writes,dispatches, calls:Set}
+      for (const [name, fnNode] of byName) {
+        const reads = new Set();
+        const writes = new Set();
+        const dispatches = new Set();
+        const calls = new Set();
+        simple(fnNode, {
+          CallExpression: (call) => {
+            const callee = call.callee;
+            const calleeName = callee.type === 'Identifier' ? callee.name
+              : (callee.type === 'MemberExpression' && callee.property?.type === 'Identifier') ? callee.property.name
+              : null;
+            if (!calleeName) return;
+            const strArg = (i) => (call.arguments?.[i]?.type === 'Literal' && typeof call.arguments[i].value === 'string') ? call.arguments[i].value : null;
+            if (calleeName === 'getVariable') { const v = strArg(0); if (v) reads.add(v); }
+            else if (calleeName === 'setVariable') { const v = strArg(0); if (v) writes.add(v); }
+            else if (calleeName === 'dispatchEvent') {
+              // dispatchEvent(<anyTarget>, 'custom:E', …) — the event name is a string arg starting
+              // 'custom:'. Target-agnostic: scan every string arg (the target isn't constrained).
+              for (let i = 0; i < (call.arguments?.length || 0); i++) {
+                const s = strArg(i);
+                if (s && s.startsWith('custom:')) dispatches.add(s);
+              }
+            } else if (callee.type === 'Identifier') {
+              // a bare call to another same-file function — record for transitive resolution
+              calls.add(calleeName);
+            }
+          },
+        });
+        direct.set(name, { reads, writes, dispatches, calls });
+      }
+
+      // Transitive closure: fold each function's callees' effects into it (bounded — same-file only,
+      // visited-guarded against recursion cycles).
+      const resolve = (name, seen) => {
+        const self = direct.get(name);
+        if (!self || seen.has(name)) return { reads: new Set(), writes: new Set(), dispatches: new Set() };
+        seen.add(name);
+        const reads = new Set(self.reads);
+        const writes = new Set(self.writes);
+        const dispatches = new Set(self.dispatches);
+        for (const callee of self.calls) {
+          if (!direct.has(callee)) continue;
+          const sub = resolve(callee, seen);
+          sub.reads.forEach((v) => reads.add(v));
+          sub.writes.forEach((v) => writes.add(v));
+          sub.dispatches.forEach((v) => dispatches.add(v));
+        }
+        return { reads, writes, dispatches };
+      };
+      for (const name of direct.keys()) {
+        // Last file wins on name collision — mirrors "first-form-wins" pragmatism; custom fns are
+        // globally unique by name in practice.
+        effects.set(name, resolve(name, new Set()));
+      }
+    }
+    return effects;
+  }
+
+  /**
+   * Generate impact analysis: Event → Fields mapping
+   * Shows which fields are affected when an event fires
+   */
+  analyze(formJson, jsFiles = []) {
+    const eventImpactMap = {};
+    const fieldEventMap = {}; // Reverse map: field → events that target it
+
+    // Cross-handler races buried in custom functions: resolve the form's customFunctionsPath JS and
+    // extract each function's variable effects. A handler that calls `fn(globals)` then inherits fn's
+    // reads/writes/dispatches — we splice canonical getVariable/setVariable/dispatchEvent text into the
+    // handler string so every existing scanner (parseHandlerStatements / variablesRead / ordering-race)
+    // sees them with no change to the detection logic. Empty when no jsFiles → inline-JSON behaviour only.
+    const fnFiles = filterJsFilesByCustomFunctionsPath(jsFiles, formJson?.properties?.customFunctionsPath);
+    const fnEffects = fnFiles.length ? EventImpactAnalyzer.collectFunctionEffects(fnFiles) : new Map();
+    // Expand a handler string with the inherited effects of the custom functions it calls. The synthetic
+    // text is APPENDED (so a buried setVar in a later handler keeps a higher statement index than an
+    // inline dispatch in an earlier one — Pattern A ordering is preserved). Returns the input unchanged
+    // when there are no resolved effects, so the no-jsFiles path is a byte-for-byte no-op.
+    const expandHandler = (handler) => {
+      if (typeof handler !== 'string' || fnEffects.size === 0) return handler;
+      let suffix = '';
+      for (const fnName of EventImpactAnalyzer.calledFunctionNames(handler)) {
+        const eff = fnEffects.get(fnName);
+        if (!eff) continue;
+        for (const v of eff.dispatches) suffix += ` dispatchEvent($form,'${v}');`;
+        for (const v of eff.writes) suffix += ` setVariable('${v}',x);`;
+        for (const v of eff.reads) suffix += ` getVariable('${v}');`;
+      }
+      return suffix ? handler + ';' + suffix : handler;
+    };
+
+    // Ordering-race bookkeeping:
+    //  handlerArrays: every event handler array seen, with its ordered dispatch/setVar statements +
+    //    a source label + the raw expressions (for read-detection of the dispatched handler).
+    //  varReadsByEvent: custom:event → Set(vars it reads).  varWritesByEvent: custom:event → Set(vars).
+    //  eventExprs: custom:event → concatenated handler text (to check reads).
+    const handlerArrays = [];
+    const eventExprs = {}; // 'custom:E' → joined handler text (last writer wins; concatenated)
+    const varWriteEvents = {}; // varName → Set('custom:E' that writes it)
+    const sourceByEvent = {}; // 'custom:E' → sourceField (for EVERY custom handler, incl. pure readers)
+    // Pattern B readers can be ANY handler, not only custom:* events — e.g. a button's `click` that
+    // reads a var written asynchronously by a custom event. Each entry is one handler's read context.
+    const readerHandlers = []; // {handlerKey, sourceField, reads:Set<var>, writeEventsHere:Set<'custom:E'>}
+
+    // Traverse form and extract all events
+    const traverse = (node, path = []) => {
+      if (!node) return;
+      
+      const fieldName = node.name || node.id;
+      // Use "$form" for root-level form node instead of UUID/form name
+      const pathSegment = (path.length === 0 && fieldName) ? '$form' : fieldName;
+      const currentPath = pathSegment ? [...path, pathSegment] : path;
+      const fieldPath = currentPath.join('.');
+      
+      // Process events on this field
+      if (node.events && typeof node.events === 'object') {
+        Object.entries(node.events).forEach(([eventType, handlers]) => {
+          // Skip if no valid field path
+          const sourceField = fieldPath || '(root)';
+          const eventKey = `${sourceField} → ${eventType}`;
+          
+          if (!eventImpactMap[eventKey]) {
+            eventImpactMap[eventKey] = {
+              sourceField,
+              eventType,
+              
+              handlers: [],
+              impactedFields: new Set(),
+              customFunctions: new Set(),
+              hasHTTPCalls: false,
+              hasDOMAccess: false,
+              hasWindowAccess: false,
+            };
+          }
+          
+          const handlerArray = Array.isArray(handlers) ? handlers : [handlers];
+          // For RACE DETECTION ONLY, expand each handler with the effects of the custom functions it
+          // calls (getVariable/setVariable/dispatchEvent buried in the JS body). Display outputs below
+          // (handlers list, impactedFields, customFunctions) still use the ORIGINAL strings, so only
+          // race detection is affected. When no jsFiles resolved, expandHandler returns the input as-is.
+          const raceHandlerArray = handlerArray.map(expandHandler);
+
+          // Ordering-race collection: record this array's ordered statements + index it by the
+          // custom:* event name it defines (eventType is the map key, e.g. 'custom:validatePinCode').
+          const stmts = EventImpactAnalyzer.parseHandlerStatements(raceHandlerArray);
+          if (stmts.length) {
+            handlerArrays.push({ sourceField, eventType, stmts });
+          }
+          const joinedAll = raceHandlerArray.filter((h) => typeof h === 'string').join('\n');
+          if (typeof eventType === 'string' && eventType.startsWith('custom:')) {
+            eventExprs[eventType] = (eventExprs[eventType] || '') + '\n' + joinedAll;
+            // Record the source field for EVERY custom handler — including pure readers with no
+            // dispatch/setVar (e.g. custom:getRedirectionUrl) that never reach handlerArrays.
+            if (!(eventType in sourceByEvent)) sourceByEvent[eventType] = sourceField;
+            for (const s of stmts) {
+              if (s.kind === 'setVar') {
+                (varWriteEvents[s.name] = varWriteEvents[s.name] || new Set()).add(eventType);
+              }
+            }
+          }
+          // Pattern B reader context — for ANY handler (custom or OOTB like `click`). Its reads are the
+          // getVariable's it performs (inline OR inherited from called custom fns via expandHandler); the
+          // write-events it itself contains are excluded later so a self-write→read is not a race.
+          const reads = EventImpactAnalyzer.variablesRead(joinedAll);
+          if (reads.size) {
+            const isCustom = typeof eventType === 'string' && eventType.startsWith('custom:');
+            // A same-handler write→read is not a cross-event race — exclude vars this handler writes
+            // itself. For a custom handler that's its own event; either way we take the setVars here.
+            const writesHere = new Set(stmts.filter((s) => s.kind === 'setVar').map((s) => s.name));
+            readerHandlers.push({ eventType, sourceField, reads, writesHere, isCustom });
+          }
+
+          handlerArray.forEach(handler => {
+            if (typeof handler !== 'string') return;
+
+            eventImpactMap[eventKey].handlers.push(handler);
+            
+            // Extract impacted fields from handler
+            this.extractImpactedFields(handler, eventImpactMap[eventKey], fieldEventMap);
+            
+            // Extract custom functions used
+            this.extractCustomFunctions(handler, eventImpactMap[eventKey]);
+            
+            // Detect performance issues
+            if (handler.includes('fetch(') || handler.includes('axios.')) {
+              eventImpactMap[eventKey].hasHTTPCalls = true;
+            }
+            if (handler.includes('document.') || handler.includes('querySelector')) {
+              eventImpactMap[eventKey].hasDOMAccess = true;
+            }
+            if (handler.includes('window.')) {
+              eventImpactMap[eventKey].hasWindowAccess = true;
+            }
+          });
+        });
+      }
+      
+      // Traverse children
+      if (node[':items']) {
+        Object.values(node[':items']).forEach(child => traverse(child, currentPath));
+      }
+      if (node.items && Array.isArray(node.items)) {
+        node.items.forEach(child => traverse(child, currentPath));
+      }
+    };
+    
+    traverse(formJson);
+    
+    // Convert Sets to Arrays for JSON serialization
+    Object.values(eventImpactMap).forEach(event => {
+      event.impactedFields = Array.from(event.impactedFields).sort();
+      event.customFunctions = Array.from(event.customFunctions).sort();
+    });
+    
+    // Create simple JSON mapping: event/rule → impacted fields
+    // This extracts the key data from eventImpactMap for easier consumption
+    const eventOrRuleToImpactedNodes = {};
+    Object.entries(eventImpactMap).forEach(([eventKey, eventData]) => {
+      eventOrRuleToImpactedNodes[eventKey] = eventData.impactedFields;
+    });
+    
+    // Detect duplicates and similar events (PRIMARY USE CASE)
+    const duplicateAnalysis = this.detectDuplicateEvents(eventImpactMap);
+
+    // ── Ordering-race detection (issues stream — surfaced by lint/analyze/Action) ──────────────
+    const issues = this.detectOrderingRaces(handlerArrays, eventExprs, varWriteEvents, sourceByEvent, readerHandlers);
+
+    return {
+      totalEvents: Object.keys(eventImpactMap).length,
+      events: eventImpactMap,
+      fieldEventMap, // field → list of events targeting it
+      eventOrRuleToImpactedNodes, // event/rule → fields impacted by that event/rule
+      summary: this.generateSummary(eventImpactMap, fieldEventMap),
+      duplicates: duplicateAnalysis.duplicates,
+      similarEvents: duplicateAnalysis.similar,
+      performanceIssues: this.identifyPerformanceIssues(eventImpactMap),
+      issues, // rule-ordering-race findings (error + warning)
+      violations: issues.length,
+    };
+  }
+
+  /**
+   * Detects the two ordering-race shapes documented in docs/test-only-patches-backend-rewrite.md.
+   * @param {Array<{sourceField,eventType,stmts}>} handlerArrays - ordered dispatch/setVar per handler
+   * @param {Object} eventExprs - custom:event → concatenated handler text
+   * @param {Object} varWriteEvents - varName → Set(custom:event that writes it)
+   * @param {Object} sourceByEvent - custom:event → sourceField (for every custom handler)
+   * @param {Array<{eventType,sourceField,reads:Set,writesHere:Set,isCustom}>} readerHandlers - every
+   *        handler (custom OR OOTB like click/change) that performs a getVariable read
+   * @returns {Array<{severity,type,message,file,functionName}>}
+   */
+  detectOrderingRaces(handlerArrays, eventExprs, varWriteEvents, sourceByEvent = {}, readerHandlers = []) {
+    const issues = [];
+    const seen = new Set();
+    const DOC = 'See docs/test-only-patches-backend-rewrite.md.';
+
+    // Pattern A — dispatch('custom:E') at i, setVariable('V') at j>i in the SAME array, and the
+    // custom:E handler reads V → the dispatched handler sees a stale/unset V. Error.
+    for (const { sourceField, eventType, stmts } of handlerArrays) {
+      const dispatches = stmts.filter((s) => s.kind === 'dispatch');
+      const setVars = stmts.filter((s) => s.kind === 'setVar');
+      for (const d of dispatches) {
+        const targetExpr = eventExprs[d.name];
+        if (!targetExpr) continue; // dispatched handler not defined in this form → can't verify
+        const readByTarget = EventImpactAnalyzer.variablesRead(targetExpr);
+        for (const sv of setVars) {
+          if (sv.index <= d.index) continue; // write already ordered before the dispatch → fine
+          if (!readByTarget.has(sv.name)) continue; // target doesn't read this var → not a race
+          const key = `A|${sourceField}|${eventType}|${d.name}|${sv.name}`;
+          if (seen.has(key)) continue; seen.add(key);
+          issues.push({
+            severity: 'error',
+            type: 'rule-ordering-race',
+            message: `Handler '${eventType}' on '${sourceField}' dispatches '${d.name}' BEFORE `
+              + `setVariable('${sv.name}', …), but the '${d.name}' handler reads '${sv.name}' — it runs `
+              + `with a stale/unset '${sv.name}' and takes the wrong branch. Move `
+              + `setVariable('${sv.name}', …) before the dispatchEvent('${d.name}'). ${DOC}`,
+            file: `formJson:${sourceField}`,
+            functionName: eventType,
+          });
+        }
+      }
+    }
+
+    // Pattern B — a handler reads getVariable('V') where V is written ONLY inside a DIFFERENT custom:*
+    // event handler (async, no ordering guarantee) → the read can race the write. Warning (timing
+    // unprovable). The READER can be ANY handler — a custom event (e.g. custom:getRedirectionUrl) OR an
+    // OOTB event like a button's `click` (the fire-and-forget CTA case). The WRITER must be a custom
+    // event: that's the async dispatch that has no ordering guarantee vs. the reader. Reads/writes
+    // include those inherited from called custom functions (expandHandler spliced them into the text).
+    for (const { eventType, sourceField, reads, writesHere } of readerHandlers) {
+      for (const v of reads) {
+        const writers = varWriteEvents[v];
+        if (!writers || writers.size === 0) continue; // not written by any custom event → out of scope
+        if (writers.has(eventType)) continue; // reader is itself the writing custom event → same-tick
+        if (writesHere && writesHere.has(v)) continue; // this handler writes it too → same-tick, fine
+        const key = `B|${eventType}|${sourceField}|${v}`;
+        if (seen.has(key)) continue; seen.add(key);
+        issues.push({
+          severity: 'warning',
+          type: 'rule-ordering-race',
+          message: `Handler '${eventType}' on '${sourceField}' reads getVariable('${v}'), but '${v}' is `
+            + `written only by [${[...writers].join(', ')}] — a different event with no guaranteed order. `
+            + `The read can run before the write and see an empty/stale value (e.g. prefill restores this `
+            + `field before the other event resolves). Don't pass an async result between events through a `
+            + `shared variable. Instead, derive '${v}' reactively: express it as a rule that reads its `
+            + `dependencies directly, so the runtime re-runs it whenever a dependency changes — no manual `
+            + `ordering. For fetched options, author an async enum rule that returns the list once its `
+            + `inputs are ready; for validity, use an async validation expression and let the action await `
+            + `it. Either way the value is resolved where it's used, not carried across events.`,
+          file: `formJson:${sourceField}`,
+          functionName: eventType,
+        });
+      }
+    }
+
+    return issues;
+  }
+  
+  extractImpactedFields(handler, event, fieldEventMap) {
+    // Match patterns like:
+    // - setProperty($form.field, ...)
+    // - dispatchEvent($form.field, ...)
+    // - field.$value = ...
+    // - globals.functions.setProperty(field, ...)
+    
+    // Safety check
+    if (!event || !event.sourceField || !event.eventType) {
+      return;
+    }
+    
+    const patterns = [
+      /\$form\.([a-zA-Z0-9_.]+)/g,
+      /setProperty\s*\(\s*\$?form\.([a-zA-Z0-9_.]+)/g,
+      /dispatchEvent\s*\(\s*\$?form\.([a-zA-Z0-9_.]+)/g,
+      /([a-zA-Z0-9_.]+)\.\$value/g,
+      /globals\.functions\.setProperty\s*\(\s*([a-zA-Z0-9_.]+)/g,
+    ];
+    
+    patterns.forEach(pattern => {
+      let match;
+      const handlerCopy = handler; // Reset regex state
+      while ((match = pattern.exec(handlerCopy)) !== null) {
+        let fieldPath = match[1].replace(/^\$form\./, '');
+        
+        // Filter out common false positives
+        if (fieldPath && 
+            fieldPath !== 'undefined' && 
+            fieldPath !== 'form' &&
+            fieldPath !== '$form' &&
+            !fieldPath.startsWith('functions.')) {
+          event.impactedFields.add(fieldPath);
+          
+          // Add to reverse map (with safety check)
+          if (fieldEventMap) {
+            if (!fieldEventMap[fieldPath]) {
+              fieldEventMap[fieldPath] = [];
+            }
+            fieldEventMap[fieldPath].push(`${event.sourceField} → ${event.eventType}`);
+          }
+        }
+      }
+    });
+  }
+  
+  extractCustomFunctions(handler, event) {
+    // Match function calls: functionName(...)
+    const functionPattern = /(\w+)\s*\(/g;
+    const jsKeywords = new Set([
+      'if', 'for', 'while', 'setProperty', 'dispatchEvent', 'getVariable',
+      'setVariable', 'length', 'split', 'join', 'map', 'filter', 'includes',
+      'parseInt', 'parseFloat', 'Date', 'Math', 'Array', 'Object', 'String'
+    ]);
+    
+    let match;
+    while ((match = functionPattern.exec(handler)) !== null) {
+      const fnName = match[1];
+      if (!jsKeywords.has(fnName)) {
+        event.customFunctions.add(fnName);
+      }
+    }
+  }
+  
+  generateSummary(eventImpactMap, fieldEventMap) {
+    const fieldImpactCount = {};
+    const eventTypeCount = {};
+    const customFunctionUsage = {};
+    
+    Object.values(eventImpactMap).forEach(event => {
+      // Safety checks
+      if (!event || !event.sourceField || !event.eventType) {
+        return;
+      }
+      
+      // Count by event type
+      eventTypeCount[event.eventType] = (eventTypeCount[event.eventType] || 0) + 1;
+      
+      // Count fields impacted
+      if (event.impactedFields && typeof event.impactedFields.forEach === 'function') {
+        event.impactedFields.forEach(field => {
+          fieldImpactCount[field] = (fieldImpactCount[field] || 0) + 1;
+        });
+      }
+      
+      // Count custom function usage
+      if (event.customFunctions && typeof event.customFunctions.forEach === 'function') {
+        event.customFunctions.forEach(fn => {
+          if (fn && typeof fn === 'string' && fn.length > 0) {
+            // Get or create the usage object
+            let usage = customFunctionUsage[fn];
+            if (!usage) {
+              usage = { count: 0, events: [] };
+              customFunctionUsage[fn] = usage;
+            }
+            // Update the usage
+            usage.count++;
+            if (usage.events && Array.isArray(usage.events)) {
+              usage.events.push(`${event.sourceField} → ${event.eventType}`);
+            }
+          }
+        });
+      }
+    });
+    
+    // Find top impacted fields
+    const topImpactedFields = Object.entries(fieldImpactCount)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 20)
+      .map(([field, count]) => ({ field, impactCount: count }));
+    
+    // Find fields with most incoming events
+    const mostTargetedFields = Object.entries(fieldEventMap)
+      .map(([field, events]) => ({ field, eventCount: events.length }))
+      .sort((a, b) => b.eventCount - a.eventCount)
+      .slice(0, 20);
+    
+    return {
+      totalEventTypes: Object.keys(eventTypeCount).length,
+      eventsByType: eventTypeCount,
+      topImpactedFields, // Fields modified by the most events
+      mostTargetedFields, // Fields that are targets of the most events
+      customFunctionUsage,
+      totalUniqueFieldsImpacted: Object.keys(fieldImpactCount).length,
+    };
+  }
+  
+  /**
+   * Detect duplicate and similar events
+   * PRIMARY USE CASE: Prevent new developers from creating duplicate logic
+   */
+  detectDuplicateEvents(eventImpactMap) {
+    const duplicates = [];
+    const similar = [];
+    const eventsByField = {};
+    
+    // Group events by source field and event type
+    Object.entries(eventImpactMap).forEach(([eventKey, event]) => {
+      const key = `${event.sourceField}::${event.eventType}`;
+      if (!eventsByField[key]) {
+        eventsByField[key] = [];
+      }
+      eventsByField[key].push({ eventKey, event });
+    });
+    
+    // Check for exact duplicates (same field, same event type, multiple handlers)
+    Object.entries(eventsByField).forEach(([key, events]) => {
+      if (events.length > 1) {
+        duplicates.push({
+          field: events[0].event.sourceField,
+          eventType: events[0].event.eventType,
+          count: events.length,
+          handlers: events.map(e => e.event.handlers).flat(),
+          message: `${events.length} handlers defined for same event - may cause unexpected behavior`,
+        });
+      }
+    });
+    
+    // Check for similar events (different events doing similar things)
+    const allEvents = Object.entries(eventImpactMap);
+    for (let i = 0; i < allEvents.length; i++) {
+      for (let j = i + 1; j < allEvents.length; j++) {
+        const [key1, event1] = allEvents[i];
+        const [key2, event2] = allEvents[j];
+        
+        // Skip if same source field (handled by duplicates)
+        if (event1.sourceField === event2.sourceField) continue;
+        
+        // Check if they impact the same fields
+        const commonImpacts = event1.impactedFields.filter(f => 
+          event2.impactedFields.includes(f)
+        );
+        
+        // Check if they use same custom functions
+        const commonFunctions = event1.customFunctions.filter(f =>
+          event2.customFunctions.includes(f)
+        );
+        
+        // If they have significant overlap, they might be doing similar things
+        if (commonImpacts.length >= 3 || commonFunctions.length >= 2) {
+          similar.push({
+            event1: key1,
+            event2: key2,
+            commonImpacts,
+            commonFunctions,
+            message: `These events may have overlapping logic`,
+          });
+        }
+      }
+    }
+    
+    return { duplicates, similar };
+  }
+  
+  /**
+   * Detect performance issues (SECONDARY - not the main goal)
+   */
+  identifyPerformanceIssues(eventImpactMap) {
+    const issues = [];
+    
+    Object.entries(eventImpactMap).forEach(([eventKey, event]) => {
+      if (event.hasHTTPCalls) {
+        issues.push({
+          severity: 'critical',
+          type: 'http-in-event',
+          event: eventKey,
+          message: `Event contains HTTP calls - will block user interaction`,
+        });
+      }
+      
+      if (event.hasDOMAccess) {
+        issues.push({
+          severity: 'warning',
+          type: 'dom-in-event',
+          event: eventKey,
+          message: `Event accesses DOM directly - may cause layout thrashing`,
+        });
+      }
+      
+      if (event.hasWindowAccess) {
+        issues.push({
+          severity: 'warning',
+          type: 'window-in-event',
+          event: eventKey,
+          message: `Event accesses window object directly - may cause unpredictable behavior`,
+        });
+      }
+      
+      if (event.impactedFields.length > 10) {
+        issues.push({
+          severity: 'warning',
+          type: 'high-impact',
+          event: eventKey,
+          message: `Event impacts ${event.impactedFields.length} fields - may cause cascading updates`,
+        });
+      }
+    });
+    
+    return issues;
+  }
+  
+  /**
+   * Generate markdown report for GitHub PR comment or Gist
+   */
+  generateMarkdownReport(analysis) {
+    let markdown = `# 📊 Event Impact Analysis Report\n\n`;
+    markdown += `**Generated:** ${new Date().toISOString()}\n\n`;
+    markdown += `> **Purpose:** Prevent duplicate events, track impact of changes, document current setup\n\n`;
+    
+    markdown += `## 📈 Summary\n\n`;
+    markdown += `| Metric | Value |\n`;
+    markdown += `|--------|-------|\n`;
+    markdown += `| Total Events | ${analysis.totalEvents} |\n`;
+    markdown += `| Event Types | ${analysis.summary.totalEventTypes} |\n`;
+    markdown += `| Unique Fields Impacted | ${analysis.summary.totalUniqueFieldsImpacted} |\n`;
+    markdown += `| **Duplicate Events** | **${analysis.duplicates?.length || 0}** |\n`;
+    markdown += `| **Similar Events** | **${analysis.similarEvents?.length || 0}** |\n`;
+    markdown += `| Performance Issues | ${analysis.performanceIssues.length} |\n\n`;
+    
+    // PRIORITY 1: Duplicate Events (Main use case!)
+    if (analysis.duplicates && analysis.duplicates.length > 0) {
+      markdown += `## 🚨 Duplicate Events Found\n\n`;
+      markdown += `**⚠️ IMPORTANT:** Multiple handlers defined for the same event. This may cause:\n`;
+      markdown += `- Unexpected behavior (which handler runs first?)\n`;
+      markdown += `- Maintenance nightmares (developers don't know about duplicate logic)\n`;
+      markdown += `- Regression bugs (modifying one handler, forgetting the other)\n\n`;
+      
+      analysis.duplicates.forEach((dup, idx) => {
+        markdown += `### ${idx + 1}. \`${dup.field}\` → **${dup.eventType}**\n\n`;
+        markdown += `- **${dup.count} handlers** defined for this event\n`;
+        markdown += `- **Action Required:** Consolidate into single handler or verify this is intentional\n\n`;
+        markdown += `<details>\n<summary>Show All ${dup.count} Handlers</summary>\n\n`;
+        dup.handlers.forEach((handler, i) => {
+          markdown += `**Handler ${i + 1}:**\n\`\`\`javascript\n${handler}\n\`\`\`\n\n`;
+        });
+        markdown += `</details>\n\n`;
+      });
+    }
+    
+    // PRIORITY 2: Similar Events (Potential duplicates)
+    if (analysis.similarEvents && analysis.similarEvents.length > 0) {
+      markdown += `## 🔍 Similar Events Detected\n\n`;
+      markdown += `**Note:** These events are on different fields but do similar things. Consider:\n`;
+      markdown += `- Are they intentionally similar?\n`;
+      markdown += `- Could they share common logic via a custom function?\n`;
+      markdown += `- Is one a copy-paste of the other?\n\n`;
+      
+      analysis.similarEvents.slice(0, 10).forEach((sim, idx) => {
+        markdown += `### ${idx + 1}. Similarity Between:\n`;
+        markdown += `- **Event 1:** \`${sim.event1}\`\n`;
+        markdown += `- **Event 2:** \`${sim.event2}\`\n\n`;
+        
+        if (sim.commonImpacts.length > 0) {
+          markdown += `**Common Fields Modified:** ${sim.commonImpacts.map(f => `\`${f}\``).join(', ')}\n\n`;
+        }
+        if (sim.commonFunctions.length > 0) {
+          markdown += `**Common Functions Used:** ${sim.commonFunctions.map(f => `\`${f}()\``).join(', ')}\n\n`;
+        }
+        markdown += `---\n\n`;
+      });
+      
+      if (analysis.similarEvents.length > 10) {
+        markdown += `*... and ${analysis.similarEvents.length - 10} more similar event pairs*\n\n`;
+      }
+    }
+    
+    // Performance Issues (Secondary - still useful but not main goal)
+    if (analysis.performanceIssues.length > 0) {
+      markdown += `## ⚠️ Performance Issues\n\n`;
+      const critical = analysis.performanceIssues.filter(i => i.severity === 'critical');
+      const warnings = analysis.performanceIssues.filter(i => i.severity === 'warning');
+      
+      if (critical.length > 0) {
+        markdown += `### 🔴 Critical (${critical.length})\n\n`;
+        critical.forEach(issue => {
+          markdown += `- **${issue.event}**\n`;
+          markdown += `  - ${issue.message}\n`;
+        });
+        markdown += `\n`;
+      }
+      
+      if (warnings.length > 0) {
+        markdown += `### 🟡 Warnings (${warnings.length})\n\n`;
+        warnings.forEach(issue => {
+          markdown += `- **${issue.event}**\n`;
+          markdown += `  - ${issue.message}\n`;
+        });
+        markdown += `\n`;
+      }
+    }
+    
+    // Events by Type
+    markdown += `## 📋 Events by Type\n\n`;
+    Object.entries(analysis.summary.eventsByType)
+      .sort((a, b) => b[1] - a[1])
+      .forEach(([type, count]) => {
+        markdown += `- **${type}:** ${count} event(s)\n`;
+      });
+    
+    // Top Impacted Fields
+    markdown += `\n## 🎯 Top Impacted Fields\n\n`;
+    markdown += `These fields are **modified** by the most events:\n\n`;
+    markdown += `| Rank | Field | Times Modified |\n`;
+    markdown += `|------|-------|----------------|\n`;
+    analysis.summary.topImpactedFields.forEach(({ field, impactCount }, idx) => {
+      markdown += `| ${idx + 1} | \`${field}\` | ${impactCount} |\n`;
+    });
+    
+    // Most Targeted Fields
+    markdown += `\n## 🎯 Most Targeted Fields\n\n`;
+    markdown += `These fields are **targets** of the most events:\n\n`;
+    markdown += `| Rank | Field | Incoming Events |\n`;
+    markdown += `|------|-------|----------------|\n`;
+    analysis.summary.mostTargetedFields.forEach(({ field, eventCount }, idx) => {
+      markdown += `| ${idx + 1} | \`${field}\` | ${eventCount} |\n`;
+    });
+    
+    // Custom Function Usage
+    markdown += `\n## 🔧 Custom Function Usage\n\n`;
+    const sortedFunctions = Object.entries(analysis.summary.customFunctionUsage)
+      .sort((a, b) => b[1].count - a[1].count)
+      .slice(0, 15);
+    
+    if (sortedFunctions.length > 0) {
+      markdown += `| Function | Usage Count | Sample Events |\n`;
+      markdown += `|----------|-------------|---------------|\n`;
+      sortedFunctions.forEach(([fn, data]) => {
+        const samples = data.events.slice(0, 2).join('<br>');
+        const more = data.events.length > 2 ? `<br>...+${data.events.length - 2} more` : '';
+        markdown += `| \`${fn}()\` | ${data.count} | ${samples}${more} |\n`;
+      });
+    } else {
+      markdown += `*No custom functions detected in events*\n`;
+    }
+    
+    // Detailed Event Breakdown
+    markdown += `\n## 📖 Detailed Event → Field Mapping\n\n`;
+    markdown += `<details>\n<summary>Click to expand full event details (${analysis.totalEvents} events)</summary>\n\n`;
+    
+    Object.entries(analysis.events)
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .forEach(([eventKey, event]) => {
+        markdown += `### ${eventKey}\n\n`;
+        
+        if (event.impactedFields.length > 0) {
+          markdown += `**🎯 Impacts (${event.impactedFields.length}):** `;
+          markdown += event.impactedFields.map(f => `\`${f}\``).join(', ');
+          markdown += `\n\n`;
+        }
+        
+        if (event.customFunctions.length > 0) {
+          markdown += `**🔧 Uses Functions:** `;
+          markdown += Array.from(event.customFunctions).map(f => `\`${f}()\``).join(', ');
+          markdown += `\n\n`;
+        }
+        
+        if (event.hasHTTPCalls) {
+          markdown += `⚠️ **Contains HTTP calls**\n\n`;
+        }
+        if (event.hasDOMAccess) {
+          markdown += `⚠️ **Accesses DOM**\n\n`;
+        }
+        if (event.hasWindowAccess) {
+          markdown += `⚠️ **Accesses window object**\n\n`;
+        }
+        
+        markdown += `<details>\n<summary>Event Handlers (${event.handlers.length})</summary>\n\n`;
+        event.handlers.forEach((handler, i) => {
+          markdown += `**Handler ${i + 1}:**\n\`\`\`javascript\n${handler}\n\`\`\`\n\n`;
+        });
+        markdown += `</details>\n\n`;
+        markdown += `---\n\n`;
+      });
+    
+    markdown += `</details>\n\n`;
+    
+    // Impact Analysis Tips
+    markdown += `## 💡 How to Use This Report\n\n`;
+    markdown += `### Before Making Changes:\n`;
+    markdown += `1. **Find your target field** in "Most Targeted Fields" to see what events affect it\n`;
+    markdown += `2. **Check dependencies** - modifying an event may have ripple effects\n`;
+    markdown += `3. **Review custom functions** to understand what code will execute\n\n`;
+    
+    markdown += `### Pre-Deployment Validation:\n`;
+    markdown += `1. **Check for performance issues** (HTTP calls, DOM access, window access)\n`;
+    markdown += `2. **Review high-impact events** (>10 fields)\n`;
+    markdown += `3. **Verify custom functions** are still used correctly\n\n`;
+    
+    markdown += `---\n`;
+    markdown += `*Generated by AEM Forms Performance Bot - Event Impact Analyzer*\n`;
+    
+    return markdown;
+  }
+  
+  /**
+   * Generate JSON report for programmatic consumption
+   */
+  generateJSONReport(analysis) {
+    return JSON.stringify(analysis, null, 2);
+  }
+}
+
+
 ;// CONCATENATED MODULE: ./src/analyzers/hidden-fields-analyzer.js
 /**
  * Analyzes hidden fields to detect unnecessary DOM bloat
@@ -195249,9 +196124,52 @@ function scanSetPropertyChanges(jsFiles, opts) {
 
 
 
+
+// AF rule/expression built-ins that can appear as a bare-identifier call in an event handler string but
+// NEVER reveal a field via an opaque body. Two groups: json-formula control/logic operators (`if`,
+// `contains`, …) and the rule-API functions that already have their OWN visibility-detection paths
+// (`dispatchEvent`, `setProperty`, …). A bare call to anything ELSE is a CUSTOM function whose body/
+// return is opaque — and per af2-web-runtime #765 async-apply it can return `{ visible: true }` applied
+// to the handler's own field — so it counts as a possible reveal (below).
+const AF_EXPRESSION_BUILTINS = new Set([
+  // json-formula literal call-forms — `visible: true()` / `false()` parse as a bare call to `true`/
+  // `false`; they are literals, never a reveal via an opaque body.
+  'true', 'false', 'null',
+  // control / logic operators
+  'if', 'contains', 'and', 'or', 'not', 'empty', 'equal', 'coalesce',
+  // rule-API functions with their own detection (or that never reveal)
+  'dispatchEvent', 'setProperty', 'getVariable', 'setVariable', 'setFocus', 'validate',
+  'importData', 'exportData', 'getData', 'submitForm', 'reset', 'request',
+]);
+
 class HiddenFieldsAnalyzer {
   constructor(config = null) {
     this.config = config;
+  }
+
+  /**
+   * Does any handler in this node's `events` invoke a CUSTOM function (a bare-identifier call that is
+   * not an AF expression/rule built-in)? A custom fn's body is opaque to static analysis and, per
+   * af2-web-runtime #765, its returned `{ visible: true }` is applied to this field by the runtime — so
+   * the analyzer cannot assert the field is "always hidden". Real case: `emailDomainField` with
+   * `custom:emailVerifyInit: ["fetchEmailDomains()"]` (returns `{ enum, enumNames, visible: true }`).
+   * Reuses EventImpactAnalyzer.calledFunctionNames (bare-identifier calls only — member calls like
+   * globals.functions.setProperty are AF built-ins handled by the setProperty scanner).
+   * @param {object} events - a node's `events` object (eventType → handler array)
+   * @returns {boolean}
+   */
+  static hasCustomFnEventHandler(events) {
+    if (!events || typeof events !== 'object') return false;
+    for (const handlers of Object.values(events)) {
+      const list = Array.isArray(handlers) ? handlers : [handlers];
+      for (const handler of list) {
+        if (typeof handler !== 'string') continue;
+        for (const name of EventImpactAnalyzer.calledFunctionNames(handler)) {
+          if (!AF_EXPRESSION_BUILTINS.has(name)) return true;
+        }
+      }
+    }
+    return false;
   }
 
   /**
@@ -195310,9 +196228,16 @@ class HiddenFieldsAnalyzer {
     // Check if this field is hidden
     const isHidden = node.visible === false;
     const hasVisibleRule = node.rules?.visible !== undefined;
-    const hasVisibleEvent = node.events && Object.keys(node.events).some(event =>
-      typeof node.events[event] === 'string' && node.events[event].includes('visible')
-    );
+    // A field revealed by an event handler that calls a bare-identifier CUSTOM function — its body/
+    // return is opaque to static analysis, and per af2-web-runtime #765 a returned `{ visible: true }`
+    // is applied to this field by the runtime, so "always hidden" can't be asserted. (Handlers are
+    // ARRAYS of expression strings; the old `typeof events[event] === 'string'` check was dead code that
+    // never matched the array form.) An INLINE visibility write in a handler expression — e.g.
+    // `dispatchEvent($form.x, 'custom:setProperty', {visible: true()})` — is handled separately and with
+    // correct target attribution by analyzeEventsForVisibilityChanges (feeds madeVisibleInJSOrEvents), so
+    // it is deliberately NOT re-detected here: a substring match on `'visible'` isn't target-attributed
+    // and would suppress THIS field for a write aimed at another.
+    const hasVisibleEvent = HiddenFieldsAnalyzer.hasCustomFnEventHandler(node.events);
 
     if (isHidden && node.name) {
       const fieldName = node.name;
@@ -203385,881 +204310,6 @@ class DisplayFormatInCodeAnalyzer {
     return { before: b, after: a, delta: a - b, regressed: a > b };
   }
 }
-
-;// CONCATENATED MODULE: ./src/analyzers/event-impact-analyzer.js
-/**
- * Event Impact Analyzer
- * Generates impact analysis showing which events affect which fields
- * Useful for understanding ripple effects when modifying events.
- *
- * Also detects RULE-ORDERING RACES in the form's event/rule expressions — the class of bug that
- * `test/integration/helpers/backend-rewrite.js` patches on the wire (see
- * docs/test-only-patches-backend-rewrite.md). Two shapes:
- *
- *   A. dispatch-before-write (error): a handler array runs `dispatchEvent($form,'custom:E',…)` at
- *      index i and `setVariable('V',…)` at index j > i in the SAME array, and the `custom:E` handler
- *      READS `V` (via `getVariable('V')`). The dispatched handler sees the stale/unset `V` → wrong
- *      branch. This is the `fixDecryptSuccessOrdering` bug. Fix: move the setVariable before the
- *      dispatch. Confident + local → error.
- *
- *   B. async cross-event read-before-write (warning): a handler reads `getVariable('V')` where `V` is
- *      written ONLY inside a DIFFERENT `custom:*` handler (no synchronous ordering guarantee), so the
- *      read can race ahead of the async write. This is the `fixRedirectFullName` bug. Static timing
- *      can't be proven → warning (prefer an atomically-set source, e.g. an OTP-VAL payload field).
- *
- * Both shapes ALSO fire when the dispatchEvent / setVariable / getVariable calls are not inline in the
- * JSON handler string but buried in a CUSTOM FUNCTION the handler invokes (e.g. a handler runs
- * `handleContinueCTA(globals)` where handleContinueCTA() reads getVariable('isNewFieldValid'), and a
- * different handler runs `validateNewField(globals)` which setVariable's it). We resolve the form's
- * `customFunctionsPath` JS, extract each exported function's reads/writes/dispatches, and treat a
- * handler that calls `fn(globals)` AS IF the handler contained fn's calls. This requires `jsFiles`; when
- * none are supplied (the default) the analyzer degrades to the inline-JSON behaviour only — no change.
- */
-
-
-
-
-class EventImpactAnalyzer {
-  constructor(config = null) {
-    this.config = config;
-  }
-
-  // Ordered statements of interest in a single handler array. Each entry: {kind, name, index}.
-  // kind: 'dispatch' (custom event name), 'setVar' (variable written), plus we scan reads separately.
-  static parseHandlerStatements(handlerArray) {
-    const stmts = [];
-    handlerArray.forEach((handler, index) => {
-      if (typeof handler !== 'string') return;
-      // Target-agnostic: the dispatch target (first arg) can be $form / globals.form / globals.field /
-      // a field var / globals.fragment.root.x / a minified identifier — we don't constrain it. The
-      // `custom:` prefix on the captured event NAME (2nd string arg) is what distinguishes a form
-      // custom-event dispatch from a DOM dispatch like dispatchEvent(new Event('change')).
-      for (const m of handler.matchAll(/dispatchEvent\s*\(\s*[^,]+,\s*(?:\\?['"]|\\u0027)(custom:[a-zA-Z0-9_]+)/g)) {
-        stmts.push({ kind: 'dispatch', name: m[1], index });
-      }
-      for (const m of handler.matchAll(/setVariable\s*\(\s*(?:\\?['"]|\\u0027)([a-zA-Z0-9_]+)/g)) {
-        stmts.push({ kind: 'setVar', name: m[1], index });
-      }
-    });
-    return stmts;
-  }
-
-  // Variable names READ in an expression string via getVariable('V'). (Only the getVariable form is
-  // detected — bare $V / .V property accesses are ambiguous in AF expressions and would false-positive.)
-  static variablesRead(text) {
-    const names = new Set();
-    if (typeof text !== 'string') return names;
-    for (const m of text.matchAll(/getVariable\s*\(\s*(?:\\?['"]|\\u0027)([a-zA-Z0-9_]+)/g)) names.add(m[1]);
-    return names;
-  }
-
-  // Function names CALLED in a handler string, e.g. `handleContinueCTA(globals)` → 'handleContinueCTA'.
-  // Only bare identifier calls are collected (member calls like globals.functions.setProperty(...) are
-  // AF built-ins, not custom functions, and are handled by the inline scanners). Used to bridge a
-  // handler to the custom-function bodies whose reads/writes/dispatches it inherits.
-  static calledFunctionNames(text) {
-    const names = new Set();
-    if (typeof text !== 'string') return names;
-    for (const m of text.matchAll(/(?:^|[^.\w$])([a-zA-Z_$][a-zA-Z0-9_$]*)\s*\(/g)) names.add(m[1]);
-    return names;
-  }
-
-  /**
-   * Parse the custom-functions JS and, for each top-level function declaration, collect the variable
-   * effects it performs anywhere in its body (including nested/inner calls to helpers in the same file):
-   *   reads      — getVariable('V')
-   *   writes     — setVariable('V', …)
-   *   dispatches — dispatchEvent($form, 'custom:E', …)
-   * Returns a Map<functionName, {reads:Set, writes:Set, dispatches:Set}>. Best-effort: a file that
-   * fails to parse is skipped (never throws — resilience in the gate is a hard requirement).
-   * @param {Array<{filename:string, content:string}>} jsFiles
-   * @returns {Map<string, {reads:Set<string>, writes:Set<string>, dispatches:Set<string>}>}
-   */
-  static collectFunctionEffects(jsFiles) {
-    const effects = new Map();
-    for (const jsFile of jsFiles || []) {
-      let ast;
-      try {
-        ast = parseCached(jsFile.content);
-      } catch { continue; } // unparseable file → skip, never throw
-
-      // A function is relevant if it is declared at any level and named; we key by name. Inner helper
-      // calls are followed by scanning the WHOLE body subtree of each named function, so a helper's
-      // effects are attributed to the exported function that (transitively) contains its call site only
-      // when the helper is defined inside it. Cross-function helper calls are resolved in a second pass.
-      const byName = new Map(); // name → function node
-      simple(ast, {
-        FunctionDeclaration: (node) => { if (node.id?.name) byName.set(node.id.name, node); },
-        VariableDeclarator: (node) => {
-          if (node.id?.type === 'Identifier'
-              && (node.init?.type === 'FunctionExpression' || node.init?.type === 'ArrowFunctionExpression')) {
-            byName.set(node.id.name, node.init);
-          }
-        },
-      });
-
-      // Direct (own-body) effects + the set of same-file functions each one calls.
-      const direct = new Map(); // name → {reads,writes,dispatches, calls:Set}
-      for (const [name, fnNode] of byName) {
-        const reads = new Set();
-        const writes = new Set();
-        const dispatches = new Set();
-        const calls = new Set();
-        simple(fnNode, {
-          CallExpression: (call) => {
-            const callee = call.callee;
-            const calleeName = callee.type === 'Identifier' ? callee.name
-              : (callee.type === 'MemberExpression' && callee.property?.type === 'Identifier') ? callee.property.name
-              : null;
-            if (!calleeName) return;
-            const strArg = (i) => (call.arguments?.[i]?.type === 'Literal' && typeof call.arguments[i].value === 'string') ? call.arguments[i].value : null;
-            if (calleeName === 'getVariable') { const v = strArg(0); if (v) reads.add(v); }
-            else if (calleeName === 'setVariable') { const v = strArg(0); if (v) writes.add(v); }
-            else if (calleeName === 'dispatchEvent') {
-              // dispatchEvent(<anyTarget>, 'custom:E', …) — the event name is a string arg starting
-              // 'custom:'. Target-agnostic: scan every string arg (the target isn't constrained).
-              for (let i = 0; i < (call.arguments?.length || 0); i++) {
-                const s = strArg(i);
-                if (s && s.startsWith('custom:')) dispatches.add(s);
-              }
-            } else if (callee.type === 'Identifier') {
-              // a bare call to another same-file function — record for transitive resolution
-              calls.add(calleeName);
-            }
-          },
-        });
-        direct.set(name, { reads, writes, dispatches, calls });
-      }
-
-      // Transitive closure: fold each function's callees' effects into it (bounded — same-file only,
-      // visited-guarded against recursion cycles).
-      const resolve = (name, seen) => {
-        const self = direct.get(name);
-        if (!self || seen.has(name)) return { reads: new Set(), writes: new Set(), dispatches: new Set() };
-        seen.add(name);
-        const reads = new Set(self.reads);
-        const writes = new Set(self.writes);
-        const dispatches = new Set(self.dispatches);
-        for (const callee of self.calls) {
-          if (!direct.has(callee)) continue;
-          const sub = resolve(callee, seen);
-          sub.reads.forEach((v) => reads.add(v));
-          sub.writes.forEach((v) => writes.add(v));
-          sub.dispatches.forEach((v) => dispatches.add(v));
-        }
-        return { reads, writes, dispatches };
-      };
-      for (const name of direct.keys()) {
-        // Last file wins on name collision — mirrors "first-form-wins" pragmatism; custom fns are
-        // globally unique by name in practice.
-        effects.set(name, resolve(name, new Set()));
-      }
-    }
-    return effects;
-  }
-
-  /**
-   * Generate impact analysis: Event → Fields mapping
-   * Shows which fields are affected when an event fires
-   */
-  analyze(formJson, jsFiles = []) {
-    const eventImpactMap = {};
-    const fieldEventMap = {}; // Reverse map: field → events that target it
-
-    // Cross-handler races buried in custom functions: resolve the form's customFunctionsPath JS and
-    // extract each function's variable effects. A handler that calls `fn(globals)` then inherits fn's
-    // reads/writes/dispatches — we splice canonical getVariable/setVariable/dispatchEvent text into the
-    // handler string so every existing scanner (parseHandlerStatements / variablesRead / ordering-race)
-    // sees them with no change to the detection logic. Empty when no jsFiles → inline-JSON behaviour only.
-    const fnFiles = filterJsFilesByCustomFunctionsPath(jsFiles, formJson?.properties?.customFunctionsPath);
-    const fnEffects = fnFiles.length ? EventImpactAnalyzer.collectFunctionEffects(fnFiles) : new Map();
-    // Expand a handler string with the inherited effects of the custom functions it calls. The synthetic
-    // text is APPENDED (so a buried setVar in a later handler keeps a higher statement index than an
-    // inline dispatch in an earlier one — Pattern A ordering is preserved). Returns the input unchanged
-    // when there are no resolved effects, so the no-jsFiles path is a byte-for-byte no-op.
-    const expandHandler = (handler) => {
-      if (typeof handler !== 'string' || fnEffects.size === 0) return handler;
-      let suffix = '';
-      for (const fnName of EventImpactAnalyzer.calledFunctionNames(handler)) {
-        const eff = fnEffects.get(fnName);
-        if (!eff) continue;
-        for (const v of eff.dispatches) suffix += ` dispatchEvent($form,'${v}');`;
-        for (const v of eff.writes) suffix += ` setVariable('${v}',x);`;
-        for (const v of eff.reads) suffix += ` getVariable('${v}');`;
-      }
-      return suffix ? handler + ';' + suffix : handler;
-    };
-
-    // Ordering-race bookkeeping:
-    //  handlerArrays: every event handler array seen, with its ordered dispatch/setVar statements +
-    //    a source label + the raw expressions (for read-detection of the dispatched handler).
-    //  varReadsByEvent: custom:event → Set(vars it reads).  varWritesByEvent: custom:event → Set(vars).
-    //  eventExprs: custom:event → concatenated handler text (to check reads).
-    const handlerArrays = [];
-    const eventExprs = {}; // 'custom:E' → joined handler text (last writer wins; concatenated)
-    const varWriteEvents = {}; // varName → Set('custom:E' that writes it)
-    const sourceByEvent = {}; // 'custom:E' → sourceField (for EVERY custom handler, incl. pure readers)
-    // Pattern B readers can be ANY handler, not only custom:* events — e.g. a button's `click` that
-    // reads a var written asynchronously by a custom event. Each entry is one handler's read context.
-    const readerHandlers = []; // {handlerKey, sourceField, reads:Set<var>, writeEventsHere:Set<'custom:E'>}
-
-    // Traverse form and extract all events
-    const traverse = (node, path = []) => {
-      if (!node) return;
-      
-      const fieldName = node.name || node.id;
-      // Use "$form" for root-level form node instead of UUID/form name
-      const pathSegment = (path.length === 0 && fieldName) ? '$form' : fieldName;
-      const currentPath = pathSegment ? [...path, pathSegment] : path;
-      const fieldPath = currentPath.join('.');
-      
-      // Process events on this field
-      if (node.events && typeof node.events === 'object') {
-        Object.entries(node.events).forEach(([eventType, handlers]) => {
-          // Skip if no valid field path
-          const sourceField = fieldPath || '(root)';
-          const eventKey = `${sourceField} → ${eventType}`;
-          
-          if (!eventImpactMap[eventKey]) {
-            eventImpactMap[eventKey] = {
-              sourceField,
-              eventType,
-              
-              handlers: [],
-              impactedFields: new Set(),
-              customFunctions: new Set(),
-              hasHTTPCalls: false,
-              hasDOMAccess: false,
-              hasWindowAccess: false,
-            };
-          }
-          
-          const handlerArray = Array.isArray(handlers) ? handlers : [handlers];
-          // For RACE DETECTION ONLY, expand each handler with the effects of the custom functions it
-          // calls (getVariable/setVariable/dispatchEvent buried in the JS body). Display outputs below
-          // (handlers list, impactedFields, customFunctions) still use the ORIGINAL strings, so only
-          // race detection is affected. When no jsFiles resolved, expandHandler returns the input as-is.
-          const raceHandlerArray = handlerArray.map(expandHandler);
-
-          // Ordering-race collection: record this array's ordered statements + index it by the
-          // custom:* event name it defines (eventType is the map key, e.g. 'custom:validatePinCode').
-          const stmts = EventImpactAnalyzer.parseHandlerStatements(raceHandlerArray);
-          if (stmts.length) {
-            handlerArrays.push({ sourceField, eventType, stmts });
-          }
-          const joinedAll = raceHandlerArray.filter((h) => typeof h === 'string').join('\n');
-          if (typeof eventType === 'string' && eventType.startsWith('custom:')) {
-            eventExprs[eventType] = (eventExprs[eventType] || '') + '\n' + joinedAll;
-            // Record the source field for EVERY custom handler — including pure readers with no
-            // dispatch/setVar (e.g. custom:getRedirectionUrl) that never reach handlerArrays.
-            if (!(eventType in sourceByEvent)) sourceByEvent[eventType] = sourceField;
-            for (const s of stmts) {
-              if (s.kind === 'setVar') {
-                (varWriteEvents[s.name] = varWriteEvents[s.name] || new Set()).add(eventType);
-              }
-            }
-          }
-          // Pattern B reader context — for ANY handler (custom or OOTB like `click`). Its reads are the
-          // getVariable's it performs (inline OR inherited from called custom fns via expandHandler); the
-          // write-events it itself contains are excluded later so a self-write→read is not a race.
-          const reads = EventImpactAnalyzer.variablesRead(joinedAll);
-          if (reads.size) {
-            const isCustom = typeof eventType === 'string' && eventType.startsWith('custom:');
-            // A same-handler write→read is not a cross-event race — exclude vars this handler writes
-            // itself. For a custom handler that's its own event; either way we take the setVars here.
-            const writesHere = new Set(stmts.filter((s) => s.kind === 'setVar').map((s) => s.name));
-            readerHandlers.push({ eventType, sourceField, reads, writesHere, isCustom });
-          }
-
-          handlerArray.forEach(handler => {
-            if (typeof handler !== 'string') return;
-
-            eventImpactMap[eventKey].handlers.push(handler);
-            
-            // Extract impacted fields from handler
-            this.extractImpactedFields(handler, eventImpactMap[eventKey], fieldEventMap);
-            
-            // Extract custom functions used
-            this.extractCustomFunctions(handler, eventImpactMap[eventKey]);
-            
-            // Detect performance issues
-            if (handler.includes('fetch(') || handler.includes('axios.')) {
-              eventImpactMap[eventKey].hasHTTPCalls = true;
-            }
-            if (handler.includes('document.') || handler.includes('querySelector')) {
-              eventImpactMap[eventKey].hasDOMAccess = true;
-            }
-            if (handler.includes('window.')) {
-              eventImpactMap[eventKey].hasWindowAccess = true;
-            }
-          });
-        });
-      }
-      
-      // Traverse children
-      if (node[':items']) {
-        Object.values(node[':items']).forEach(child => traverse(child, currentPath));
-      }
-      if (node.items && Array.isArray(node.items)) {
-        node.items.forEach(child => traverse(child, currentPath));
-      }
-    };
-    
-    traverse(formJson);
-    
-    // Convert Sets to Arrays for JSON serialization
-    Object.values(eventImpactMap).forEach(event => {
-      event.impactedFields = Array.from(event.impactedFields).sort();
-      event.customFunctions = Array.from(event.customFunctions).sort();
-    });
-    
-    // Create simple JSON mapping: event/rule → impacted fields
-    // This extracts the key data from eventImpactMap for easier consumption
-    const eventOrRuleToImpactedNodes = {};
-    Object.entries(eventImpactMap).forEach(([eventKey, eventData]) => {
-      eventOrRuleToImpactedNodes[eventKey] = eventData.impactedFields;
-    });
-    
-    // Detect duplicates and similar events (PRIMARY USE CASE)
-    const duplicateAnalysis = this.detectDuplicateEvents(eventImpactMap);
-
-    // ── Ordering-race detection (issues stream — surfaced by lint/analyze/Action) ──────────────
-    const issues = this.detectOrderingRaces(handlerArrays, eventExprs, varWriteEvents, sourceByEvent, readerHandlers);
-
-    return {
-      totalEvents: Object.keys(eventImpactMap).length,
-      events: eventImpactMap,
-      fieldEventMap, // field → list of events targeting it
-      eventOrRuleToImpactedNodes, // event/rule → fields impacted by that event/rule
-      summary: this.generateSummary(eventImpactMap, fieldEventMap),
-      duplicates: duplicateAnalysis.duplicates,
-      similarEvents: duplicateAnalysis.similar,
-      performanceIssues: this.identifyPerformanceIssues(eventImpactMap),
-      issues, // rule-ordering-race findings (error + warning)
-      violations: issues.length,
-    };
-  }
-
-  /**
-   * Detects the two ordering-race shapes documented in docs/test-only-patches-backend-rewrite.md.
-   * @param {Array<{sourceField,eventType,stmts}>} handlerArrays - ordered dispatch/setVar per handler
-   * @param {Object} eventExprs - custom:event → concatenated handler text
-   * @param {Object} varWriteEvents - varName → Set(custom:event that writes it)
-   * @param {Object} sourceByEvent - custom:event → sourceField (for every custom handler)
-   * @param {Array<{eventType,sourceField,reads:Set,writesHere:Set,isCustom}>} readerHandlers - every
-   *        handler (custom OR OOTB like click/change) that performs a getVariable read
-   * @returns {Array<{severity,type,message,file,functionName}>}
-   */
-  detectOrderingRaces(handlerArrays, eventExprs, varWriteEvents, sourceByEvent = {}, readerHandlers = []) {
-    const issues = [];
-    const seen = new Set();
-    const DOC = 'See docs/test-only-patches-backend-rewrite.md.';
-
-    // Pattern A — dispatch('custom:E') at i, setVariable('V') at j>i in the SAME array, and the
-    // custom:E handler reads V → the dispatched handler sees a stale/unset V. Error.
-    for (const { sourceField, eventType, stmts } of handlerArrays) {
-      const dispatches = stmts.filter((s) => s.kind === 'dispatch');
-      const setVars = stmts.filter((s) => s.kind === 'setVar');
-      for (const d of dispatches) {
-        const targetExpr = eventExprs[d.name];
-        if (!targetExpr) continue; // dispatched handler not defined in this form → can't verify
-        const readByTarget = EventImpactAnalyzer.variablesRead(targetExpr);
-        for (const sv of setVars) {
-          if (sv.index <= d.index) continue; // write already ordered before the dispatch → fine
-          if (!readByTarget.has(sv.name)) continue; // target doesn't read this var → not a race
-          const key = `A|${sourceField}|${eventType}|${d.name}|${sv.name}`;
-          if (seen.has(key)) continue; seen.add(key);
-          issues.push({
-            severity: 'error',
-            type: 'rule-ordering-race',
-            message: `Handler '${eventType}' on '${sourceField}' dispatches '${d.name}' BEFORE `
-              + `setVariable('${sv.name}', …), but the '${d.name}' handler reads '${sv.name}' — it runs `
-              + `with a stale/unset '${sv.name}' and takes the wrong branch. Move `
-              + `setVariable('${sv.name}', …) before the dispatchEvent('${d.name}'). ${DOC}`,
-            file: `formJson:${sourceField}`,
-            functionName: eventType,
-          });
-        }
-      }
-    }
-
-    // Pattern B — a handler reads getVariable('V') where V is written ONLY inside a DIFFERENT custom:*
-    // event handler (async, no ordering guarantee) → the read can race the write. Warning (timing
-    // unprovable). The READER can be ANY handler — a custom event (e.g. custom:getRedirectionUrl) OR an
-    // OOTB event like a button's `click` (the fire-and-forget CTA case). The WRITER must be a custom
-    // event: that's the async dispatch that has no ordering guarantee vs. the reader. Reads/writes
-    // include those inherited from called custom functions (expandHandler spliced them into the text).
-    for (const { eventType, sourceField, reads, writesHere } of readerHandlers) {
-      for (const v of reads) {
-        const writers = varWriteEvents[v];
-        if (!writers || writers.size === 0) continue; // not written by any custom event → out of scope
-        if (writers.has(eventType)) continue; // reader is itself the writing custom event → same-tick
-        if (writesHere && writesHere.has(v)) continue; // this handler writes it too → same-tick, fine
-        const key = `B|${eventType}|${sourceField}|${v}`;
-        if (seen.has(key)) continue; seen.add(key);
-        issues.push({
-          severity: 'warning',
-          type: 'rule-ordering-race',
-          message: `Handler '${eventType}' on '${sourceField}' reads getVariable('${v}'), but '${v}' is `
-            + `written only by [${[...writers].join(', ')}] — a different event with no guaranteed order. `
-            + `The read can run before the write and see an empty/stale value (e.g. prefill restores this `
-            + `field before the other event resolves). Don't pass an async result between events through a `
-            + `shared variable. Instead, derive '${v}' reactively: express it as a rule that reads its `
-            + `dependencies directly, so the runtime re-runs it whenever a dependency changes — no manual `
-            + `ordering. For fetched options, author an async enum rule that returns the list once its `
-            + `inputs are ready; for validity, use an async validation expression and let the action await `
-            + `it. Either way the value is resolved where it's used, not carried across events.`,
-          file: `formJson:${sourceField}`,
-          functionName: eventType,
-        });
-      }
-    }
-
-    return issues;
-  }
-  
-  extractImpactedFields(handler, event, fieldEventMap) {
-    // Match patterns like:
-    // - setProperty($form.field, ...)
-    // - dispatchEvent($form.field, ...)
-    // - field.$value = ...
-    // - globals.functions.setProperty(field, ...)
-    
-    // Safety check
-    if (!event || !event.sourceField || !event.eventType) {
-      return;
-    }
-    
-    const patterns = [
-      /\$form\.([a-zA-Z0-9_.]+)/g,
-      /setProperty\s*\(\s*\$?form\.([a-zA-Z0-9_.]+)/g,
-      /dispatchEvent\s*\(\s*\$?form\.([a-zA-Z0-9_.]+)/g,
-      /([a-zA-Z0-9_.]+)\.\$value/g,
-      /globals\.functions\.setProperty\s*\(\s*([a-zA-Z0-9_.]+)/g,
-    ];
-    
-    patterns.forEach(pattern => {
-      let match;
-      const handlerCopy = handler; // Reset regex state
-      while ((match = pattern.exec(handlerCopy)) !== null) {
-        let fieldPath = match[1].replace(/^\$form\./, '');
-        
-        // Filter out common false positives
-        if (fieldPath && 
-            fieldPath !== 'undefined' && 
-            fieldPath !== 'form' &&
-            fieldPath !== '$form' &&
-            !fieldPath.startsWith('functions.')) {
-          event.impactedFields.add(fieldPath);
-          
-          // Add to reverse map (with safety check)
-          if (fieldEventMap) {
-            if (!fieldEventMap[fieldPath]) {
-              fieldEventMap[fieldPath] = [];
-            }
-            fieldEventMap[fieldPath].push(`${event.sourceField} → ${event.eventType}`);
-          }
-        }
-      }
-    });
-  }
-  
-  extractCustomFunctions(handler, event) {
-    // Match function calls: functionName(...)
-    const functionPattern = /(\w+)\s*\(/g;
-    const jsKeywords = new Set([
-      'if', 'for', 'while', 'setProperty', 'dispatchEvent', 'getVariable',
-      'setVariable', 'length', 'split', 'join', 'map', 'filter', 'includes',
-      'parseInt', 'parseFloat', 'Date', 'Math', 'Array', 'Object', 'String'
-    ]);
-    
-    let match;
-    while ((match = functionPattern.exec(handler)) !== null) {
-      const fnName = match[1];
-      if (!jsKeywords.has(fnName)) {
-        event.customFunctions.add(fnName);
-      }
-    }
-  }
-  
-  generateSummary(eventImpactMap, fieldEventMap) {
-    const fieldImpactCount = {};
-    const eventTypeCount = {};
-    const customFunctionUsage = {};
-    
-    Object.values(eventImpactMap).forEach(event => {
-      // Safety checks
-      if (!event || !event.sourceField || !event.eventType) {
-        return;
-      }
-      
-      // Count by event type
-      eventTypeCount[event.eventType] = (eventTypeCount[event.eventType] || 0) + 1;
-      
-      // Count fields impacted
-      if (event.impactedFields && typeof event.impactedFields.forEach === 'function') {
-        event.impactedFields.forEach(field => {
-          fieldImpactCount[field] = (fieldImpactCount[field] || 0) + 1;
-        });
-      }
-      
-      // Count custom function usage
-      if (event.customFunctions && typeof event.customFunctions.forEach === 'function') {
-        event.customFunctions.forEach(fn => {
-          if (fn && typeof fn === 'string' && fn.length > 0) {
-            // Get or create the usage object
-            let usage = customFunctionUsage[fn];
-            if (!usage) {
-              usage = { count: 0, events: [] };
-              customFunctionUsage[fn] = usage;
-            }
-            // Update the usage
-            usage.count++;
-            if (usage.events && Array.isArray(usage.events)) {
-              usage.events.push(`${event.sourceField} → ${event.eventType}`);
-            }
-          }
-        });
-      }
-    });
-    
-    // Find top impacted fields
-    const topImpactedFields = Object.entries(fieldImpactCount)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 20)
-      .map(([field, count]) => ({ field, impactCount: count }));
-    
-    // Find fields with most incoming events
-    const mostTargetedFields = Object.entries(fieldEventMap)
-      .map(([field, events]) => ({ field, eventCount: events.length }))
-      .sort((a, b) => b.eventCount - a.eventCount)
-      .slice(0, 20);
-    
-    return {
-      totalEventTypes: Object.keys(eventTypeCount).length,
-      eventsByType: eventTypeCount,
-      topImpactedFields, // Fields modified by the most events
-      mostTargetedFields, // Fields that are targets of the most events
-      customFunctionUsage,
-      totalUniqueFieldsImpacted: Object.keys(fieldImpactCount).length,
-    };
-  }
-  
-  /**
-   * Detect duplicate and similar events
-   * PRIMARY USE CASE: Prevent new developers from creating duplicate logic
-   */
-  detectDuplicateEvents(eventImpactMap) {
-    const duplicates = [];
-    const similar = [];
-    const eventsByField = {};
-    
-    // Group events by source field and event type
-    Object.entries(eventImpactMap).forEach(([eventKey, event]) => {
-      const key = `${event.sourceField}::${event.eventType}`;
-      if (!eventsByField[key]) {
-        eventsByField[key] = [];
-      }
-      eventsByField[key].push({ eventKey, event });
-    });
-    
-    // Check for exact duplicates (same field, same event type, multiple handlers)
-    Object.entries(eventsByField).forEach(([key, events]) => {
-      if (events.length > 1) {
-        duplicates.push({
-          field: events[0].event.sourceField,
-          eventType: events[0].event.eventType,
-          count: events.length,
-          handlers: events.map(e => e.event.handlers).flat(),
-          message: `${events.length} handlers defined for same event - may cause unexpected behavior`,
-        });
-      }
-    });
-    
-    // Check for similar events (different events doing similar things)
-    const allEvents = Object.entries(eventImpactMap);
-    for (let i = 0; i < allEvents.length; i++) {
-      for (let j = i + 1; j < allEvents.length; j++) {
-        const [key1, event1] = allEvents[i];
-        const [key2, event2] = allEvents[j];
-        
-        // Skip if same source field (handled by duplicates)
-        if (event1.sourceField === event2.sourceField) continue;
-        
-        // Check if they impact the same fields
-        const commonImpacts = event1.impactedFields.filter(f => 
-          event2.impactedFields.includes(f)
-        );
-        
-        // Check if they use same custom functions
-        const commonFunctions = event1.customFunctions.filter(f =>
-          event2.customFunctions.includes(f)
-        );
-        
-        // If they have significant overlap, they might be doing similar things
-        if (commonImpacts.length >= 3 || commonFunctions.length >= 2) {
-          similar.push({
-            event1: key1,
-            event2: key2,
-            commonImpacts,
-            commonFunctions,
-            message: `These events may have overlapping logic`,
-          });
-        }
-      }
-    }
-    
-    return { duplicates, similar };
-  }
-  
-  /**
-   * Detect performance issues (SECONDARY - not the main goal)
-   */
-  identifyPerformanceIssues(eventImpactMap) {
-    const issues = [];
-    
-    Object.entries(eventImpactMap).forEach(([eventKey, event]) => {
-      if (event.hasHTTPCalls) {
-        issues.push({
-          severity: 'critical',
-          type: 'http-in-event',
-          event: eventKey,
-          message: `Event contains HTTP calls - will block user interaction`,
-        });
-      }
-      
-      if (event.hasDOMAccess) {
-        issues.push({
-          severity: 'warning',
-          type: 'dom-in-event',
-          event: eventKey,
-          message: `Event accesses DOM directly - may cause layout thrashing`,
-        });
-      }
-      
-      if (event.hasWindowAccess) {
-        issues.push({
-          severity: 'warning',
-          type: 'window-in-event',
-          event: eventKey,
-          message: `Event accesses window object directly - may cause unpredictable behavior`,
-        });
-      }
-      
-      if (event.impactedFields.length > 10) {
-        issues.push({
-          severity: 'warning',
-          type: 'high-impact',
-          event: eventKey,
-          message: `Event impacts ${event.impactedFields.length} fields - may cause cascading updates`,
-        });
-      }
-    });
-    
-    return issues;
-  }
-  
-  /**
-   * Generate markdown report for GitHub PR comment or Gist
-   */
-  generateMarkdownReport(analysis) {
-    let markdown = `# 📊 Event Impact Analysis Report\n\n`;
-    markdown += `**Generated:** ${new Date().toISOString()}\n\n`;
-    markdown += `> **Purpose:** Prevent duplicate events, track impact of changes, document current setup\n\n`;
-    
-    markdown += `## 📈 Summary\n\n`;
-    markdown += `| Metric | Value |\n`;
-    markdown += `|--------|-------|\n`;
-    markdown += `| Total Events | ${analysis.totalEvents} |\n`;
-    markdown += `| Event Types | ${analysis.summary.totalEventTypes} |\n`;
-    markdown += `| Unique Fields Impacted | ${analysis.summary.totalUniqueFieldsImpacted} |\n`;
-    markdown += `| **Duplicate Events** | **${analysis.duplicates?.length || 0}** |\n`;
-    markdown += `| **Similar Events** | **${analysis.similarEvents?.length || 0}** |\n`;
-    markdown += `| Performance Issues | ${analysis.performanceIssues.length} |\n\n`;
-    
-    // PRIORITY 1: Duplicate Events (Main use case!)
-    if (analysis.duplicates && analysis.duplicates.length > 0) {
-      markdown += `## 🚨 Duplicate Events Found\n\n`;
-      markdown += `**⚠️ IMPORTANT:** Multiple handlers defined for the same event. This may cause:\n`;
-      markdown += `- Unexpected behavior (which handler runs first?)\n`;
-      markdown += `- Maintenance nightmares (developers don't know about duplicate logic)\n`;
-      markdown += `- Regression bugs (modifying one handler, forgetting the other)\n\n`;
-      
-      analysis.duplicates.forEach((dup, idx) => {
-        markdown += `### ${idx + 1}. \`${dup.field}\` → **${dup.eventType}**\n\n`;
-        markdown += `- **${dup.count} handlers** defined for this event\n`;
-        markdown += `- **Action Required:** Consolidate into single handler or verify this is intentional\n\n`;
-        markdown += `<details>\n<summary>Show All ${dup.count} Handlers</summary>\n\n`;
-        dup.handlers.forEach((handler, i) => {
-          markdown += `**Handler ${i + 1}:**\n\`\`\`javascript\n${handler}\n\`\`\`\n\n`;
-        });
-        markdown += `</details>\n\n`;
-      });
-    }
-    
-    // PRIORITY 2: Similar Events (Potential duplicates)
-    if (analysis.similarEvents && analysis.similarEvents.length > 0) {
-      markdown += `## 🔍 Similar Events Detected\n\n`;
-      markdown += `**Note:** These events are on different fields but do similar things. Consider:\n`;
-      markdown += `- Are they intentionally similar?\n`;
-      markdown += `- Could they share common logic via a custom function?\n`;
-      markdown += `- Is one a copy-paste of the other?\n\n`;
-      
-      analysis.similarEvents.slice(0, 10).forEach((sim, idx) => {
-        markdown += `### ${idx + 1}. Similarity Between:\n`;
-        markdown += `- **Event 1:** \`${sim.event1}\`\n`;
-        markdown += `- **Event 2:** \`${sim.event2}\`\n\n`;
-        
-        if (sim.commonImpacts.length > 0) {
-          markdown += `**Common Fields Modified:** ${sim.commonImpacts.map(f => `\`${f}\``).join(', ')}\n\n`;
-        }
-        if (sim.commonFunctions.length > 0) {
-          markdown += `**Common Functions Used:** ${sim.commonFunctions.map(f => `\`${f}()\``).join(', ')}\n\n`;
-        }
-        markdown += `---\n\n`;
-      });
-      
-      if (analysis.similarEvents.length > 10) {
-        markdown += `*... and ${analysis.similarEvents.length - 10} more similar event pairs*\n\n`;
-      }
-    }
-    
-    // Performance Issues (Secondary - still useful but not main goal)
-    if (analysis.performanceIssues.length > 0) {
-      markdown += `## ⚠️ Performance Issues\n\n`;
-      const critical = analysis.performanceIssues.filter(i => i.severity === 'critical');
-      const warnings = analysis.performanceIssues.filter(i => i.severity === 'warning');
-      
-      if (critical.length > 0) {
-        markdown += `### 🔴 Critical (${critical.length})\n\n`;
-        critical.forEach(issue => {
-          markdown += `- **${issue.event}**\n`;
-          markdown += `  - ${issue.message}\n`;
-        });
-        markdown += `\n`;
-      }
-      
-      if (warnings.length > 0) {
-        markdown += `### 🟡 Warnings (${warnings.length})\n\n`;
-        warnings.forEach(issue => {
-          markdown += `- **${issue.event}**\n`;
-          markdown += `  - ${issue.message}\n`;
-        });
-        markdown += `\n`;
-      }
-    }
-    
-    // Events by Type
-    markdown += `## 📋 Events by Type\n\n`;
-    Object.entries(analysis.summary.eventsByType)
-      .sort((a, b) => b[1] - a[1])
-      .forEach(([type, count]) => {
-        markdown += `- **${type}:** ${count} event(s)\n`;
-      });
-    
-    // Top Impacted Fields
-    markdown += `\n## 🎯 Top Impacted Fields\n\n`;
-    markdown += `These fields are **modified** by the most events:\n\n`;
-    markdown += `| Rank | Field | Times Modified |\n`;
-    markdown += `|------|-------|----------------|\n`;
-    analysis.summary.topImpactedFields.forEach(({ field, impactCount }, idx) => {
-      markdown += `| ${idx + 1} | \`${field}\` | ${impactCount} |\n`;
-    });
-    
-    // Most Targeted Fields
-    markdown += `\n## 🎯 Most Targeted Fields\n\n`;
-    markdown += `These fields are **targets** of the most events:\n\n`;
-    markdown += `| Rank | Field | Incoming Events |\n`;
-    markdown += `|------|-------|----------------|\n`;
-    analysis.summary.mostTargetedFields.forEach(({ field, eventCount }, idx) => {
-      markdown += `| ${idx + 1} | \`${field}\` | ${eventCount} |\n`;
-    });
-    
-    // Custom Function Usage
-    markdown += `\n## 🔧 Custom Function Usage\n\n`;
-    const sortedFunctions = Object.entries(analysis.summary.customFunctionUsage)
-      .sort((a, b) => b[1].count - a[1].count)
-      .slice(0, 15);
-    
-    if (sortedFunctions.length > 0) {
-      markdown += `| Function | Usage Count | Sample Events |\n`;
-      markdown += `|----------|-------------|---------------|\n`;
-      sortedFunctions.forEach(([fn, data]) => {
-        const samples = data.events.slice(0, 2).join('<br>');
-        const more = data.events.length > 2 ? `<br>...+${data.events.length - 2} more` : '';
-        markdown += `| \`${fn}()\` | ${data.count} | ${samples}${more} |\n`;
-      });
-    } else {
-      markdown += `*No custom functions detected in events*\n`;
-    }
-    
-    // Detailed Event Breakdown
-    markdown += `\n## 📖 Detailed Event → Field Mapping\n\n`;
-    markdown += `<details>\n<summary>Click to expand full event details (${analysis.totalEvents} events)</summary>\n\n`;
-    
-    Object.entries(analysis.events)
-      .sort((a, b) => a[0].localeCompare(b[0]))
-      .forEach(([eventKey, event]) => {
-        markdown += `### ${eventKey}\n\n`;
-        
-        if (event.impactedFields.length > 0) {
-          markdown += `**🎯 Impacts (${event.impactedFields.length}):** `;
-          markdown += event.impactedFields.map(f => `\`${f}\``).join(', ');
-          markdown += `\n\n`;
-        }
-        
-        if (event.customFunctions.length > 0) {
-          markdown += `**🔧 Uses Functions:** `;
-          markdown += Array.from(event.customFunctions).map(f => `\`${f}()\``).join(', ');
-          markdown += `\n\n`;
-        }
-        
-        if (event.hasHTTPCalls) {
-          markdown += `⚠️ **Contains HTTP calls**\n\n`;
-        }
-        if (event.hasDOMAccess) {
-          markdown += `⚠️ **Accesses DOM**\n\n`;
-        }
-        if (event.hasWindowAccess) {
-          markdown += `⚠️ **Accesses window object**\n\n`;
-        }
-        
-        markdown += `<details>\n<summary>Event Handlers (${event.handlers.length})</summary>\n\n`;
-        event.handlers.forEach((handler, i) => {
-          markdown += `**Handler ${i + 1}:**\n\`\`\`javascript\n${handler}\n\`\`\`\n\n`;
-        });
-        markdown += `</details>\n\n`;
-        markdown += `---\n\n`;
-      });
-    
-    markdown += `</details>\n\n`;
-    
-    // Impact Analysis Tips
-    markdown += `## 💡 How to Use This Report\n\n`;
-    markdown += `### Before Making Changes:\n`;
-    markdown += `1. **Find your target field** in "Most Targeted Fields" to see what events affect it\n`;
-    markdown += `2. **Check dependencies** - modifying an event may have ripple effects\n`;
-    markdown += `3. **Review custom functions** to understand what code will execute\n\n`;
-    
-    markdown += `### Pre-Deployment Validation:\n`;
-    markdown += `1. **Check for performance issues** (HTTP calls, DOM access, window access)\n`;
-    markdown += `2. **Review high-impact events** (>10 fields)\n`;
-    markdown += `3. **Verify custom functions** are still used correctly\n\n`;
-    
-    markdown += `---\n`;
-    markdown += `*Generated by AEM Forms Performance Bot - Event Impact Analyzer*\n`;
-    
-    return markdown;
-  }
-  
-  /**
-   * Generate JSON report for programmatic consumption
-   */
-  generateJSONReport(analysis) {
-    return JSON.stringify(analysis, null, 2);
-  }
-}
-
 
 ;// CONCATENATED MODULE: ./src/data/runtime-property-matrix.js
 // AUTO-GENERATED from the agent-kb runtime-property-matrix.json (schemaVersion 2.1.0).
