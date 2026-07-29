@@ -126797,25 +126797,6 @@ module.exports = eval("require")("utf-8-validate");
 
 /***/ }),
 
-/***/ 19869:
-/***/ ((module) => {
-
-function webpackEmptyAsyncContext(req) {
-	// Here Promise.resolve().then() is used instead of new Promise() to prevent
-	// uncaught exception popping up in devtools
-	return Promise.resolve().then(() => {
-		var e = new Error("Cannot find module '" + req + "'");
-		e.code = 'MODULE_NOT_FOUND';
-		throw e;
-	});
-}
-webpackEmptyAsyncContext.keys = () => ([]);
-webpackEmptyAsyncContext.resolve = webpackEmptyAsyncContext;
-webpackEmptyAsyncContext.id = 19869;
-module.exports = webpackEmptyAsyncContext;
-
-/***/ }),
-
 /***/ 42613:
 /***/ ((module) => {
 
@@ -210669,6 +210650,14 @@ async function loadFlatConfig(cwd, explicitPath) {
  * @param {string} [explicitPath]
  * @returns {Promise<{ config: Array|null, path: string|null }>}
  */
+// Indirect dynamic import: a bare `import(runtimePath)` is statically rewritten by ncc (the CLI
+// bundler) into an empty webpack async-context stub that ALWAYS throws MODULE_NOT_FOUND — so the
+// bundled CLI could never load a consumer's eslint.config.js and silently degraded to "no form JSON".
+// Constructing the importer via `new Function` hides the `import()` from ncc's static analysis, so the
+// native runtime import survives bundling. See test/test-dist-cli.js (flat-config from the bundle).
+// eslint-disable-next-line no-new-func
+const dynamicImport = new Function('specifier', 'return import(specifier);');
+
 async function loadFlatConfigWithPath(cwd, explicitPath) {
   const { resolve } = await Promise.resolve(/* import() */).then(__nccwpck_require__.t.bind(__nccwpck_require__, 76760, 19));
   const { existsSync } = await Promise.resolve(/* import() */).then(__nccwpck_require__.t.bind(__nccwpck_require__, 73024, 19));
@@ -210679,11 +210668,13 @@ async function loadFlatConfigWithPath(cwd, explicitPath) {
   for (const p of candidates) {
     if (!existsSync(p)) continue;
     try {
-      const mod = await __nccwpck_require__(19869)(pathToFileURL(p).href);
+      const mod = await dynamicImport(pathToFileURL(p).href);
       const cfg = mod.default ?? mod;
       return { config: Array.isArray(cfg) ? cfg : null, path: p };
-    } catch { return { config: null, path: p }; }
+    } catch { /* import failed — try the next candidate (e.g. .mjs) rather than giving up */ }
   }
+  // No candidate loaded — report no path so callers don't resolve config-relative options (formJsonRoot)
+  // against a config that never loaded.
   return { config: null, path: null };
 }
 
