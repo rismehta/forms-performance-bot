@@ -189640,9 +189640,9 @@ base.MethodDefinition = base.PropertyDefinition = base.Property = function (node
  * agreed ACS layout `journeys/<journey>/{fragments,form}/…`.
  *
  * Tiers:
- *  - Component VIEW (`…/components/<name>/<name>.js`, NOT `<name>-rules.js`) — DOM legitimate.
+ *  - Component VIEW (`…/components/<name>/<name>.js`, NOT `<name>{-,.}rules.js`) — DOM legitimate.
  *  - Form RUNTIME (basename `form*.js` / `decorateForm.js` / `util.js` / `aem.js`) — DOM legitimate.
- *  - Custom-fn SURFACE (fragment(s)/ folder, `*-rules.js`, `functions[.source].js`, or scripts/) —
+ *  - Custom-fn SURFACE (fragment(s)/ folder, `*{-,.}rules.js`, `functions[.source].js`, or scripts/) —
  *    orchestration code where DOM / navigation / direct field reach is FORBIDDEN.
  *  - Everything else (site header, router, tests, third-party) — not form code; no opinion.
  */
@@ -189651,18 +189651,18 @@ const norm = (f) => (f || '').replace(/\\/g, '/');
 const basename = (f) => norm(f).split('/').pop();
 
 /**
- * Component view file: `…/components/<name>/<file>.js` but NOT a `*-rules.js` (that is a custom-fn
+ * Component view file: `…/components/<name>/<file>.js` but NOT a `*{-,.}rules.js` (that is a custom-fn
  * surface). DOM is legitimate here — the component owns its own view.
  */
 function isComponentView(filename) {
   const f = norm(filename);
-  return /(^|\/)components\/[^/]+\/[^/]+\.js$/.test(f) && !/-rules\.js$/.test(f);
+  return /(^|\/)components\/[^/]+\/[^/]+\.js$/.test(f) && !/[-.]rules\.js$/.test(f);
 }
 
 /**
- * Component RULE script: a `*-rules.js` that belongs to a reusable component — either co-located
- * (`…/components/<name>/<name>-rules.js`) or in a shared component-rules folder
- * (`…/scripts/components/<name>-rules.js`). These provide the THEN-logic a component's `change`/event
+ * Component RULE script: a `*{-,.}rules.js` that belongs to a reusable component — either co-located
+ * (`…/components/<name>/<name>{-,.}rules.js`) or in a shared component-rules folder
+ * (`…/scripts/components/<name>{-,.}rules.js`). These provide the THEN-logic a component's `change`/event
  * rule calls, and are reused across MANY forms — so unlike a fragment (which owns one form JSON) a
  * component rule must NOT reach into form/fragment scope at all: no `globals.form.<field>` traversal,
  * no `globals.form.$properties.<key>` read. It gets values from its own field (`globals.field`) or an
@@ -189670,9 +189670,9 @@ function isComponentView(filename) {
  */
 function isComponentRule(filename) {
   const f = norm(filename);
-  return /-rules\.js$/.test(f)
-    && (/(^|\/)components\/[^/]+\/[^/]+-rules\.js$/.test(f)   // components/<name>/<name>-rules.js
-      || /(^|\/)scripts\/components\/[^/]+-rules\.js$/.test(f)); // scripts/components/<name>-rules.js
+  return /[-.]rules\.js$/.test(f)
+    && (/(^|\/)components\/[^/]+\/[^/]+[-.]rules\.js$/.test(f)   // components/<name>/<name>{-,.}rules.js
+      || /(^|\/)scripts\/components\/[^/]+[-.]rules\.js$/.test(f)); // scripts/components/<name>{-,.}rules.js
 }
 
 /**
@@ -189687,7 +189687,7 @@ function isFormRuntime(filename) {
  * cross-fragment field reach are forbidden. Component views and form runtime are excluded (their DOM
  * is legitimate). Signals — any of:
  *  - under a fragment folder:      `.../fragment/...` or `.../fragments/...`
- *  - a rules file:                 `<name>-rules.js`
+ *  - a rules file:                 `<name>{-,.}rules.js`
  *  - the custom-functions entry:   `functions.js` / `functions.source.js`
  *  - under a scripts folder:       `.../scripts/...`
  */
@@ -189695,7 +189695,7 @@ function isCustomFnSurface(filename) {
   if (isComponentView(filename) || isFormRuntime(filename)) return false;
   const f = norm(filename);
   return /(^|\/)fragments?\//.test(f)
-    || /-rules\.js$/.test(f)
+    || /[-.]rules\.js$/.test(f)
     || /^functions(\.source)?\.js$/.test(basename(filename))
     || /(^|\/)scripts\//.test(f);
 }
@@ -200914,8 +200914,10 @@ class FragmentGlobalsScopeAnalyzer {
  * Rule:
  *   block-decorator-input-mutation (error)
  *     Mutates `event.target.value` inside `addEventListener('input'|'keydown'|'keyup', ...)`
- *     without dispatching `change` or calling `setProperty` / `setValue`.
- *     DOM and runtime model desync — submission may send the original value.
+ *     without committing the corrected value to the model — the DOM and the runtime model
+ *     desync, so submission may send the original value. The value must be set on the MODEL;
+ *     if it represents a user change, dispatch a UIChange event so the runtime records it as
+ *     user input (eventSource:'ui').
  */
 
 // Layout-agnostic: a component view is `.../components/<name>/<name>.js` (dir === basename), in ANY
@@ -200989,8 +200991,8 @@ class BlockDecoratorAnalyzer {
             file: file.filename,
             line: info.targetValueAssign.loc.start.line,
             eventType,
-            message: `Mutates event.target.value inside '${eventType}' handler without dispatching 'change' or calling setProperty — form runtime model desyncs from the visible value.`,
-            recommendation: "Prevent invalid input via 'beforeinput' + e.preventDefault(); or after assignment dispatch new Event('change', { bubbles: true }) so the runtime syncs the model.",
+            message: `Mutates event.target.value inside '${eventType}' handler without committing to the model — the form runtime model desyncs from the visible value, so submission may send the original value.`,
+            recommendation: "Set the value on the MODEL instead of on the DOM element (setProperty/setValue). If this represents a user change, dispatch a UIChange event so the runtime records it as user input (eventSource:'ui').",
           });
         }
       },
@@ -205881,10 +205883,11 @@ class InteractiveChangeGuardAnalyzer {
             message: `\`${what}\` is a UI side effect that fires on EVERY change — including a bulk `
               + '`form.importData` restore (resume / KYC-return / Perfios), which carries no '
               + '`eventSource`. On a restore this corrupts UI state (e.g. a rehydrated max-length field '
-              + 'auto-advances focus and yanks a wizard back to step 1). Gate it on an interactive '
-              + 'change: `if (isInteractiveChange(globals)) { … }` where `isInteractiveChange` = '
-              + "`!!(globals.event && globals.event.payload && 'eventSource' in globals.event.payload)`. "
-              + 'If the side effect is intended on restore too, suppress this line explicitly.',
+              + 'auto-advances focus and yanks a wizard back to step 1). Prefer one of: (1) move this '
+              + 'into a composite component that owns the interaction; (2) drive it from a UIChange event '
+              + 'so it only fires on real user input; or (3) dispatch it via a custom event rather than an '
+              + 'unconditional side effect. If the side effect is genuinely intended on restore too, '
+              + 'suppress this line explicitly.',
           });
         },
       });
@@ -206117,6 +206120,16 @@ class AsyncValueRaceAnalyzer {
 
 
 /**
+ * OUTWARD form/fragment methods a reusable component MAY call. Calling `globals.form.request({...})`
+ * asks the form to perform an HTTP request and awaits the result — an outward action that returns a
+ * value; it does not couple the component to a host form's field layout. This is unlike `subscribe`
+ * (wiring the component INTO form-wide event flow) or a `$properties`/field read (depending on a
+ * form-level value that may not exist). Exempted ONLY as a direct call callee (`globals.form.request(…)`);
+ * reading the property as a value still couples and stays flagged.
+ */
+const FORM_SCOPE_CALL_ALLOWLIST = new Set(['request']);
+
+/**
  * Component-Rule-Form-Scope Analyzer
  *
  * A component rule script (`…/components/<name>/<name>-rules.js`, `…/scripts/components/<name>-rules.js`)
@@ -206133,6 +206146,7 @@ class AsyncValueRaceAnalyzer {
  * allowed (form/fragment passed as a plain argument, never traversed):
  *   - `dispatchEvent(globals.form, 'custom:x', payload, true)`  — broadcast (the correct outward pattern)
  *   - `getVariable('k', globals.form)` / `setVariable('k', v, globals.form)` — form-scope var arg
+ *   - `globals.form.request({ url, method })` — an outward request call (see FORM_SCOPE_CALL_ALLOWLIST)
  *
  * Finding `component-rule-reaches-form-scope` (error): a `globals.form`/`globals.fragment` MEMBER read
  * (`.<field>`, `.$properties`, `.$value`, …) in a component-rule file, where the object is NOT merely
@@ -206190,6 +206204,13 @@ class ComponentRuleFormScopeAnalyzer {
         const scope = segs[1];
         if (scope !== 'form' && scope !== 'fragment') return false;
         const member = segs[2];
+        // Outward call exemption: `globals.form.request({...})` — an allowed method invoked directly as
+        // the call callee, with nothing traversed beyond it (chain is exactly globals.<scope>.<method>).
+        // Reading it as a value (`const r = globals.form.request; …`) or chaining further stays flagged.
+        if (segs.length === 3 && FORM_SCOPE_CALL_ALLOWLIST.has(member)) {
+          const parent = ancestors[ancestors.length - 2];
+          if (parent?.type === 'CallExpression' && parent.callee === node) return false;
+        }
         const line = node.loc?.start.line;
         const key = `${scope}.${member}`; // dedup per resolved scope.member (not per line/use)
         if (seen.has(key)) return true;
@@ -207858,7 +207879,7 @@ class FormPRReporter {
 
       if (mutationIssues.length > 0) {
         impact.critical.push(`${mutationIssues.length} block decorator(s) mutate input.value without model sync (form runtime desync)`);
-        impact.recommendations.push('Use beforeinput + preventDefault, or dispatch new Event("change") after assignment, so the form runtime model stays in sync.');
+        impact.recommendations.push("Set the value on the MODEL (setProperty/setValue); if it represents a user change, dispatch a UIChange event so the runtime records it as user input (eventSource:'ui').");
         score -= mutationIssues.length * 40;
       }
 
