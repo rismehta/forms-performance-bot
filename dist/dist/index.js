@@ -204197,6 +204197,26 @@ function isDisplayFormatSink(node) {
 
 
 
+
+// Field names whose fieldType is 'plain-text' — these have no dataRef, so they never enter
+// exportData()/the submission payload, and their correct authored mechanism for mixing a label with
+// a computed value is dynamic-text's `${key}` template, not displayFormat/displayValueExpression
+// (which apply to a real field's value → displayValue computation). The "presentation contaminates
+// the DATA PATH" rationale this rule is built on (see class docs) doesn't hold for a field with no
+// data path — exempt the setProperty(target, {value}) sink when the target resolves to one.
+function plainTextFieldNames(formJson) {
+  const names = new Set();
+  const walkJson = (node) => {
+    if (!node || typeof node !== 'object') return;
+    if (typeof node.name === 'string' && node.fieldType === 'plain-text') names.add(node.name);
+    for (const v of Object.values(node)) {
+      if (v && typeof v === 'object') walkJson(v);
+    }
+  };
+  if (formJson) walkJson(formJson);
+  return names;
+}
+
 /**
  * Display-Format-in-Code Analyzer
  *
@@ -204234,7 +204254,13 @@ function isDisplayFormatSink(node) {
  * the shared `ContentInCodeAnalyzer.isProse`), so the two partition the space cleanly.
  *
  * Exemptions (error-safe): `throw new Error(…)` / `console.*` args (developer strings); a bare-variable
- * interpolation whose core is not provably numeric (`` `${t} months` `` — under-flag, never guess).
+ * interpolation whose core is not provably numeric (`` `${t} months` `` — under-flag, never guess);
+ * a `setProperty(target, {value})` sink whose TARGET resolves (via alias-resolver, so a local bound
+ * to the field also counts) to a form-JSON field with `fieldType: 'plain-text'` — that field has no
+ * dataRef, so nothing in the analyzer's own rationale (presentation contaminating the data path)
+ * applies to it; degrades gracefully to "always in scope" when no formJson is on disk (same posture
+ * as storage-class's dataRef check). The `return`-statement sink has no resolvable target, so this
+ * exemption only applies to the setProperty shape.
  *
  * Fragment / custom-fn surface files only. Severity: error.
  */
@@ -204245,6 +204271,7 @@ class DisplayFormatInCodeAnalyzer {
 
   analyze(formJson, jsFiles = []) {
     const issues = [];
+    const plainTextNames = plainTextFieldNames(formJson);
     const MSG = 'A field\'s display value is FORMATTED in code (a numeric value decorated with a '
       + 'unit/currency/percent/precision suffix). Keep the model `value` as the raw numeric datum and '
       + 'move the presentation to the field\'s `displayFormat` or `displayValueExpression` (json-formula) '
@@ -204263,6 +204290,7 @@ class DisplayFormatInCodeAnalyzer {
         lib_core.warning(`[DisplayFormatInCode] parse failed for ${jsFile.filename}: ${e.message}`);
         continue;
       }
+      const aliases = buildAliasMap(ast);
       const seen = new Set();
       const flag = (line) => {
         if (line == null || seen.has(line)) return;
@@ -204277,6 +204305,11 @@ class DisplayFormatInCodeAnalyzer {
         // setProperty(<field>, { value: <formatted> })
         CallExpression: (c) => {
           if (calleeName(c.callee) !== 'setProperty') return;
+          // Plain-text target (resolved through local aliases) — no dataRef, no data path to
+          // contaminate, so this specific sink is exempt regardless of H1/H2.
+          const targetSegs = resolveChain(c.arguments?.[0], aliases);
+          const targetName = targetSegs?.[targetSegs.length - 1];
+          if (targetName && plainTextNames.has(targetName)) return;
           const obj = c.arguments?.[1];
           if (obj?.type !== 'ObjectExpression') return;
           const valueProp = obj.properties.find((p) => (p.key?.name === 'value' || p.key?.value === 'value'));
