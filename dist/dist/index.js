@@ -3444,13 +3444,16 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.BaseNode = exports.exclude = exports.include = exports.dependencyTracked = exports.qualifiedName = exports.target = exports.staticFields = exports.dynamicProps = exports.editableProperties = void 0;
+exports.BaseNode = exports.exclude = exports.include = exports.dependencyTracked = exports.qualifiedName = exports.target = exports.ActionImplWithTarget = exports.staticFields = exports.dynamicProps = exports.expressionProperties = exports.editableProperties = void 0;
 const index_1 = __nccwpck_require__(40624);
 const Events_1 = __nccwpck_require__(30290);
 const PropertiesManager_js_1 = __nccwpck_require__(23322);
+const DataManager_js_1 = __nccwpck_require__(99805);
 const DataRefParser_1 = __nccwpck_require__(81562);
+const DataValue_1 = __importDefault(__nccwpck_require__(49726));
 const EmptyDataValue_1 = __importDefault(__nccwpck_require__(83973));
 const ValidationUtils_1 = __nccwpck_require__(89256);
+const JsonUtils_1 = __nccwpck_require__(92887);
 exports.editableProperties = [
     'value',
     'label',
@@ -3464,6 +3467,7 @@ exports.editableProperties = [
     'enumNames',
     'required',
     'properties',
+    'enforceEnum',
     'exclusiveMinimum',
     'exclusiveMaximum',
     'maxLength',
@@ -3477,14 +3481,19 @@ exports.editableProperties = [
     'step',
     'placeholder'
 ];
+exports.expressionProperties = [
+    'validationExpression',
+    'displayValueExpression'
+];
 exports.dynamicProps = [
     ...exports.editableProperties,
     'index',
     'activeChild'
 ];
 exports.staticFields = ['plain-text', 'image'];
-class ActionImplWithTarget {
+class ActionImplWithTarget extends Events_1.BaseAction {
     constructor(_action, _target) {
+        super();
         this._action = _action;
         if (_action.target) {
             this._currentTarget = _target;
@@ -3516,12 +3525,22 @@ class ActionImplWithTarget {
     get originalAction() {
         return this._action.originalAction;
     }
+    get correlationId() {
+        return this._action.correlationId;
+    }
+    _setTrace(originalAction, correlationId) {
+        if (typeof this._action._setTrace === 'function') {
+            this._action._setTrace(originalAction, correlationId);
+        }
+    }
     toString() {
         return this._action.toString();
     }
 }
+exports.ActionImplWithTarget = ActionImplWithTarget;
 exports.target = Symbol('target');
 exports.qualifiedName = Symbol('qualifiedName');
+const isKeyedPath = (p) => typeof p === 'string' && (p.startsWith('properties.') || p.startsWith('data.'));
 function dependencyTracked() {
     return function (target, propertyKey, descriptor) {
         const get = descriptor.get;
@@ -3547,9 +3566,6 @@ const addOnly = (includeOrExclude) => (...fieldTypes) => (target, propertyKey, d
     const set = descriptor.set;
     if (set != undefined) {
         descriptor.set = function (value) {
-            if (this === this._ruleNode) {
-                console.error(`Property '${propertyKey}' is being set through a proxy, which is not supported. Please use globals.functions.setProperty instead.`);
-            }
             if (fieldTypes.indexOf(this.fieldType) > -1 === includeOrExclude) {
                 set.call(this, value);
             }
@@ -3569,6 +3585,7 @@ class BaseNode {
         this._tokens = [];
         this._eventSource = index_1.EventSource.CODE;
         this._fragment = '$form';
+        this._lastRebindDataNode = undefined;
         this._idSet = this.createIdSet();
         this[exports.qualifiedName] = null;
         this._jsonModel = Object.assign(Object.assign({}, params), { id: this.form.getUniqueId(params === null || params === void 0 ? void 0 : params.id) });
@@ -3579,6 +3596,7 @@ class BaseNode {
             this._fragment = this.parent.fragment;
         }
         this._propertiesManager = new PropertiesManager_js_1.PropertiesManager(this);
+        this._dataManager = new DataManager_js_1.DataManager(this);
     }
     createIdSet() {
         return new Set();
@@ -3602,8 +3620,30 @@ class BaseNode {
         this._ruleNode = new Proxy(this.ruleNodeReference(), {
             get: (ruleNodeReference, prop) => {
                 return self.getFromRule(ruleNodeReference, prop);
+            },
+            set: (ruleNodeReference, prop, value) => {
+                return self.setFromRule(ruleNodeReference, prop, value);
             }
         });
+    }
+    mapRuleValue(retValue) {
+        if (retValue instanceof BaseNode) {
+            return retValue.getRuleNode();
+        }
+        else if (retValue instanceof Array) {
+            return retValue.map(r => r instanceof BaseNode ? r.getRuleNode() : r);
+        }
+        return retValue;
+    }
+    getExposedMethod(prop) {
+        if (BaseNode.RULE_NODE_METHODS.indexOf(prop) > -1) {
+            const fn = this[prop];
+            if (typeof fn === 'function') {
+                const bound = fn.bind(this);
+                return (...args) => this.mapRuleValue(bound(...args));
+            }
+        }
+        return undefined;
     }
     ruleNodeReference() {
         return this;
@@ -3612,7 +3652,7 @@ class BaseNode {
         return this._ruleNode;
     }
     getFromRule(ruleNodeReference, prop) {
-        if (prop === Symbol.toPrimitive || (prop === 'valueOf' && !ruleNodeReference.hasOwnProperty('valueOf'))) {
+        if (prop === Symbol.toPrimitive || (prop === 'valueOf' && !Object.prototype.hasOwnProperty.call(ruleNodeReference, 'valueOf'))) {
             return this.valueOf;
         }
         else if (prop === exports.target) {
@@ -3621,28 +3661,61 @@ class BaseNode {
         else if (typeof (prop) === 'string') {
             if (prop.startsWith('$')) {
                 prop = prop.substr(1);
-                if (typeof this[prop] !== 'function') {
-                    const retValue = this[prop];
-                    if (retValue instanceof BaseNode) {
-                        return retValue.getRuleNode();
-                    }
-                    else if (retValue instanceof Array) {
-                        return retValue.map(r => r instanceof BaseNode ? r.getRuleNode() : r);
-                    }
-                    else {
-                        return retValue;
-                    }
+                if (JsonUtils_1.UNSAFE_KEYS.has(prop)) {
+                    return undefined;
+                }
+                const method = this.getExposedMethod(prop);
+                if (method) {
+                    return method;
+                }
+                const val = this[prop];
+                if (typeof val !== 'function') {
+                    return this.mapRuleValue(val);
                 }
             }
             else {
-                if (ruleNodeReference.hasOwnProperty(prop)) {
+                if (ruleNodeReference !== this && Object.prototype.hasOwnProperty.call(ruleNodeReference, prop)) {
                     return ruleNodeReference[prop];
                 }
-                else if (typeof ruleNodeReference[prop] === 'function') {
+                const method = this.getExposedMethod(prop);
+                if (method) {
+                    return method;
+                }
+                if (exports.dynamicProps.indexOf(prop) > -1 || BaseNode.RULE_NODE_READONLY_BARE_PROPS.indexOf(prop) > -1) {
+                    const val = this[prop];
+                    if (typeof val !== 'function') {
+                        return this.mapRuleValue(val);
+                    }
+                }
+                if (Array.isArray(ruleNodeReference) && !JsonUtils_1.UNSAFE_KEYS.has(prop) && typeof ruleNodeReference[prop] === 'function') {
                     return ruleNodeReference[prop];
                 }
             }
         }
+    }
+    setFromRule(ruleNodeReference, prop, value) {
+        if (typeof prop === 'string') {
+            const modelProp = prop.startsWith('$') ? prop.substr(1) : prop;
+            if (modelProp === 'data') {
+                this.data = value;
+                return true;
+            }
+            if (exports.editableProperties.indexOf(modelProp) > -1) {
+                this.dispatch(new Events_1.CustomEvent('setProperty', { [modelProp]: value }, false));
+                return true;
+            }
+            if (ruleNodeReference !== this && Object.prototype.hasOwnProperty.call(ruleNodeReference, prop)) {
+                if (Array.isArray(ruleNodeReference)) {
+                    this.form.logger.warn(`Cannot assign to array index '${prop}'. Set the field's value instead (e.g. field.value = [...]).`);
+                }
+                else {
+                    this.form.logger.error(`Cannot assign to child node '${prop}' through its parent. Set the property on the child node instead.`);
+                }
+                return true;
+            }
+            this.form.logger.warn(`'${prop}' is not a valid editable property.`);
+        }
+        return true;
     }
     get id() {
         return this._jsonModel.id;
@@ -3695,7 +3768,7 @@ class BaseNode {
     }
     set visible(v) {
         if (v !== this._jsonModel.visible) {
-            const changeAction = (0, Events_1.propertyChange)('visible', v, this._jsonModel.visible);
+            const changeAction = (0, Events_1.propertyChange)('visible', v, this._jsonModel.visible, this._eventSource);
             this._jsonModel.visible = v;
             this.notifyDependents(changeAction);
         }
@@ -3715,7 +3788,7 @@ class BaseNode {
             JSON.stringify(l) === JSON.stringify(this._jsonModel.label) :
             l === this._jsonModel.label;
         if (!isLabelSame) {
-            const changeAction = (0, Events_1.propertyChange)('label', l, this._jsonModel.label);
+            const changeAction = (0, Events_1.propertyChange)('label', l, this._jsonModel.label, this._eventSource);
             this._jsonModel = Object.assign(Object.assign({}, this._jsonModel), { label: l });
             this.notifyDependents(changeAction);
         }
@@ -3733,7 +3806,7 @@ class BaseNode {
     }
     getState(forRestore = false) {
         return this.withDependencyTrackingControl(true, () => {
-            return Object.assign(Object.assign(Object.assign(Object.assign(Object.assign({}, this._jsonModel), { properties: this.properties, index: this.index, parent: undefined, qualifiedName: this.qualifiedName }), (this.repeatable === true ? {
+            return Object.assign(Object.assign(Object.assign(Object.assign(Object.assign({}, this._jsonModel), { properties: Object.assign({}, this.properties), index: this.index, parent: undefined, qualifiedName: this.qualifiedName }), (this.repeatable === true ? {
                 repeatable: true,
                 minOccur: this.parent.minItems,
                 maxOccur: this.parent.maxItems
@@ -3747,10 +3820,17 @@ class BaseNode {
         });
     }
     subscribe(callback, eventName = 'change', dependentType = 'view') {
+        var _a, _b;
+        if (eventName.startsWith('custom:')) {
+            eventName = eventName.substring('custom:'.length);
+        }
         this._callbacks[eventName] = this._callbacks[eventName] || [];
-        const isViewSubscriber = dependentType === 'view';
+        const resolvedType = (dependentType === 'view' && ((_b = (_a = this.ruleEngine) === null || _a === void 0 ? void 0 : _a.isModelDecorating) === null || _b === void 0 ? void 0 : _b.call(_a)))
+            ? 'model'
+            : dependentType;
+        const isViewSubscriber = resolvedType === 'view';
         const hasExistingViewSubscriber = this._callbacks[eventName].some((x) => x.dependentType === 'view' || x.dependentType == null);
-        const entry = { callback, dependentType };
+        const entry = { callback, dependentType: resolvedType };
         this._callbacks[eventName].push(entry);
         if (isViewSubscriber && !hasExistingViewSubscriber) {
             const pending = this._pendingViewEvents[eventName];
@@ -3777,7 +3857,7 @@ class BaseNode {
             if (propertyName && this.form.propDependencyBehaviour === 'strict') {
                 return existingProp === propertyName;
             }
-            if (propertyName && propertyName.startsWith('properties.')) {
+            if (isKeyedPath(propertyName)) {
                 return existingProp === propertyName;
             }
             return true;
@@ -3791,14 +3871,18 @@ class BaseNode {
                     if (propertyName && this.form.propDependencyBehaviour === 'strict') {
                         return changedPropertyName === propertyName;
                     }
-                    return propsToLook.includes(changedPropertyName) || (changedPropertyName.startsWith('properties.') && propertyName === changedPropertyName);
+                    return propsToLook.includes(changedPropertyName) || (isKeyedPath(changedPropertyName) && propertyName === changedPropertyName);
                 }) > -1;
                 if (isPropChanged) {
                     if (this.form.changeEventBehaviour === 'deps') {
                         dependent.dispatch(change);
                     }
                     else {
-                        dependent.dispatch(new Events_1.ExecuteRule());
+                        const rule = new Events_1.ExecuteRule();
+                        if (typeof rule._setTrace === 'function') {
+                            rule._setTrace(change, change.correlationId);
+                        }
+                        dependent.dispatch(rule);
                     }
                 }
             }, 'change', 'model');
@@ -3856,7 +3940,8 @@ class BaseNode {
         const toRun = onlyView
             ? entries.filter(e => e.dependentType === 'view' || e.dependentType === undefined)
             : entries;
-        if (entries.length === 0 && !onlyView && action.isCustomEvent) {
+        const hasViewSubscriber = entries.some(e => e.dependentType === 'view' || e.dependentType == null);
+        if (!hasViewSubscriber && !onlyView && action.isCustomEvent) {
             this._pendingViewEvents[action.type] = this._pendingViewEvents[action.type] || [];
             this._pendingViewEvents[action.type].push(action);
         }
@@ -3872,17 +3957,10 @@ class BaseNode {
     _setProperty(prop, newValue, notify = true, notifyChildren = (action) => { }) {
         var _a, _b;
         const oldValue = this._jsonModel[prop];
-        let isValueSame = false;
-        if (newValue !== null && oldValue !== null &&
-            typeof newValue === 'object' && typeof oldValue === 'object') {
-            isValueSame = JSON.stringify(newValue) === JSON.stringify(oldValue);
-        }
-        else {
-            isValueSame = oldValue === newValue;
-        }
+        const isValueSame = (0, JsonUtils_1.isSameValue)(newValue, oldValue);
         if (!isValueSame) {
             this._jsonModel[prop] = newValue;
-            const changeAction = (0, Events_1.propertyChange)(prop, newValue, oldValue);
+            const changeAction = (0, Events_1.propertyChange)(prop, newValue, oldValue, this._eventSource);
             if (notify) {
                 this.notifyDependents(changeAction);
             }
@@ -3994,6 +4072,36 @@ class BaseNode {
         }
         return this._lang;
     }
+    get data() {
+        return this._dataManager.proxy;
+    }
+    set data(v) {
+        if (this.isContainer) {
+            this.importData(v);
+        }
+    }
+    _notifyDataDependentsOnRebind() {
+        const dataNode = this.getDataNode();
+        if (!dataNode || !dataNode.$isDataGroup) {
+            return;
+        }
+        if (dataNode === this._lastRebindDataNode) {
+            return;
+        }
+        this._lastRebindDataNode = dataNode;
+        const seen = new Set();
+        const pending = this._jsonModel._dependents || [];
+        [...this._dependents, ...pending].forEach(({ propertyName }) => {
+            if (!propertyName || !propertyName.startsWith('data.') || seen.has(propertyName)) {
+                return;
+            }
+            seen.add(propertyName);
+            const key = propertyName.slice('data.'.length);
+            const node = dataNode.$getDataNode(key);
+            const value = node instanceof DataValue_1.default ? node.$value : undefined;
+            this.notifyDependents((0, Events_1.propertyChange)(propertyName, value, undefined, this._eventSource));
+        });
+    }
     get properties() {
         return this._propertiesManager.properties;
     }
@@ -4080,6 +4188,11 @@ class BaseNode {
         });
     }
 }
+BaseNode.RULE_NODE_METHODS = [
+    'subscribe', 'dispatch', 'validate', 'validateAsync', 'reset', 'focus',
+    'importData', 'exportData', 'getState', 'getChild', 'bind'
+];
+BaseNode.RULE_NODE_READONLY_BARE_PROPS = ['name', 'id', 'parent'];
 __decorate([
     dependencyTracked()
 ], BaseNode.prototype, "index", null);
@@ -4093,6 +4206,26 @@ __decorate([
     dependencyTracked()
 ], BaseNode.prototype, "label", null);
 exports.BaseNode = BaseNode;
+const modelDollarAliases = [...new Set([...exports.dynamicProps, 'name', 'id', 'type', 'fieldType', 'items', 'parent', 'data'])];
+const modelDollarWritable = new Set([...exports.editableProperties, 'data']);
+modelDollarAliases.forEach((prop) => {
+    const dollarProp = `$${prop}`;
+    if (Object.prototype.hasOwnProperty.call(BaseNode.prototype, dollarProp)) {
+        return;
+    }
+    const descriptor = {
+        configurable: true,
+        get() {
+            return this.withDependencyTrackingControl(true, () => this[prop]);
+        }
+    };
+    if (modelDollarWritable.has(prop)) {
+        descriptor.set = function (value) {
+            this[prop] = value;
+        };
+    }
+    Object.defineProperty(BaseNode.prototype, dollarProp, descriptor);
+});
 
 
 /***/ }),
@@ -4330,10 +4463,11 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 const JsonUtils_1 = __nccwpck_require__(92887);
+const BaseNode_1 = __nccwpck_require__(91709);
 const Scriptable_1 = __importDefault(__nccwpck_require__(52739));
 const Events_1 = __nccwpck_require__(30290);
 const DataGroup_1 = __importDefault(__nccwpck_require__(43244));
-const BaseNode_1 = __nccwpck_require__(91709);
+const BaseNode_2 = __nccwpck_require__(91709);
 const notifyChildrenAttributes = [
     'readOnly', 'enabled'
 ];
@@ -4358,6 +4492,9 @@ class Container extends Scriptable_1.default {
     get items() {
         return this._children;
     }
+    getChild(name) {
+        return this._children.find((c) => c.name === name);
+    }
     get maxItems() {
         return this._jsonModel.maxItems;
     }
@@ -4372,7 +4509,7 @@ class Container extends Scriptable_1.default {
                 this._childrenReference.pop();
             }
             const elems = this._children.splice(m, items2Remove);
-            this.notifyDependents((0, Events_1.propertyChange)('items', elems, null));
+            this.notifyDependents((0, Events_1.propertyChange)('items', elems, null, this._eventSource));
         }
     }
     get minItems() {
@@ -4388,7 +4525,7 @@ class Container extends Scriptable_1.default {
             for (let i = 0; i < items2Add; i++) {
                 elems.push(this._addChild(this._itemTemplate, null, true));
             }
-            this.notifyDependents((0, Events_1.propertyChange)('items', elems, null));
+            this.notifyDependents((0, Events_1.propertyChange)('items', elems, null, this._eventSource));
         }
     }
     hasDynamicItems() {
@@ -4615,9 +4752,16 @@ class Container extends Scriptable_1.default {
                     dataNode.$addDataNode(instanceIndex, _data, false, this);
                 }
                 retVal._initialize('create');
-                this.notifyDependents((0, Events_1.propertyChange)('items', retVal.getState(), null));
+                this.notifyDependents((0, Events_1.propertyChange)('items', retVal.getState(), null, this._eventSource));
                 retVal.dispatch(new Events_1.Initialize());
                 retVal.dispatch(new Events_1.ExecuteRule());
+                const decorate = (n) => { if (typeof n.runModelDecorator === 'function') {
+                    n.runModelDecorator();
+                } };
+                decorate(retVal);
+                if (typeof retVal.visit === 'function') {
+                    retVal.visit(decorate);
+                }
                 for (let i = instanceIndex + 1; i < this._children.length; i++) {
                     this._children[i].dispatch(new Events_1.ExecuteRule());
                 }
@@ -4641,7 +4785,7 @@ class Container extends Scriptable_1.default {
                 for (let i = instanceIndex; i < this._children.length; i++) {
                     this._children[i].dispatch(new Events_1.ExecuteRule());
                 }
-                this.notifyDependents((0, Events_1.propertyChange)('items', null, state));
+                this.notifyDependents((0, Events_1.propertyChange)('items', null, state, this._eventSource));
             }
         }
     }
@@ -4649,8 +4793,9 @@ class Container extends Scriptable_1.default {
         var _a;
         super.queueEvent(action);
         if ((_a = action.metadata) === null || _a === void 0 ? void 0 : _a.dispatch) {
+            const fromOrigin = action.target ? action : new BaseNode_1.ActionImplWithTarget(action, this);
             this.items.forEach(x => {
-                x.queueEvent(action);
+                x.queueEvent(fromOrigin);
             });
         }
     }
@@ -4726,11 +4871,11 @@ class Container extends Scriptable_1.default {
                 }
             }
             result.added.forEach((item) => {
-                this.notifyDependents((0, Events_1.propertyChange)('items', item.getState(), null));
+                this.notifyDependents((0, Events_1.propertyChange)('items', item.getState(), null, this._eventSource));
                 item.dispatch(new Events_1.Initialize());
             });
             result.removed.forEach((item) => {
-                this.notifyDependents((0, Events_1.propertyChange)('items', null, item.getState()));
+                this.notifyDependents((0, Events_1.propertyChange)('items', null, item.getState(), this._eventSource));
             });
         }
         this._children.forEach(x => {
@@ -4740,6 +4885,7 @@ class Container extends Scriptable_1.default {
             }
             x.syncDataAndFormModel(dataModel);
         });
+        this._notifyDataDependentsOnRebind();
         return result;
     }
     get activeChild() {
@@ -4754,7 +4900,7 @@ class Container extends Scriptable_1.default {
                 activeChild.activeChild = null;
                 activeChild = temp;
             }
-            const change = (0, Events_1.propertyChange)('activeChild', c === null || c === void 0 ? void 0 : c.getState(), (_a = this._activeChild) === null || _a === void 0 ? void 0 : _a.getState());
+            const change = (0, Events_1.propertyChange)('activeChild', c === null || c === void 0 ? void 0 : c.getState(), (_a = this._activeChild) === null || _a === void 0 ? void 0 : _a.getState(), this._eventSource);
             this._activeChild = c;
             if (this.parent && c !== null) {
                 this.parent.activeChild = this;
@@ -4793,7 +4939,7 @@ class Container extends Scriptable_1.default {
                     this.items.forEach((child) => {
                         if (change.currentValue !== child._jsonModel[change.propertyName]) {
                             child._jsonModel[change.propertyName] = change.currentValue;
-                            this.notifyDependents.call(child, (0, Events_1.propertyChange)(change.propertyName, child.getState()[change.propertyName], null));
+                            this.notifyDependents.call(child, (0, Events_1.propertyChange)(change.propertyName, child.getState()[change.propertyName], null, this._eventSource));
                         }
                         if (child.fieldType === 'panel') {
                             this.notifyChildren.call(child, action);
@@ -4805,18 +4951,155 @@ class Container extends Scriptable_1.default {
     }
 }
 __decorate([
-    (0, BaseNode_1.dependencyTracked)()
+    (0, BaseNode_2.dependencyTracked)()
 ], Container.prototype, "maxItems", null);
 __decorate([
-    (0, BaseNode_1.dependencyTracked)()
+    (0, BaseNode_2.dependencyTracked)()
 ], Container.prototype, "minItems", null);
 __decorate([
-    (0, BaseNode_1.dependencyTracked)()
+    (0, BaseNode_2.dependencyTracked)()
 ], Container.prototype, "valid", null);
 __decorate([
-    (0, BaseNode_1.dependencyTracked)()
+    (0, BaseNode_2.dependencyTracked)()
 ], Container.prototype, "activeChild", null);
 exports["default"] = Container;
+
+
+/***/ }),
+
+/***/ 99805:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.DataManager = void 0;
+const Events_1 = __nccwpck_require__(30290);
+const DataGroup_1 = __importDefault(__nccwpck_require__(43244));
+const DataValue_1 = __importDefault(__nccwpck_require__(49726));
+const JsonUtils_1 = __nccwpck_require__(92887);
+const isUnsafeKey = (key) => typeof key !== 'string' || JsonUtils_1.UNSAFE_KEYS.has(key);
+class DataManager {
+    constructor(host) {
+        this.host = host;
+        this._proxy = null;
+    }
+    get proxy() {
+        if (!this._proxy) {
+            this._proxy = new Proxy({}, {
+                get: (_t, key) => this._get(key),
+                set: (_t, key, value) => { this._set(key, value); return true; },
+                has: (_t, key) => this._has(key),
+                deleteProperty: (_t, key) => this._delete(key)
+            });
+        }
+        return this._proxy;
+    }
+    _group() {
+        const node = this.host.getDataNode();
+        return node && node.$isDataGroup ? node : undefined;
+    }
+    _resolve(key) {
+        const group = this._group();
+        let node = group ? group.$getDataNode(key) : undefined;
+        if (group && group.$type === 'array' && !(node instanceof DataValue_1.default)) {
+            node = undefined;
+        }
+        const fields = node && node.$_fields && node.$_fields.length > 0 ? node.$_fields : undefined;
+        return { group, node, fields };
+    }
+    _bailOnContainerBinding(key, node, verb) {
+        if (node.$isDataGroup) {
+            this.host.form.logger.warn(`$data: cannot ${verb} '${key}' — it is bound to a container; operate on the container's fields instead.`);
+            return true;
+        }
+        return false;
+    }
+    _get(key) {
+        if (isUnsafeKey(key)) {
+            return undefined;
+        }
+        const { group, node, fields } = this._resolve(key);
+        if (!group) {
+            return undefined;
+        }
+        if (group.$type === 'array' && !node) {
+            return undefined;
+        }
+        if (fields) {
+            this.host.ruleEngine.trackDependency(fields[0], 'value');
+        }
+        else {
+            this.host.ruleEngine.trackDependency(this.host, `data.${key}`);
+        }
+        return node ? node.$value : undefined;
+    }
+    _set(key, value) {
+        if (isUnsafeKey(key)) {
+            return;
+        }
+        const { group, node, fields } = this._resolve(key);
+        if (!group) {
+            return;
+        }
+        if (group.$type === 'array' && !node) {
+            return;
+        }
+        if (fields) {
+            if (this._bailOnContainerBinding(key, node, 'set')) {
+                return;
+            }
+            fields[0].value = value;
+            return;
+        }
+        const oldValue = node ? node.$value : undefined;
+        if ((0, JsonUtils_1.isSameValue)(oldValue, value)) {
+            return;
+        }
+        group.$addDataNode(key, this._createNode(key, value), true);
+        this.host.notifyDependents((0, Events_1.propertyChange)(`data.${key}`, value, oldValue));
+    }
+    _has(key) {
+        if (isUnsafeKey(key)) {
+            return false;
+        }
+        const { group, node } = this._resolve(key);
+        if (!group) {
+            return false;
+        }
+        return group.$type === 'array' ? !!node : group.$containsDataNode(key);
+    }
+    _delete(key) {
+        if (isUnsafeKey(key)) {
+            return true;
+        }
+        const { group, node, fields } = this._resolve(key);
+        if (!group || (group.$type === 'array' ? !node : !group.$containsDataNode(key))) {
+            return true;
+        }
+        if (fields) {
+            if (this._bailOnContainerBinding(key, node, 'delete')) {
+                return true;
+            }
+            fields[0].value = undefined;
+            return true;
+        }
+        const oldValue = node ? node.$value : undefined;
+        group.$removeDataNode(key);
+        this.host.notifyDependents((0, Events_1.propertyChange)(`data.${key}`, undefined, oldValue));
+        return true;
+    }
+    _createNode(key, value) {
+        const type = Array.isArray(value) ? 'array' : typeof value;
+        if (typeof value === 'object' && value !== null) {
+            return new DataGroup_1.default(key, value, type);
+        }
+        return new DataValue_1.default(key, value, type);
+    }
+}
+exports.DataManager = DataManager;
 
 
 /***/ }),
@@ -5323,7 +5606,11 @@ class Field extends Scriptable_1.default {
     }
     get displayValue() {
         var _a, _b;
-        if (this.displayValueExpression && typeof this.displayValueExpression === 'string' && this.displayValueExpression.length !== 0) {
+        const fn = this.getFnExpression('displayValueExpression');
+        if (fn) {
+            return this.executeExpression(fn);
+        }
+        if (typeof this.displayValueExpression === 'string' && this.displayValueExpression.length !== 0) {
             return this.executeExpression(this.displayValueExpression);
         }
         const df = this.displayFormat;
@@ -5430,7 +5717,7 @@ class Field extends Scriptable_1.default {
             }
         };
         const updates = this._applyUpdates(['valid', 'errorMessage', 'validationMessage', 'validity'], validationStateChanges);
-        const changeAction = new Events_1.Change({ changes: changes.concat(Object.values(updates)) });
+        const changeAction = new Events_1.Change({ changes: changes.concat(Object.values(updates)), eventSource: this._eventSource });
         this.dispatch(changeAction);
     }
     _updateRuleNodeReference(value) {
@@ -5568,6 +5855,10 @@ class Field extends Scriptable_1.default {
         };
     }
     checkValidationExpression() {
+        const fn = this.getFnExpression('validationExpression');
+        if (fn) {
+            return this.executeExpression(fn);
+        }
         const validationExp = this._jsonModel.validationExpression;
         if (typeof validationExp === 'string' && validationExp.length !== 0) {
             return this.executeExpression(validationExp);
@@ -5619,6 +5910,10 @@ class Field extends Scriptable_1.default {
     }
     get enforceEnum() {
         return this._jsonModel.enforceEnum;
+    }
+    set enforceEnum(e) {
+        const coerced = e === 'true' ? true : e === 'false' ? false : e;
+        this._setProperty('enforceEnum', coerced);
     }
     get tooltip() {
         return this._jsonModel.tooltip;
@@ -5755,13 +6050,13 @@ class Field extends Scriptable_1.default {
         const changes = this.evaluateConstraints();
         __classPrivateFieldGet(this, _Field_instances, "m", _Field_triggerValidationEvent).call(this);
         if (changes.validity) {
-            this.notifyDependents(new Events_1.Change({ changes: Object.values(changes) }));
+            this.notifyDependents(new Events_1.Change({ changes: Object.values(changes), eventSource: this._eventSource }));
         }
         return this.valid ? [] : [new types_1.ValidationError(this.id, [this._jsonModel.errorMessage])];
     }
     syncDataAndFormModel(dataNode) {
         if (dataNode !== undefined && dataNode !== EmptyDataValue_1.default && dataNode.$value !== this._jsonModel.value) {
-            const changeAction = (0, Events_1.propertyChange)('value', dataNode.$value, this._jsonModel.value);
+            const changeAction = (0, Events_1.propertyChange)('value', dataNode.$value, this._jsonModel.value, this._eventSource);
             this._jsonModel.value = dataNode.$value;
             this.queueEvent(changeAction);
             this.evaluateConstraints();
@@ -5782,7 +6077,7 @@ class Field extends Scriptable_1.default {
             'validity': Object.assign({ valid: false }, (constraint != null ? { [types_1.constraintKeys[constraint]]: true } : { customConstraint: true }))
         };
         const updates = this._applyUpdates(['valid', 'errorMessage', 'validationMessage', 'validity'], changes);
-        const changeAction = new Events_1.Change({ changes: [].concat(Object.values(updates)) });
+        const changeAction = new Events_1.Change({ changes: [].concat(Object.values(updates)), eventSource: this._eventSource });
         if (changeAction.payload.changes.length !== 0) {
             this.triggerValidationEvent(updates);
             this.dispatch(changeAction);
@@ -5832,6 +6127,9 @@ __decorate([
 __decorate([
     (0, BaseNode_1.include)('text-input', 'date-input', 'file-input', 'email', 'datetime-input')
 ], Field.prototype, "format", null);
+__decorate([
+    (0, BaseNode_1.dependencyTracked)()
+], Field.prototype, "enforceEnum", null);
 __decorate([
     (0, BaseNode_1.include)('text-input')
 ], Field.prototype, "maxLength", null);
@@ -6062,7 +6360,7 @@ class FileUpload extends Field_1.default {
                 if (!res.valid) {
                     this.form.logger.debug(`unable to bind ${this.name} to data`);
                 }
-                this.form.getEventQueue().queue(this, (0, Events_1.propertyChange)('value', res.value, this._jsonModel.value));
+                this.form.getEventQueue().queue(this, (0, Events_1.propertyChange)('value', res.value, this._jsonModel.value, this._eventSource));
                 this._jsonModel.value = res.value;
             }
             else {
@@ -6127,6 +6425,7 @@ class Form extends Container_1.default {
         this.promises = [];
         this._captcha = null;
         this.dataRefRegex = /("[^"]+?"|[^.]+?)(?:\.|$)/g;
+        this._correlationCounter = 0;
         this._logger = new Logger_1.Logger(logLevel);
         this._applyDefaultsInModel();
         if (mode === 'create') {
@@ -6206,6 +6505,10 @@ class Form extends Container_1.default {
         const finalData = (_a = this.getDataNode()) === null || _a === void 0 ? void 0 : _a.$value;
         this._exportDataAttachmentMap = {};
         return finalData;
+    }
+    request(options) {
+        const context = this.buildRuleContext();
+        return (0, FunctionRuntime_1.runRequestPipeline)(options, { globals: context });
     }
     setAdditionalSubmitMetadata(metadata) {
         this.additionalSubmitMetadata = Object.assign(Object.assign({}, this.additionalSubmitMetadata), metadata);
@@ -6344,6 +6647,10 @@ class Form extends Container_1.default {
     clearIdRegistry() {
         var _a;
         (_a = this._idSet) === null || _a === void 0 ? void 0 : _a.clear();
+    }
+    nextCorrelationId() {
+        this._correlationCounter += 1;
+        return `c${this._correlationCounter}`;
     }
     fieldAdded(field) {
         if (field.fieldType === 'captcha' && !this._captcha) {
@@ -6578,6 +6885,16 @@ const FormCreationUtils_1 = __nccwpck_require__(30540);
 const FunctionRuntime_1 = __nccwpck_require__(72306);
 const FormUtils_1 = __nccwpck_require__(2288);
 const DataGroup_1 = __importDefault(__nccwpck_require__(43244));
+const decorateFormModels = (form) => {
+    const runOn = (n) => { if (typeof n.runModelDecorator === 'function') {
+        n.runModelDecorator();
+    } };
+    runOn(form);
+    if (typeof form.visit === 'function') {
+        form.visit(runOn);
+    }
+    form.getEventQueue().runPendingQueue();
+};
 const createFormInstanceHelper = (formModel, logLevel, fModel) => {
     let f = fModel;
     if (f == null) {
@@ -6597,6 +6914,7 @@ const createFormInstance = (formModel, callback, logLevel = 'error', fModel = un
             callback(f);
         }
         f.getEventQueue().runPendingQueue();
+        decorateFormModels(f);
         return f;
     }
     catch (e) {
@@ -6612,6 +6930,7 @@ const createFormInstanceSync = (formModel, callback, logLevel = 'error', fModel 
             callback(f);
         }
         f.getEventQueue().runPendingQueue();
+        decorateFormModels(f);
         yield f.waitForPromises();
         return f;
     }
@@ -6633,6 +6952,7 @@ const restoreFormInstance = (formModel, data = null, { logLevel } = defaultOptio
             form.syncDataAndFormModel(form.getDataNode());
         }
         form.getEventQueue().empty();
+        decorateFormModels(form);
         return form;
     }
     catch (e) {
@@ -6767,6 +7087,31 @@ exports.InstanceManager = InstanceManager;
 
 /***/ }),
 
+/***/ 93141:
+/***/ ((__unused_webpack_module, exports) => {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.clearModelDecorators = exports.getModelDecorator = exports.registerModelDecorator = void 0;
+const modelDecorators = Object.create(null);
+function registerModelDecorator(viewType, decorator) {
+    if (typeof viewType === 'string' && viewType.length > 0 && typeof decorator === 'function') {
+        modelDecorators[viewType] = decorator;
+    }
+}
+exports.registerModelDecorator = registerModelDecorator;
+function getModelDecorator(viewType) {
+    return typeof viewType === 'string' ? modelDecorators[viewType] : undefined;
+}
+exports.getModelDecorator = getModelDecorator;
+function clearModelDecorators() {
+    Object.keys(modelDecorators).forEach((k) => delete modelDecorators[k]);
+}
+exports.clearModelDecorators = clearModelDecorators;
+
+
+/***/ }),
+
 /***/ 69200:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -6801,6 +7146,7 @@ class PropertiesManager {
         this.host = host;
         this._definedProperties = new Set();
         this._propertiesWrapper = {};
+        this._proxy = null;
         this._initialized = false;
     }
     get properties() {
@@ -6808,7 +7154,7 @@ class PropertiesManager {
             this._setupInitialProperties();
             this._initialized = true;
         }
-        return this._propertiesWrapper;
+        return this._getProxy();
     }
     set properties(p) {
         const oldProperties = this.host._jsonModel.properties || {};
@@ -6823,6 +7169,25 @@ class PropertiesManager {
                 this.host.notifyDependents(changeAction);
             }
         });
+    }
+    _getProxy() {
+        if (!this._proxy) {
+            this._proxy = new Proxy(this._propertiesWrapper, {
+                get: (target, key, receiver) => {
+                    if (typeof key === 'string' && !this._definedProperties.has(key) && !key.startsWith('fd:')) {
+                        this.host.ruleEngine.trackDependency(this.host, `properties.${key}`);
+                    }
+                    return Reflect.get(target, key, receiver);
+                },
+                set: (target, key, value, receiver) => {
+                    if (typeof key === 'string') {
+                        this._ensurePropertyDescriptor(key);
+                    }
+                    return Reflect.set(target, key, value, receiver);
+                }
+            });
+        }
+        return this._proxy;
     }
     ensurePropertyDescriptor(propertyName) {
         this._ensurePropertyDescriptor(propertyName);
@@ -6863,13 +7228,30 @@ class PropertiesManager {
         });
         this._definedProperties.add(prop);
     }
+    updateProperty(path, value) {
+        const segments = (path || '').split('.');
+        const unsafe = segments.some(s => s === '' || s === '__proto__' || s === 'constructor' || s === 'prototype');
+        if (unsafe) {
+            return false;
+        }
+        if (segments.length === 1) {
+            this.updateSimpleProperty(path, value);
+        }
+        else {
+            this.updateNestedProperty(path, value);
+        }
+        return true;
+    }
     updateNestedProperty(propertyPath, value) {
         const parts = propertyPath.split('.');
         const topLevelProp = parts[0];
         this._ensurePropertyDescriptor(topLevelProp);
         const properties = this.host._jsonModel.properties || {};
         const updatedProperties = JSON.parse(JSON.stringify(properties));
-        const currentObj = updatedProperties[topLevelProp] || {};
+        let currentObj = updatedProperties[topLevelProp];
+        if (typeof currentObj !== 'object' || currentObj === null) {
+            currentObj = {};
+        }
         updatedProperties[topLevelProp] = currentObj;
         let parentObj = currentObj;
         for (let i = 1; i < parts.length - 1; i++) {
@@ -6906,11 +7288,28 @@ exports.PropertiesManager = PropertiesManager;
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 const BaseNode_1 = __nccwpck_require__(91709);
 const Events_1 = __nccwpck_require__(30290);
+const ModelDecorators_1 = __nccwpck_require__(93141);
+const FunctionRuntime_1 = __nccwpck_require__(72306);
+const projectActionToRuleNodes = (action, selfRuleNode) => {
+    if (action == null) {
+        return undefined;
+    }
+    return {
+        type: action.type,
+        payload: action.payload,
+        target: action.target ? action.target.getRuleNode() : selfRuleNode,
+        currentTarget: action.currentTarget ? action.currentTarget.getRuleNode() : selfRuleNode,
+        originalAction: projectActionToRuleNodes(action.originalAction, selfRuleNode),
+        correlationId: action.correlationId
+    };
+};
 class Scriptable extends BaseNode_1.BaseNode {
     constructor() {
         super(...arguments);
         this._events = {};
         this._rules = {};
+        this._fnExpressions = {};
+        this._modelDecorated = false;
     }
     getRules() {
         return typeof this._jsonModel.rules !== 'object' ? {} : this._jsonModel.rules;
@@ -6988,6 +7387,9 @@ class Scriptable extends BaseNode_1.BaseNode {
         return state;
     }
     applyUpdates(updates) {
+        if (updates != null && typeof updates === 'object' && updates[BaseNode_1.target] instanceof BaseNode_1.BaseNode) {
+            return;
+        }
         if (typeof updates === 'object') {
             if (updates !== null) {
                 Object.entries(updates).forEach(([key, value]) => {
@@ -7012,40 +7414,64 @@ class Scriptable extends BaseNode_1.BaseNode {
     }
     applyPropertiesTarget(prop, value) {
         const path = prop.slice('properties.'.length);
-        const segments = path.split('.');
-        const unsafe = segments.some(s => s === '' || s === '__proto__' || s === 'constructor' || s === 'prototype');
-        if (unsafe) {
+        if (!this.getPropertiesManager().updateProperty(path, value)) {
             this.form.logger.warn(`${prop} is not a valid properties path.`);
-            return;
-        }
-        const pm = this.getPropertiesManager();
-        if (segments.length === 1) {
-            pm.updateSimpleProperty(path, value);
-        }
-        else {
-            pm.updateNestedProperty(path, value);
         }
     }
+    bind(propertyName, exprOrFn) {
+        if (typeof exprOrFn === 'function') {
+            this._fnExpressions[propertyName] = exprOrFn;
+            if (BaseNode_1.expressionProperties.indexOf(propertyName) === -1) {
+                this.queueEvent(new Events_1.ExecuteRule());
+            }
+            return;
+        }
+        delete this._fnExpressions[propertyName];
+        if (BaseNode_1.expressionProperties.indexOf(propertyName) > -1) {
+            this._jsonModel[propertyName] = exprOrFn;
+            return;
+        }
+        this._jsonModel.rules = this._jsonModel.rules || {};
+        this._jsonModel.rules[propertyName] = exprOrFn;
+        delete this._rules[propertyName];
+        this.queueEvent(new Events_1.ExecuteRule());
+    }
+    getFnExpression(propertyName) {
+        return this._fnExpressions[propertyName];
+    }
     executeAllRules(context) {
-        const entries = Object.entries(this.getRules());
+        const fnRules = {};
+        Object.entries(this._fnExpressions).forEach(([k, fn]) => {
+            if (fn && BaseNode_1.expressionProperties.indexOf(k) === -1) {
+                fnRules[k] = fn;
+            }
+        });
+        const entries = Object.entries(Object.assign(Object.assign({}, this.getRules()), fnRules));
         if (entries.length > 0) {
             const scope = this.getExpressionScope();
             entries.forEach(([prop, rule]) => {
-                const node = this.getCompiledRule(prop, rule);
-                if (node) {
-                    const newVal = this.ruleEngine.execute(node, scope, context, true, rule);
-                    if (prop.startsWith('properties.')) {
-                        this.applyPropertiesTarget(prop, newVal);
+                let newVal;
+                if (typeof rule === 'function') {
+                    newVal = this.ruleEngine.executeFunction(rule, context, true, `<rule:${prop}>`);
+                }
+                else {
+                    const node = this.getCompiledRule(prop, rule);
+                    if (!node) {
+                        return;
                     }
-                    else if (BaseNode_1.editableProperties.indexOf(prop) > -1) {
-                        const oldAndNewValueAreEmpty = this.isEmpty() && this.isEmpty(newVal) && prop === 'value';
-                        if (!oldAndNewValueAreEmpty) {
-                            this[prop] = newVal;
-                        }
+                    newVal = this.ruleEngine.execute(node, scope, context, true, rule);
+                }
+                if (prop.startsWith('properties.')) {
+                    this.applyPropertiesTarget(prop, newVal);
+                }
+                else if (BaseNode_1.editableProperties.indexOf(prop) > -1) {
+                    const oldAndNewValueAreEmpty = this.isEmpty() && this.isEmpty(newVal) && prop === 'value';
+                    if (!oldAndNewValueAreEmpty) {
+                        this[prop] = newVal;
                     }
-                    else {
-                        this.form.logger.warn(`${prop} is not a valid editable property.`);
-                    }
+                }
+                else {
+                    this.form.logger.warn(`${prop} is not a valid editable property.`);
                 }
             });
         }
@@ -7096,7 +7522,23 @@ class Scriptable extends BaseNode_1.BaseNode {
         if (node) {
             updates = this.ruleEngine.execute(node, this.getExpressionScope(), context, false, eString);
             if (updates instanceof Promise) {
-                this.form.addPromises(updates);
+                this.form.addPromises(updates.then((resolved) => {
+                    if (typeof resolved !== 'undefined' && resolved != null) {
+                        this.applyUpdates(resolved);
+                    }
+                }).catch((e) => {
+                    var _a;
+                    const errorMsg = `Async handler \`${eString}\` on "${this.name}" failed: ${e}`;
+                    this.form.logger.error(errorMsg);
+                    this.form.dispatch(new Events_1.ScriptError({
+                        name: this.name,
+                        error: errorMsg,
+                        event: (_a = context === null || context === void 0 ? void 0 : context.$event) === null || _a === void 0 ? void 0 : _a.type,
+                        rule: eString,
+                        stack: e instanceof Error ? e.stack : undefined
+                    }, false));
+                }));
+                return;
             }
         }
         if (typeof updates !== 'undefined' && updates != null) {
@@ -7108,14 +7550,42 @@ class Scriptable extends BaseNode_1.BaseNode {
             this.executeAllRules(context);
         }
     }
-    executeExpression(expr) {
-        const ruleContext = {
+    runModelDecorator() {
+        if (this._modelDecorated) {
+            return;
+        }
+        const viewType = this[':type'];
+        const decorator = (0, ModelDecorators_1.getModelDecorator)(viewType);
+        if (decorator) {
+            this._modelDecorated = true;
+            this.ruleEngine.setModelDecorating(true);
+            try {
+                this.withDependencyTrackingControl(true, () => {
+                    decorator((0, FunctionRuntime_1.buildRuleGlobals)({ globals: this.buildRuleContext() }));
+                });
+            }
+            catch (e) {
+                this.form.logger.error(`Model decorator for ':type'="${viewType}" on "${this.name}" failed: ${e}`);
+            }
+            finally {
+                this.ruleEngine.setModelDecorating(false);
+            }
+        }
+    }
+    buildRuleContext() {
+        return {
             'form': this.form,
             '$form': this.form.getRuleNode(),
             '$field': this.getRuleNode(),
             'field': this,
             '$fragment': this.getFragmentRuleNode()
         };
+    }
+    executeExpression(expr) {
+        const ruleContext = this.buildRuleContext();
+        if (typeof expr === 'function') {
+            return this.ruleEngine.executeFunction(expr, ruleContext, false, `<fn:${this.name}>`);
+        }
         const node = this.ruleEngine.compileRule(expr, this.lang);
         return this.ruleEngine.execute(node, this.getExpressionScope(), ruleContext, false, expr);
     }
@@ -7126,18 +7596,17 @@ class Scriptable extends BaseNode_1.BaseNode {
     }
     executeAction(action) {
         var _a;
-        const context = {
-            'form': this.form,
-            '$form': this.form.getRuleNode(),
-            '$field': this.getRuleNode(),
-            'field': this,
-            '$fragment': this.getFragmentRuleNode(),
-            '$event': {
-                type: action.type,
-                payload: action.payload,
-                target: this.getRuleNode()
-            }
-        };
+        if (!action.correlationId
+            && typeof action._setTrace === 'function'
+            && typeof this.form.nextCorrelationId === 'function') {
+            action._setTrace(action.originalAction, this.form.nextCorrelationId());
+        }
+        const context = this.buildRuleContext();
+        context.$event = projectActionToRuleNodes(action, this.getRuleNode());
+        context.$event.isSelfChange = (0, Events_1.isSelfChange)(action);
+        context.$event.isDependencyChange = (0, Events_1.isDependencyChange)(action);
+        context.$event.isUserChange = (0, Events_1.isUserChange)(action);
+        Object.defineProperty(context.$event, '__action', { value: action, enumerable: false });
         this.ruleEngine.setDependencyTracking(['change', 'executeRule'].includes(action.type));
         const eventName = action.isCustomEvent ? `custom:${action.type}` : action.type;
         const funcName = action.isCustomEvent ? `custom_${action.type}` : action.type;
@@ -7303,18 +7772,33 @@ exports["default"] = EventQueue;
 /***/ }),
 
 /***/ 30290:
-/***/ ((__unused_webpack_module, exports) => {
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.ScriptError = exports.RequestFailure = exports.RequestSuccess = exports.RemoveInstance = exports.AddInstance = exports.RemoveItem = exports.AddItem = exports.CustomEvent = exports.FieldChanged = exports.Reset = exports.SubmitError = exports.SubmitFailure = exports.SubmitSuccess = exports.Save = exports.Submit = exports.Focus = exports.ValidationComplete = exports.Blur = exports.Click = exports.FormLoad = exports.Initialize = exports.propertyChange = exports.ExecuteRule = exports.Valid = exports.Invalid = exports.UIChange = exports.Change = void 0;
-var EventSource;
-(function (EventSource) {
-    EventSource["CODE"] = "code";
-    EventSource["UI"] = "ui";
-})(EventSource || (EventSource = {}));
-class ActionImpl {
+exports.ScriptError = exports.RequestFailure = exports.RequestSuccess = exports.RemoveInstance = exports.AddInstance = exports.RemoveItem = exports.AddItem = exports.CustomEvent = exports.FieldChanged = exports.Reset = exports.SubmitError = exports.SubmitFailure = exports.SubmitSuccess = exports.Save = exports.Submit = exports.Focus = exports.ValidationComplete = exports.Blur = exports.Click = exports.FormLoad = exports.Initialize = exports.propertyChange = exports.ExecuteRule = exports.Valid = exports.Invalid = exports.UIChange = exports.Change = exports.BaseAction = exports.isUserChange = exports.isDependencyChange = exports.isSelfChange = void 0;
+const index_1 = __nccwpck_require__(40624);
+const isSelfChange = (ev) => (ev === null || ev === void 0 ? void 0 : ev.originalAction) == null && (ev === null || ev === void 0 ? void 0 : ev.target) === (ev === null || ev === void 0 ? void 0 : ev.currentTarget);
+exports.isSelfChange = isSelfChange;
+const isDependencyChange = (ev) => (ev === null || ev === void 0 ? void 0 : ev.originalAction) != null || (ev === null || ev === void 0 ? void 0 : ev.target) !== (ev === null || ev === void 0 ? void 0 : ev.currentTarget);
+exports.isDependencyChange = isDependencyChange;
+const isUserChange = (ev) => { var _a; return ((_a = ev === null || ev === void 0 ? void 0 : ev.payload) === null || _a === void 0 ? void 0 : _a.eventSource) === index_1.EventSource.UI && (0, exports.isSelfChange)(ev); };
+exports.isUserChange = isUserChange;
+class BaseAction {
+    get isSelfChange() {
+        return (0, exports.isSelfChange)(this);
+    }
+    get isDependencyChange() {
+        return (0, exports.isDependencyChange)(this);
+    }
+    get isUserChange() {
+        return (0, exports.isUserChange)(this);
+    }
+}
+exports.BaseAction = BaseAction;
+class ActionImpl extends BaseAction {
     constructor(payload, type, _metadata) {
+        super();
         this._metadata = _metadata;
         this._payload = payload;
         this._type = type;
@@ -7333,6 +7817,16 @@ class ActionImpl {
     }
     get currentTarget() {
         return this._currentTarget;
+    }
+    get originalAction() {
+        return this._originalAction;
+    }
+    get correlationId() {
+        return this._correlationId;
+    }
+    _setTrace(originalAction, correlationId) {
+        Object.defineProperty(this, '_originalAction', { value: originalAction, enumerable: false, writable: true, configurable: true });
+        Object.defineProperty(this, '_correlationId', { value: correlationId, enumerable: false, writable: true, configurable: true });
     }
     get isCustomEvent() {
         return false;
@@ -7384,7 +7878,7 @@ class ExecuteRule extends ActionImpl {
     }
 }
 exports.ExecuteRule = ExecuteRule;
-const propertyChange = (propertyName, currentValue, prevValue) => {
+const propertyChange = (propertyName, currentValue, prevValue, eventSource = index_1.EventSource.CODE) => {
     return new Change({
         changes: [
             {
@@ -7392,7 +7886,8 @@ const propertyChange = (propertyName, currentValue, prevValue) => {
                 currentValue,
                 prevValue
             }
-        ]
+        ],
+        eventSource
     });
 };
 exports.propertyChange = propertyChange;
@@ -7469,7 +7964,7 @@ class Reset extends ActionImpl {
 }
 exports.Reset = Reset;
 class FieldChanged extends ActionImpl {
-    constructor(changes, field, eventSource = EventSource.CODE) {
+    constructor(changes, field, eventSource = index_1.EventSource.CODE) {
         super({
             field,
             changes,
@@ -7830,7 +8325,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.sanitizeName = exports.Captcha = exports.EmailInput = exports.SubmitMetaData = exports.isEmpty = exports.request = exports.FunctionRuntime = exports.readAttachments = exports.extractFileInfo = exports.getFileSizeInBytes = exports.Scriptable = exports.Node = exports.FormMetaData = exports.FileUpload = exports.FileObject = exports.Fieldset = exports.Field = exports.Container = exports.CheckboxGroup = exports.Checkbox = exports.BaseNode = exports.Form = void 0;
+exports.sanitizeName = exports.Captcha = exports.EmailInput = exports.SubmitMetaData = exports.isEmpty = exports.request = exports.FunctionRuntime = exports.readAttachments = exports.extractFileInfo = exports.getFileSizeInBytes = exports.Scriptable = exports.Node = exports.FormMetaData = exports.FileUpload = exports.FileObject = exports.Fieldset = exports.Field = exports.Container = exports.CheckboxGroup = exports.Checkbox = exports.BaseNode = exports.Form = exports.registerModelDecorator = void 0;
 __exportStar(__nccwpck_require__(29561), exports);
 __exportStar(__nccwpck_require__(40624), exports);
 __exportStar(__nccwpck_require__(30290), exports);
@@ -7838,6 +8333,8 @@ __exportStar(__nccwpck_require__(55350), exports);
 __exportStar(__nccwpck_require__(92887), exports);
 __exportStar(__nccwpck_require__(86844), exports);
 __exportStar(__nccwpck_require__(85444), exports);
+var ModelDecorators_1 = __nccwpck_require__(93141);
+Object.defineProperty(exports, "registerModelDecorator", ({ enumerable: true, get: function () { return ModelDecorators_1.registerModelDecorator; } }));
 const FormUtils_1 = __nccwpck_require__(2288);
 Object.defineProperty(exports, "getFileSizeInBytes", ({ enumerable: true, get: function () { return FormUtils_1.getFileSizeInBytes; } }));
 Object.defineProperty(exports, "extractFileInfo", ({ enumerable: true, get: function () { return FormUtils_1.extractFileInfo; } }));
@@ -7895,7 +8392,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
     });
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.FunctionRuntime = exports.submit = exports.request = void 0;
+exports.buildRuleGlobals = exports.FunctionRuntime = exports.runRequestPipeline = exports.submit = exports.request = void 0;
 const Events_1 = __nccwpck_require__(30290);
 const Fetch_1 = __nccwpck_require__(89516);
 const FileObject_1 = __nccwpck_require__(46477);
@@ -7938,9 +8435,10 @@ const request = (context, uri, httpVerb, payload, success, error, headers) => __
         headers = Object.assign({}, payload.headers);
         if (payload.options && typeof payload.options === 'object') {
             Object.assign(requestOptions, payload.options);
+            requestOptions.method = httpVerb;
         }
-        payload = payload.body;
         cryptoMetadata = payload.cryptoMetadata;
+        payload = payload.body;
         inputPayload = payload;
     }
     if (payload && payload instanceof FileObject_1.FileObject && payload.data instanceof File) {
@@ -7951,8 +8449,8 @@ const request = (context, uri, httpVerb, payload, success, error, headers) => __
     else if (payload instanceof FormData) {
         inputPayload = payload;
     }
-    else if (payload && (typeof payload === 'string' || (typeof payload === 'object' && Object.keys(payload).length > 0))) {
-        const headerNames = Object.keys(headers);
+    else {
+        const headerNames = Object.keys(headers || {});
         if (headerNames.length > 0) {
             requestOptions.headers = Object.assign(Object.assign({}, headers), (headerNames.indexOf('Content-Type') === -1 ? { 'Content-Type': 'application/json' } : {}));
         }
@@ -7960,28 +8458,30 @@ const request = (context, uri, httpVerb, payload, success, error, headers) => __
             requestOptions.headers = { 'Content-Type': 'application/json' };
         }
         const contentType = ((_a = requestOptions === null || requestOptions === void 0 ? void 0 : requestOptions.headers) === null || _a === void 0 ? void 0 : _a['Content-Type']) || 'application/json';
-        if (typeof payload === 'object') {
-            if (contentType === 'application/json') {
-                inputPayload = JSON.stringify(payload);
+        if (payload && (typeof payload === 'string' || (typeof payload === 'object' && Object.keys(payload).length > 0))) {
+            if (typeof payload === 'object') {
+                if (contentType === 'application/json') {
+                    inputPayload = JSON.stringify(payload);
+                }
+                else if (contentType.indexOf('multipart/form-data') > -1) {
+                    inputPayload = multipartFormData(payload);
+                }
+                else if (contentType.indexOf('application/x-www-form-urlencoded') > -1) {
+                    inputPayload = urlEncoded(payload);
+                }
             }
-            else if (contentType.indexOf('multipart/form-data') > -1) {
-                inputPayload = multipartFormData(payload);
+            if (contentType === 'text/plain') {
+                inputPayload = String(payload);
             }
-            else if (contentType.indexOf('application/x-www-form-urlencoded') > -1) {
-                inputPayload = urlEncoded(payload);
-            }
-        }
-        if (contentType === 'text/plain') {
-            inputPayload = String(payload);
         }
     }
     const dispatchErrorEvents = (response, errorType, enhancedPayload) => {
-        const eName = getCustomEventName(errorType);
         if (errorType === 'submitError') {
             context.form.dispatch(new Events_1.SubmitError(response, true));
             context.form.dispatch(new Events_1.SubmitFailure(response, true));
         }
-        else {
+        else if (errorType) {
+            const eName = getCustomEventName(errorType);
             if (context.field) {
                 context.field.dispatch(new Events_1.CustomEvent(eName, response, true));
             }
@@ -8003,11 +8503,11 @@ const request = (context, uri, httpVerb, payload, success, error, headers) => __
         response.submitter = targetField;
         const enhancedPayload = Object.assign(Object.assign({}, baseEnhancedPayload), { response, request: response.originalRequest });
         if ((response === null || response === void 0 ? void 0 : response.status) >= 200 && (response === null || response === void 0 ? void 0 : response.status) <= 299) {
-            const eName = getCustomEventName(success);
             if (success === 'submitSuccess') {
                 context.form.dispatch(new Events_1.SubmitSuccess(response, true));
             }
-            else {
+            else if (success) {
+                const eName = getCustomEventName(success);
                 if (context.field) {
                     context.field.dispatch(new Events_1.CustomEvent(eName, response, true));
                 }
@@ -8032,7 +8532,6 @@ const request = (context, uri, httpVerb, payload, success, error, headers) => __
         };
         const enhancedPayload = Object.assign(Object.assign({}, baseEnhancedPayload), { response: networkErrorResponse });
         dispatchErrorEvents(networkErrorResponse, error, enhancedPayload);
-        context.form.dispatch(new Events_1.RequestFailure(enhancedPayload, false));
     }
 });
 exports.request = request;
@@ -8067,6 +8566,40 @@ const submit = (context, success, error, submitAs = 'multipart/form-data', input
     });
 });
 exports.submit = submit;
+const runRequestPipeline = (options, interpreter, expressionScope = undefined) => __awaiter(void 0, void 0, void 0, function* () {
+    const { url, method = 'GET', body: requestBody = {}, headers = { 'Content-Type': 'application/json' }, options: fetchOptions, publicKey, cryptoMetadata } = options;
+    const funcs = FunctionRuntimeImpl.getInstance().getFunctions();
+    const externalizedUrl = yield funcs.externalize._func.call(undefined, [url], expressionScope, interpreter);
+    const encryptPayload = { body: requestBody, headers };
+    if (fetchOptions != null) {
+        encryptPayload.options = fetchOptions;
+    }
+    if (cryptoMetadata != null) {
+        encryptPayload.cryptoMetadata = cryptoMetadata;
+    }
+    const encryptArgs = publicKey !== undefined ? [encryptPayload, publicKey] : [encryptPayload];
+    const payload = yield funcs.encrypt._func.call(undefined, encryptArgs, expressionScope, interpreter);
+    const requestArgs = [externalizedUrl, method, payload, '', ''];
+    const requestFn = yield funcs.requestWithRetry._func.call(undefined, requestArgs, expressionScope, interpreter);
+    const response = yield funcs.retryHandler._func.call(undefined, [requestFn], expressionScope, interpreter);
+    const isSuccess = (response === null || response === void 0 ? void 0 : response.status) >= 200 && (response === null || response === void 0 ? void 0 : response.status) <= 299;
+    if (isSuccess && (response === null || response === void 0 ? void 0 : response.body)) {
+        const decryptedBody = yield funcs.decrypt._func.call(undefined, [response.body, response.originalRequest], expressionScope, interpreter);
+        return {
+            ok: true,
+            status: response.status,
+            body: decryptedBody,
+            headers: response.headers
+        };
+    }
+    return {
+        ok: isSuccess,
+        status: response === null || response === void 0 ? void 0 : response.status,
+        body: response === null || response === void 0 ? void 0 : response.body,
+        headers: response === null || response === void 0 ? void 0 : response.headers
+    };
+});
+exports.runRequestPipeline = runRequestPipeline;
 const multipartFormData = (data, attachments) => {
     const formData = new FormData();
     Object.entries(data).forEach(([key, value]) => {
@@ -8128,7 +8661,7 @@ const createAction = (name, payload = {}, dispatch = false) => {
         case 'focus':
             return new Events_1.Focus(payload);
         default:
-            console.error('invalid action');
+            return undefined;
     }
 };
 class FunctionRuntimeImpl {
@@ -8146,136 +8679,8 @@ class FunctionRuntimeImpl {
             let finalFunction = funcDef;
             if (typeof funcDef === 'function') {
                 finalFunction = {
-                    _func: (args, data, interpreter) => {
-                        var _a;
-                        const globals = {
-                            form: interpreter.globals.$form,
-                            field: interpreter.globals.$field,
-                            event: interpreter.globals.$event,
-                            fragment: (_a = interpreter.globals.$fragment) !== null && _a !== void 0 ? _a : interpreter.globals.$form,
-                            functions: {
-                                setProperty: (target, payload) => {
-                                    const eventName = 'custom:setProperty';
-                                    const args = [target, eventName, payload];
-                                    return FunctionRuntimeImpl.getInstance().getFunctions().dispatchEvent._func.call(undefined, args, data, interpreter);
-                                },
-                                reset: (target) => {
-                                    const eventName = 'reset';
-                                    target = target || 'reset';
-                                    const args = [target, eventName];
-                                    interpreter.globals.form.logger.warn('This usage of reset is deprecated. Please see the documentation and update.');
-                                    return FunctionRuntimeImpl.getInstance().getFunctions().dispatchEvent._func.call(undefined, args, data, interpreter);
-                                },
-                                validate: (target) => {
-                                    const args = [target];
-                                    return FunctionRuntimeImpl.getInstance().getFunctions().validate._func.call(undefined, args, data, interpreter);
-                                },
-                                importData: (inputData, qualifiedName) => {
-                                    const args = [inputData, qualifiedName];
-                                    return FunctionRuntimeImpl.getInstance().getFunctions().importData._func.call(undefined, args, data, interpreter);
-                                },
-                                exportData: () => {
-                                    return FunctionRuntimeImpl.getInstance().getFunctions().exportData._func.call(undefined, args, data, interpreter);
-                                },
-                                submitForm: (payload, validateForm, contentType) => {
-                                    const submitAs = contentType || 'multipart/form-data';
-                                    const args = [payload, validateForm, submitAs];
-                                    return FunctionRuntimeImpl.getInstance().getFunctions().submitForm._func.call(undefined, args, data, interpreter);
-                                },
-                                markFieldAsInvalid: (fieldIdentifier, validationMessage, option) => {
-                                    var _a, _b;
-                                    if (!option || option.useId) {
-                                        (_a = interpreter.globals.form.getElement(fieldIdentifier)) === null || _a === void 0 ? void 0 : _a.markAsInvalid(validationMessage);
-                                    }
-                                    else if (option && option.useDataRef) {
-                                        interpreter.globals.form.visit(function callback(f) {
-                                            if (f.dataRef === fieldIdentifier) {
-                                                f.markAsInvalid(validationMessage);
-                                            }
-                                        });
-                                    }
-                                    else if (option && option.useQualifiedName) {
-                                        (_b = interpreter.globals.form.resolveQualifiedName(fieldIdentifier)) === null || _b === void 0 ? void 0 : _b.markAsInvalid(validationMessage);
-                                    }
-                                },
-                                setFocus: (target, flag) => {
-                                    const args = [target, flag];
-                                    return FunctionRuntimeImpl.getInstance().getFunctions().setFocus._func.call(undefined, args, data, interpreter);
-                                },
-                                dispatchEvent: (target, eventName, payload, dispatch) => {
-                                    const args = [target, eventName, payload, dispatch];
-                                    return FunctionRuntimeImpl.getInstance().getFunctions().dispatchEvent._func.call(undefined, args, data, interpreter);
-                                },
-                                getFiles: (qualifiedName) => {
-                                    const filesMap = {};
-                                    if (!qualifiedName) {
-                                        interpreter.globals.form.visit(function callback(f) {
-                                            if (f.fieldType === 'file-input' && f.value) {
-                                                filesMap[f.qualifiedName] = f.serialize();
-                                            }
-                                        });
-                                    }
-                                    const field = interpreter.globals.form.resolveQualifiedName(qualifiedName);
-                                    if ((field === null || field === void 0 ? void 0 : field.fieldType) === 'file-input' && (field === null || field === void 0 ? void 0 : field.value)) {
-                                        filesMap[qualifiedName] = field.serialize();
-                                    }
-                                    return filesMap;
-                                },
-                                setVariable: (variableName, variableValue, target) => {
-                                    const args = [variableName, variableValue, target];
-                                    return FunctionRuntimeImpl.getInstance().getFunctions().setVariable._func.call(undefined, args, data, interpreter);
-                                },
-                                getVariable: (variableName, target) => {
-                                    const args = [variableName, target];
-                                    return FunctionRuntimeImpl.getInstance().getFunctions().getVariable._func.call(undefined, args, data, interpreter);
-                                },
-                                request: (options) => __awaiter(this, void 0, void 0, function* () {
-                                    const { url, method = 'GET', body: requestBody = {}, headers = { 'Content-Type': 'application/json' }, options: fetchOptions } = options;
-                                    const funcs = FunctionRuntimeImpl.getInstance().getFunctions();
-                                    const externalizedUrl = funcs.externalize._func.call(undefined, [url], data, interpreter);
-                                    const random = Math.floor(Math.random() * 1000000);
-                                    const now = Date.now();
-                                    const internalSuccess = `custom:__internalSuccess_${random}_${now}`;
-                                    const internalError = `custom:__internalError_${random}_${now}`;
-                                    const encryptPayload = { body: requestBody, headers };
-                                    if (fetchOptions) {
-                                        encryptPayload.options = fetchOptions;
-                                    }
-                                    const payload = yield funcs.encrypt._func.call(undefined, [encryptPayload], data, interpreter);
-                                    const requestArgs = [externalizedUrl, method, payload, internalSuccess, internalError];
-                                    const requestFn = funcs.requestWithRetry._func.call(undefined, requestArgs, data, interpreter);
-                                    const response = yield funcs.retryHandler._func.call(undefined, [requestFn], data, interpreter);
-                                    const isSuccess = (response === null || response === void 0 ? void 0 : response.status) >= 200 && (response === null || response === void 0 ? void 0 : response.status) <= 299;
-                                    if (isSuccess && (response === null || response === void 0 ? void 0 : response.body)) {
-                                        const decryptedBody = yield funcs.decrypt._func.call(undefined, [response.body, response.originalRequest], data, interpreter);
-                                        return {
-                                            ok: true,
-                                            status: response.status,
-                                            body: decryptedBody,
-                                            headers: response.headers
-                                        };
-                                    }
-                                    return {
-                                        ok: isSuccess,
-                                        status: response === null || response === void 0 ? void 0 : response.status,
-                                        body: response === null || response === void 0 ? void 0 : response.body,
-                                        headers: response === null || response === void 0 ? void 0 : response.headers
-                                    };
-                                }),
-                                addInstance: (element, index) => {
-                                    const args = index !== undefined ? [element, index] : [element];
-                                    return FunctionRuntimeImpl.getInstance().getFunctions().addInstance._func.call(undefined, args, data, interpreter);
-                                },
-                                removeInstance: (element, index) => {
-                                    const args = index !== undefined ? [element, index] : [element];
-                                    return FunctionRuntimeImpl.getInstance().getFunctions().removeInstance._func.call(undefined, args, data, interpreter);
-                                },
-                                getQueryParameter: (param) => {
-                                    const args = [param];
-                                    return FunctionRuntimeImpl.getInstance().getFunctions().getQueryParameter._func.call(undefined, args, data, interpreter);
-                                }
-                            }
-                        };
+                    _func: (args, expressionScope, interpreter) => {
+                        const globals = FunctionRuntimeImpl.getInstance().buildGlobals(expressionScope, interpreter);
                         return funcDef(...args, globals);
                     },
                     _signature: []
@@ -8287,6 +8692,107 @@ class FunctionRuntimeImpl {
             }
             FunctionRuntimeImpl.getInstance().customFunctions[name] = finalFunction;
         });
+    }
+    buildGlobals(expressionScope, interpreter) {
+        var _a;
+        return {
+            form: interpreter.globals.$form,
+            field: interpreter.globals.$field,
+            event: interpreter.globals.$event,
+            fragment: (_a = interpreter.globals.$fragment) !== null && _a !== void 0 ? _a : interpreter.globals.$form,
+            functions: {
+                setProperty: (target, payload) => {
+                    const eventName = 'custom:setProperty';
+                    const args = [target, eventName, payload];
+                    return FunctionRuntimeImpl.getInstance().getFunctions().dispatchEvent._func.call(undefined, args, expressionScope, interpreter);
+                },
+                reset: (target) => {
+                    const eventName = 'reset';
+                    target = target || 'reset';
+                    const args = [target, eventName];
+                    interpreter.globals.form.logger.warn('This usage of reset is deprecated. Please see the documentation and update.');
+                    return FunctionRuntimeImpl.getInstance().getFunctions().dispatchEvent._func.call(undefined, args, expressionScope, interpreter);
+                },
+                validate: (target) => {
+                    const args = [target];
+                    return FunctionRuntimeImpl.getInstance().getFunctions().validate._func.call(undefined, args, expressionScope, interpreter);
+                },
+                importData: (inputData, qualifiedName) => {
+                    const args = [inputData, qualifiedName];
+                    return FunctionRuntimeImpl.getInstance().getFunctions().importData._func.call(undefined, args, expressionScope, interpreter);
+                },
+                exportData: () => {
+                    return FunctionRuntimeImpl.getInstance().getFunctions().exportData._func.call(undefined, [], expressionScope, interpreter);
+                },
+                submitForm: (payload, validateForm, contentType) => {
+                    const submitAs = contentType || 'multipart/form-data';
+                    const args = [payload, validateForm, submitAs];
+                    return FunctionRuntimeImpl.getInstance().getFunctions().submitForm._func.call(undefined, args, expressionScope, interpreter);
+                },
+                markFieldAsInvalid: (fieldIdentifier, validationMessage, option) => {
+                    var _a, _b;
+                    if (!option || option.useId) {
+                        (_a = interpreter.globals.form.getElement(fieldIdentifier)) === null || _a === void 0 ? void 0 : _a.markAsInvalid(validationMessage);
+                    }
+                    else if (option && option.useDataRef) {
+                        interpreter.globals.form.visit(function callback(f) {
+                            if (f.dataRef === fieldIdentifier) {
+                                f.markAsInvalid(validationMessage);
+                            }
+                        });
+                    }
+                    else if (option && option.useQualifiedName) {
+                        (_b = interpreter.globals.form.resolveQualifiedName(fieldIdentifier)) === null || _b === void 0 ? void 0 : _b.markAsInvalid(validationMessage);
+                    }
+                },
+                setFocus: (target, flag) => {
+                    const args = [target, flag];
+                    return FunctionRuntimeImpl.getInstance().getFunctions().setFocus._func.call(undefined, args, expressionScope, interpreter);
+                },
+                dispatchEvent: (target, eventName, payload, dispatch) => {
+                    const args = [target, eventName, payload, dispatch];
+                    return FunctionRuntimeImpl.getInstance().getFunctions().dispatchEvent._func.call(undefined, args, expressionScope, interpreter);
+                },
+                getFiles: (qualifiedName) => {
+                    const filesMap = {};
+                    if (!qualifiedName) {
+                        interpreter.globals.form.visit(function callback(f) {
+                            if (f.fieldType === 'file-input' && f.value) {
+                                filesMap[f.qualifiedName] = f.serialize();
+                            }
+                        });
+                    }
+                    const field = interpreter.globals.form.resolveQualifiedName(qualifiedName);
+                    if ((field === null || field === void 0 ? void 0 : field.fieldType) === 'file-input' && (field === null || field === void 0 ? void 0 : field.value)) {
+                        filesMap[qualifiedName] = field.serialize();
+                    }
+                    return filesMap;
+                },
+                setVariable: (variableName, variableValue, target) => {
+                    const args = [variableName, variableValue, target];
+                    return FunctionRuntimeImpl.getInstance().getFunctions().setVariable._func.call(undefined, args, expressionScope, interpreter);
+                },
+                getVariable: (variableName, target) => {
+                    const args = [variableName, target];
+                    return FunctionRuntimeImpl.getInstance().getFunctions().getVariable._func.call(undefined, args, expressionScope, interpreter);
+                },
+                request: (options) => __awaiter(this, void 0, void 0, function* () {
+                    return (0, exports.runRequestPipeline)(options, interpreter, expressionScope);
+                }),
+                addInstance: (element, index) => {
+                    const args = index !== undefined ? [element, index] : [element];
+                    return FunctionRuntimeImpl.getInstance().getFunctions().addInstance._func.call(undefined, args, expressionScope, interpreter);
+                },
+                removeInstance: (element, index) => {
+                    const args = index !== undefined ? [element, index] : [element];
+                    return FunctionRuntimeImpl.getInstance().getFunctions().removeInstance._func.call(undefined, args, expressionScope, interpreter);
+                },
+                getQueryParameter: (param) => {
+                    const args = [param];
+                    return FunctionRuntimeImpl.getInstance().getFunctions().getQueryParameter._func.call(undefined, args, expressionScope, interpreter);
+                }
+            }
+        };
     }
     unregisterFunctions(...names) {
         names.forEach(name => {
@@ -8319,7 +8825,7 @@ class FunctionRuntimeImpl {
         }
         const defaultFunctions = {
             validate: {
-                _func: (args, data, interpreter) => {
+                _func: (args, expressionScope, interpreter) => {
                     const element = args[0];
                     let validation;
                     if (typeof element === 'string' || typeof element === 'undefined') {
@@ -8336,7 +8842,7 @@ class FunctionRuntimeImpl {
                 _signature: []
             },
             setFocus: {
-                _func: (args, data, interpreter) => {
+                _func: (args, expressionScope, interpreter) => {
                     const element = args[0];
                     const flag = args[1];
                     try {
@@ -8350,7 +8856,7 @@ class FunctionRuntimeImpl {
                 _signature: []
             },
             getData: {
-                _func: (args, data, interpreter) => {
+                _func: (args, expressionScope, interpreter) => {
                     interpreter.globals.form.logger.warn('The `getData` function is depricated. Use `exportData` instead.');
                     return interpreter.globals.form.withDependencyTrackingControl(true, () => {
                         return interpreter.globals.form.exportData();
@@ -8359,7 +8865,7 @@ class FunctionRuntimeImpl {
                 _signature: []
             },
             exportData: {
-                _func: (args, data, interpreter) => {
+                _func: (args, expressionScope, interpreter) => {
                     return interpreter.globals.form.withDependencyTrackingControl(true, () => {
                         return interpreter.globals.form.exportData();
                     });
@@ -8367,7 +8873,7 @@ class FunctionRuntimeImpl {
                 _signature: []
             },
             importData: {
-                _func: (args, data, interpreter) => {
+                _func: (args, expressionScope, interpreter) => {
                     return interpreter.globals.form.withDependencyTrackingControl(true, () => {
                         const inputData = args[0];
                         const qualifiedName = args[1];
@@ -8389,7 +8895,7 @@ class FunctionRuntimeImpl {
                 _signature: []
             },
             submitForm: {
-                _func: (args, data, interpreter) => __awaiter(this, void 0, void 0, function* () {
+                _func: (args, expressionScope, interpreter) => __awaiter(this, void 0, void 0, function* () {
                     var _a, _b, _c, _d, _e;
                     let success = null;
                     let error = null;
@@ -8418,7 +8924,7 @@ class FunctionRuntimeImpl {
                             return {};
                         }
                         try {
-                            const token = yield interpreter.runtime.functionTable.fetchCaptchaToken._func([], data, interpreter);
+                            const token = yield interpreter.runtime.functionTable.fetchCaptchaToken._func([], expressionScope, interpreter);
                             form.captcha.value = token;
                         }
                         catch (e) {
@@ -8439,7 +8945,7 @@ class FunctionRuntimeImpl {
                 _signature: []
             },
             saveForm: {
-                _func: (args, data, interpreter) => {
+                _func: (args, expressionScope, interpreter) => {
                     const action = toString(args[0]);
                     const validate_form = args[2] || false;
                     interpreter.globals.form.dispatch(new Events_1.Save({
@@ -8451,7 +8957,8 @@ class FunctionRuntimeImpl {
                 _signature: []
             },
             setVariable: {
-                _func: (args, data, interpreter) => {
+                _func: (args, expressionScope, interpreter) => {
+                    var _a;
                     const variableName = toString(args[0]);
                     let variableValue = args[1];
                     const normalFieldOrPanel = args[2] || interpreter.globals.form;
@@ -8461,13 +8968,15 @@ class FunctionRuntimeImpl {
                     }
                     const target = normalFieldOrPanel.$id ? interpreter.globals.form.getElement(normalFieldOrPanel.$id) : interpreter.globals.form;
                     const propertiesManager = target.getPropertiesManager();
-                    propertiesManager.updateSimpleProperty(variableName, variableValue);
+                    if (!propertiesManager.updateProperty(variableName, variableValue)) {
+                        (_a = interpreter.globals.form.logger) === null || _a === void 0 ? void 0 : _a.warn(`setVariable: '${variableName}' is not a valid variable path.`);
+                    }
                     return {};
                 },
                 _signature: []
             },
             getVariable: {
-                _func: (args, data, interpreter) => {
+                _func: (args, expressionScope, interpreter) => {
                     const variableName = toString(args[0]);
                     const normalFieldOrPanel = args[1] || interpreter.globals.form;
                     if (!variableName) {
@@ -8494,7 +9003,7 @@ class FunctionRuntimeImpl {
                 _signature: []
             },
             request: {
-                _func: (args, data, interpreter) => {
+                _func: (args, expressionScope, interpreter) => {
                     const uri = toString(args[0]);
                     const httpVerb = toString(args[1]);
                     let payload;
@@ -8526,7 +9035,7 @@ class FunctionRuntimeImpl {
                 _signature: []
             },
             requestWithRetry: {
-                _func: (args, data, interpreter) => {
+                _func: (args, expressionScope, interpreter) => {
                     const uri = toString(args[0]);
                     const httpVerb = toString(args[1]);
                     let success;
@@ -8551,11 +9060,12 @@ class FunctionRuntimeImpl {
                             throw error;
                         }
                         let finalHeaders = {};
-                        let finalBody = {}, finalCryptoMetadata = null;
+                        let finalBody = {}, finalCryptoMetadata = null, finalOptions = null;
                         if (args.length === 5) {
                             finalBody = payload.body || {};
                             finalHeaders = payload.headers || {};
                             finalCryptoMetadata = payload.cryptoMetadata;
+                            finalOptions = payload.options;
                         }
                         else {
                             finalBody = payload || {};
@@ -8569,7 +9079,7 @@ class FunctionRuntimeImpl {
                                 finalHeaders = Object.assign(Object.assign({}, finalHeaders), retryOptions.headers);
                             }
                         }
-                        const finalPayload = Object.assign({ 'body': finalBody, 'headers': finalHeaders }, (finalCryptoMetadata && { cryptoMetadata: finalCryptoMetadata }));
+                        const finalPayload = Object.assign(Object.assign({ 'body': finalBody, 'headers': finalHeaders }, (finalCryptoMetadata != null && { cryptoMetadata: finalCryptoMetadata })), (finalOptions != null && { options: finalOptions }));
                         try {
                             const response = yield (0, exports.request)(interpreter.globals, uri, httpVerb, finalPayload, success, errorFn, finalHeaders);
                             return response;
@@ -8585,31 +9095,31 @@ class FunctionRuntimeImpl {
                 _signature: []
             },
             retryHandler: {
-                _func: (args, data, interpreter) => {
+                _func: (args, expressionScope, interpreter) => {
                     const requestFn = valueOf(args[0]);
                     return requestFn();
                 },
                 _signature: []
             },
             externalize: {
-                _func: (args, data, interpreter) => {
+                _func: (args, expressionScope, interpreter) => {
                     const url = toString(args[0]);
                     return url;
                 },
                 _signature: []
             },
             awaitFn: {
-                _func: (args, data, interpreter) => __awaiter(this, void 0, void 0, function* () {
+                _func: (args, expressionScope, interpreter) => __awaiter(this, void 0, void 0, function* () {
                     const success = args[1];
                     const currentField = interpreter.globals.$field;
                     try {
                         const result = yield args[0];
-                        defaultFunctions.dispatchEvent._func([currentField, success, result], data, interpreter);
+                        defaultFunctions.dispatchEvent._func([currentField, success, result], expressionScope, interpreter);
                     }
                     catch (err) {
                         const error = args[2];
                         if (error) {
-                            defaultFunctions.dispatchEvent._func([currentField, error, err], data, interpreter);
+                            defaultFunctions.dispatchEvent._func([currentField, error, err], expressionScope, interpreter);
                         }
                     }
                     return {};
@@ -8617,7 +9127,7 @@ class FunctionRuntimeImpl {
                 _signature: []
             },
             addInstance: {
-                _func: (args, data, interpreter) => {
+                _func: (args, expressionScope, interpreter) => {
                     const element = args[0];
                     const payload = args.length > 1 ? valueOf(args[1]) : undefined;
                     try {
@@ -8632,7 +9142,7 @@ class FunctionRuntimeImpl {
                 _signature: []
             },
             removeInstance: {
-                _func: (args, data, interpreter) => {
+                _func: (args, expressionScope, interpreter) => {
                     const element = args[0];
                     const payload = args.length > 1 ? valueOf(args[1]) : undefined;
                     try {
@@ -8647,7 +9157,8 @@ class FunctionRuntimeImpl {
                 _signature: []
             },
             dispatchEvent: {
-                _func: (args, data, interpreter) => {
+                _func: (args, expressionScope, interpreter) => {
+                    var _a;
                     const element = args[0];
                     if (element == null && typeof interpreter !== 'string') {
                         interpreter.globals.form.logger.error(`dispatchEvent: target element is null or undefined. Event "${valueOf(args[1])}" was skipped.`);
@@ -8666,7 +9177,17 @@ class FunctionRuntimeImpl {
                         event = new Events_1.CustomEvent(eventName.substring('custom:'.length), payload, dispatch);
                     }
                     else {
-                        event = createAction(eventName, payload, dispatch);
+                        event = (_a = createAction(eventName, payload, dispatch)) !== null && _a !== void 0 ? _a : new Events_1.CustomEvent(eventName, payload, dispatch);
+                    }
+                    if (event != null) {
+                        const form = interpreter.globals.form;
+                        const inFlight = interpreter.globals.$event;
+                        const causingAction = (inFlight && inFlight.__action) || inFlight;
+                        const correlationId = (inFlight && inFlight.correlationId)
+                            || (form && typeof form.nextCorrelationId === 'function' ? form.nextCorrelationId() : undefined);
+                        if (typeof event._setTrace === 'function') {
+                            event._setTrace(causingAction, correlationId);
+                        }
                     }
                     if (event != null) {
                         if (typeof element === 'string') {
@@ -8691,21 +9212,21 @@ class FunctionRuntimeImpl {
                 _signature: []
             },
             encrypt: {
-                _func: (args, data, interpreter) => __awaiter(this, void 0, void 0, function* () {
+                _func: (args, expressionScope, interpreter) => __awaiter(this, void 0, void 0, function* () {
                     const payload = valueOf(args[0]);
                     return payload;
                 }),
                 _signature: []
             },
             decrypt: {
-                _func: (args, data, interpreter) => __awaiter(this, void 0, void 0, function* () {
+                _func: (args, expressionScope, interpreter) => __awaiter(this, void 0, void 0, function* () {
                     const encData = valueOf(args[0]);
                     return encData;
                 }),
                 _signature: []
             },
             getQueryParameter: {
-                _func: (args, data, interpreter) => {
+                _func: (args, expressionScope, interpreter) => {
                     var _a, _b, _c, _d;
                     const param = toString(args[0]);
                     if (!param) {
@@ -8741,7 +9262,7 @@ class FunctionRuntimeImpl {
                 _signature: []
             },
             getBrowserDetail: {
-                _func: (args, data, interpreter) => {
+                _func: (args, expressionScope, interpreter) => {
                     var _a, _b, _c;
                     const param = toString(args[0]);
                     if (!param) {
@@ -8762,7 +9283,7 @@ class FunctionRuntimeImpl {
                 _signature: []
             },
             getURLDetail: {
-                _func: (args, data, interpreter) => {
+                _func: (args, expressionScope, interpreter) => {
                     var _a, _b, _c;
                     const param = toString(args[0]);
                     if (!param) {
@@ -8783,7 +9304,7 @@ class FunctionRuntimeImpl {
                 _signature: []
             },
             getRelativeInstanceIndex: {
-                _func: (args, data, interpreter) => {
+                _func: (args, expressionScope, interpreter) => {
                     if (!Array.isArray(args[0]) || args[0].length === 0) {
                         return -1;
                     }
@@ -8864,6 +9385,18 @@ class FunctionRuntimeImpl {
                     }
                 },
                 _signature: []
+            },
+            isSelfChange: {
+                _func: (args, data, interpreter) => (0, Events_1.isSelfChange)(interpreter.globals.$event),
+                _signature: []
+            },
+            isDependencyChange: {
+                _func: (args, data, interpreter) => (0, Events_1.isDependencyChange)(interpreter.globals.$event),
+                _signature: []
+            },
+            isUserChange: {
+                _func: (args, data, interpreter) => (0, Events_1.isUserChange)(interpreter.globals.$event),
+                _signature: []
             }
         };
         return Object.assign(Object.assign({}, defaultFunctions), FunctionRuntimeImpl.getInstance().customFunctions);
@@ -8871,6 +9404,8 @@ class FunctionRuntimeImpl {
 }
 FunctionRuntimeImpl.instance = null;
 exports.FunctionRuntime = FunctionRuntimeImpl.getInstance();
+const buildRuleGlobals = (interpreter, expressionScope = undefined) => FunctionRuntimeImpl.getInstance().buildGlobals(expressionScope, interpreter);
+exports.buildRuleGlobals = buildRuleGlobals;
 
 
 /***/ }),
@@ -8904,6 +9439,7 @@ class RuleEngine {
         ];
         this.debugInfo = [];
         this.dependencyTracking = true;
+        this.modelDecorating = false;
         this.customFunctions = FunctionRuntime_1.FunctionRuntime.getFunctions();
     }
     compileRule(rule, locale) {
@@ -8911,12 +9447,9 @@ class RuleEngine {
         return { formula, ast: formula.compile(rule, this._globalNames) };
     }
     execute(node, data, globals, useValueOf = false, eString) {
-        var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s, _t, _u, _v;
         const { formula, ast } = node;
-        const oldContext = this._context;
-        this._context = globals;
-        let res = undefined;
-        try {
+        return this.evaluateInRuleContext(globals, useValueOf, eString, () => {
+            var _a, _b, _c, _d, _e, _f, _g;
             (_c = (_b = (_a = this._context) === null || _a === void 0 ? void 0 : _a.form) === null || _b === void 0 ? void 0 : _b.logger) === null || _c === void 0 ? void 0 : _c.info({
                 message: 'Executing rule',
                 expression: eString,
@@ -8924,38 +9457,48 @@ class RuleEngine {
                 fieldId: (_e = this._context.field) === null || _e === void 0 ? void 0 : _e.id,
                 eventType: (_g = (_f = this._context) === null || _f === void 0 ? void 0 : _f.$event) === null || _g === void 0 ? void 0 : _g.type
             });
-            res = formula.run(ast, data, 'en-US', globals);
+            return formula.run(ast, data, 'en-US', globals);
+        });
+    }
+    executeFunction(fn, globals, useValueOf = false, label = 'function expression') {
+        return this.evaluateInRuleContext(globals, useValueOf, label, () => fn(globals));
+    }
+    evaluateInRuleContext(globals, useValueOf, label, evaluate) {
+        var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o;
+        const oldContext = this._context;
+        this._context = globals;
+        let res = undefined;
+        try {
+            res = evaluate();
         }
         catch (err) {
-            (_k = (_j = (_h = this._context) === null || _h === void 0 ? void 0 : _h.form) === null || _j === void 0 ? void 0 : _j.logger) === null || _k === void 0 ? void 0 : _k.error(err);
-            if ((_l = this._context) === null || _l === void 0 ? void 0 : _l.form) {
-                const field = (_m = this._context) === null || _m === void 0 ? void 0 : _m.field;
+            (_c = (_b = (_a = this._context) === null || _a === void 0 ? void 0 : _a.form) === null || _b === void 0 ? void 0 : _b.logger) === null || _c === void 0 ? void 0 : _c.error(err);
+            if ((_d = this._context) === null || _d === void 0 ? void 0 : _d.form) {
+                const field = (_e = this._context) === null || _e === void 0 ? void 0 : _e.field;
                 const fieldName = field === null || field === void 0 ? void 0 : field.name;
                 const errorMsg = err instanceof Error ? err.message : String(err);
                 const fullError = fieldName
-                    ? `Script execution error in field "${fieldName}": ${errorMsg}. Expression: ${eString}`
-                    : `Script execution error: ${errorMsg}. Expression: ${eString}`;
+                    ? `Script execution error in field "${fieldName}": ${errorMsg}. Expression: ${label}`
+                    : `Script execution error: ${errorMsg}. Expression: ${label}`;
                 const errorPayload = {
                     name: fieldName,
                     error: fullError,
-                    event: (_p = (_o = this._context) === null || _o === void 0 ? void 0 : _o.$event) === null || _p === void 0 ? void 0 : _p.type,
-                    rule: eString,
+                    event: (_g = (_f = this._context) === null || _f === void 0 ? void 0 : _f.$event) === null || _g === void 0 ? void 0 : _g.type,
+                    rule: label,
                     stack: err instanceof Error ? err.stack : undefined
                 };
                 this._context.form.dispatch(new Events_1.ScriptError(errorPayload, false));
             }
         }
         if (this.debugInfo.length) {
-            (_s = (_r = (_q = this._context) === null || _q === void 0 ? void 0 : _q.form) === null || _r === void 0 ? void 0 : _r.logger) === null || _s === void 0 ? void 0 : _s.warn(`Form rule expression string: ${eString}`);
+            (_k = (_j = (_h = this._context) === null || _h === void 0 ? void 0 : _h.form) === null || _j === void 0 ? void 0 : _j.logger) === null || _k === void 0 ? void 0 : _k.warn(`Form rule expression string: ${label}`);
             while (this.debugInfo.length > 0) {
-                (_v = (_u = (_t = this._context) === null || _t === void 0 ? void 0 : _t.form) === null || _u === void 0 ? void 0 : _u.logger) === null || _v === void 0 ? void 0 : _v.warn(this.debugInfo.pop());
+                (_o = (_m = (_l = this._context) === null || _l === void 0 ? void 0 : _l.form) === null || _m === void 0 ? void 0 : _m.logger) === null || _o === void 0 ? void 0 : _o.warn(this.debugInfo.pop());
             }
         }
         let finalRes = res;
-        if (useValueOf) {
-            if (typeof res === 'object' && res !== null) {
-                finalRes = Object.getPrototypeOf(res).valueOf.call(res);
-            }
+        if (useValueOf && typeof res === 'object' && res !== null && !(res instanceof Promise)) {
+            finalRes = Object.getPrototypeOf(res).valueOf.call(res);
         }
         this._context = oldContext;
         return finalRes;
@@ -8964,6 +9507,12 @@ class RuleEngine {
         if (this.dependencyTracking && this._context && this._context.field !== undefined && this._context.field !== subscriber) {
             subscriber._addDependent(this._context.field, propertyName);
         }
+    }
+    setModelDecorating(decorating) {
+        this.modelDecorating = decorating;
+    }
+    isModelDecorating() {
+        return this.modelDecorating;
     }
     setDependencyTracking(track) {
         this.dependencyTracking = track;
@@ -9946,9 +10495,17 @@ exports.sanitizeName = sanitizeName;
 
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.isRepeatable = exports.jsonString = exports.checkIfKeyAdded = exports.deepClone = exports.isButton = exports.isCaptcha = exports.isDateField = exports.isDateTimeField = exports.isEmailInput = exports.isCheckboxGroup = exports.isCheckbox = exports.checkIfConstraintsArePresent = exports.isFile = exports.getProperty = void 0;
+exports.isRepeatable = exports.jsonString = exports.checkIfKeyAdded = exports.deepClone = exports.isButton = exports.isCaptcha = exports.isDateField = exports.isDateTimeField = exports.isEmailInput = exports.isCheckboxGroup = exports.isCheckbox = exports.checkIfConstraintsArePresent = exports.isFile = exports.getProperty = exports.UNSAFE_KEYS = exports.isSameValue = void 0;
 const index_1 = __nccwpck_require__(40624);
 const SchemaUtils_1 = __nccwpck_require__(86844);
+const isSameValue = (a, b) => {
+    if (a !== null && b !== null && typeof a === 'object' && typeof b === 'object') {
+        return JSON.stringify(a) === JSON.stringify(b);
+    }
+    return a === b;
+};
+exports.isSameValue = isSameValue;
+exports.UNSAFE_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
 const getProperty = (data, key, def) => {
     if (key in data) {
         return data[key];
@@ -10397,7 +10954,7 @@ exports.ValidConstraints = {
 };
 exports.validationConstraintsList = ['type', 'format', 'minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'minItems',
     'maxItems', 'uniqueItems', 'minLength', 'maxLength', 'pattern', 'required', 'enum', 'accept', 'maxFileSize'];
-exports.revalidationTriggerProps = [...exports.validationConstraintsList, 'step'];
+exports.revalidationTriggerProps = [...exports.validationConstraintsList, 'step', 'enforceEnum'];
 exports.Constraints = {
     type: (constraint, inputVal) => {
         let value = inputVal;
@@ -201491,6 +202048,166 @@ class DispatchTargetAnalyzer {
   }
 }
 
+// EXTERNAL MODULE: ./node_modules/@aemforms/af-core/lib/BaseNode.js
+var BaseNode = __nccwpck_require__(91709);
+;// CONCATENATED MODULE: ./src/analyzers/imperative-set-matcher.js
+
+
+
+
+/**
+ * Shared detector for the ONE imperative code shape that two analyzers care about from different
+ * angles:
+ *   a custom fn that imperatively `setProperty(target, { <editableProp>: <computed> })` (or calls
+ *   `markFieldAsInvalid`) and does NOT do anything that legitimately needs JS (async/DOM/request/
+ *   dispatch/event-payload read).
+ *
+ * The SAME line carries two independent concerns, each owned by a different analyzer:
+ *  - rule-vs-code (authoring canon): "prefer a content fd:rules expression" — a customer who is happy
+ *    writing code disables this rule.
+ *  - custom-fn-correctness (code correctness): the imperative set is a ONE-SHOT, NON-REACTIVE write —
+ *    it won't recompute when its inputs change. If you're doing it in code, use `field.bind('prop', fn)`
+ *    so it is reactive (dependency-tracked, re-fires). This is a correctness bug, so it stays on even
+ *    when rule-vs-code is disabled.
+ *
+ * Both analyzers call `inspectImperativeSet`; each maps the result to its own finding type + message,
+ * so the detection can never diverge between them.
+ */
+
+// The editable/writable model properties — af-core's own `editableProperties` allowlist (the exact
+// set BaseNode permits a rule/setProperty to write). Consumed directly from @aemforms/af-core so it
+// stays in lock-step with the runtime (a runtime bump that adds a writable property, e.g. enforceEnum,
+// is picked up automatically) instead of a hand-maintained copy that silently drifts.
+const WRITABLE_PROPERTIES = new Set(BaseNode.editableProperties);
+
+// The names of built-in expression functions that legitimately need JS (I/O, navigation, event
+// dispatch) — a set that DOES one of these is an imperative fill, not a derivable value, so it's an
+// escape hatch. Sourced from af-core's FunctionRuntime inventory (so a rename can't silently break the
+// hatch) and narrowed to the side-effecting subset we treat as an escape hatch.
+const ESCAPE_HATCH_FUNCTIONS = (() => {
+  const inventory = new Set(Object.keys(af_core_lib.FunctionRuntime.getFunctions()));
+  const sideEffecting = ['request', 'requestWithRetry', 'importData', 'exportData', 'submitForm', 'saveForm', 'dispatchEvent'];
+  // Keep only names af-core actually exposes — a curated name that vanished from the runtime is a
+  // stale entry we want to drop rather than match a phantom call.
+  return new Set(sideEffecting.filter((n) => inventory.has(n)));
+})();
+
+// A literal constant (true / false / 'x' / 42 / null) or a unary on one (-1, !0) — an imperative
+// default/setup value, NOT a derived expression. `{ visible: true }` is setup; `{ visible: x > 0 }` is
+// a derived value.
+function isConstant(node) {
+  if (!node) return true; // shorthand { value } → treat as non-computed (rare, not a derived value)
+  if (node.type === 'Literal') return true;
+  if (node.type === 'UnaryExpression') return isConstant(node.argument);
+  if (node.type === 'Identifier' && (node.name === 'undefined' || node.name === 'null')) return true;
+  return false;
+}
+
+/**
+ * Visit every custom-fn-shaped node in an AST exactly once, in both the classic `function foo(){}` and
+ * the modern arrow / fn-expression (`const foo = (globals) => {}`) styles — an arrow/fn-expression
+ * export suffers the same custom-fn smells, so a FunctionDeclaration-only walk would silently miss it.
+ * A WeakSet dedups so the same node is never inspected twice. Shared by rule-vs-code and
+ * custom-fn-correctness so their traversal can never diverge.
+ * @param {object} ast
+ * @param {(fnNode: object, name: string) => void} cb
+ */
+function forEachCustomFn(ast, cb) {
+  const seen = new WeakSet();
+  const visit = (fnNode, name) => {
+    if (!fnNode || seen.has(fnNode)) return;
+    seen.add(fnNode);
+    cb(fnNode, name);
+  };
+  simple(ast, {
+    FunctionDeclaration: (fn) => visit(fn, fn.id?.name || 'anonymous'),
+    VariableDeclarator: (vd) => {
+      if (vd.init?.type === 'ArrowFunctionExpression' || vd.init?.type === 'FunctionExpression') {
+        visit(vd.init, vd.id?.name || 'anonymous');
+      }
+    },
+  });
+}
+
+function calleeName(callee) {
+  if (!callee) return '';
+  if (callee.type === 'Identifier') return callee.name;
+  if (callee.type === 'MemberExpression') return callee.property?.name || '';
+  return '';
+}
+
+/**
+ * Inspect one function node for the imperative-set shape.
+ * @returns {{ setLine: number|null, setProp: string|null, markInvalidLine: number|null }}
+ *   setLine/setProp are non-null only for a COMPUTED editable-property set with NO escape hatch;
+ *   markInvalidLine is non-null when the fn calls markFieldAsInvalid (independent of the escape hatch,
+ *   matching the original rule-vs-code behavior).
+ */
+function inspectImperativeSet(fnNode) {
+  let setLine = null;
+  let setProp = null;
+  let hasEscapeHatch = false; // request/fetch/DOM/await/dispatch/event-payload → legitimately JS
+  let markInvalidLine = null;
+
+  simple(fnNode, {
+    AwaitExpression: () => { hasEscapeHatch = true; },
+    // Destructured `const { event } = globals` (or `const { payload } = globals.event`) — an
+    // event-driven fill even though `globals.event` is never accessed as a member chain.
+    VariableDeclarator: (v) => {
+      if (v.id?.type === 'ObjectPattern'
+        && v.id.properties?.some((p) => ['event', 'payload'].includes(p.key?.name))) {
+        hasEscapeHatch = true;
+      }
+    },
+    CallExpression: (c) => {
+      const name = calleeName(c.callee);
+      // A side-effecting built-in (af-core FunctionRuntime) or a raw fetch → legitimately imperative JS.
+      if (name === 'fetch' || ESCAPE_HATCH_FUNCTIONS.has(name)) {
+        hasEscapeHatch = true;
+      }
+      if (name === 'markFieldAsInvalid') {
+        markInvalidLine = c.loc?.start.line;
+      }
+      if (name === 'setProperty') {
+        const props = c.arguments?.[1];
+        if (props?.type === 'ObjectExpression') {
+          const hit = props.properties?.find((p) => WRITABLE_PROPERTIES.has(p.key?.name)
+            && !isConstant(p.value));
+          if (hit) {
+            // Only a COMPUTED (non-literal) editable-property set is a candidate. A literal-constant
+            // set (`{ visible: true }`, `{ value: '' }`) is imperative init/setup or a default.
+            if (setLine === null) { setLine = c.loc?.start.line; setProp = hit.key?.name || null; }
+          }
+        }
+      }
+    },
+    MemberExpression: (m) => {
+      if (m.object?.name === 'document' || m.object?.name === 'window'
+        || ['querySelector', 'querySelectorAll', 'getElementById', 'addEventListener', 'createElement'].includes(m.property?.name)) {
+        hasEscapeHatch = true;
+      }
+      // Reading `globals.event(.payload)` = an event-driven fill (a listener filling its own field
+      // from an event payload) — NOT a derivable value expression. Legitimately a fn.
+      if (m.object?.type === 'MemberExpression' && m.object.object?.name === 'globals' && m.object.property?.name === 'event') {
+        hasEscapeHatch = true;
+      }
+      if (m.object?.name === 'globals' && m.property?.name === 'event') {
+        hasEscapeHatch = true;
+      }
+      // Any `<expr>.payload` read — the field is filling itself from an event payload.
+      if (m.property?.name === 'payload') {
+        hasEscapeHatch = true;
+      }
+    },
+  });
+
+  return {
+    setLine: hasEscapeHatch ? null : setLine,
+    setProp: hasEscapeHatch ? null : setProp,
+    markInvalidLine,
+  };
+}
+
 ;// CONCATENATED MODULE: ./src/analyzers/rule-vs-code-analyzer.js
 
 
@@ -201500,18 +202217,19 @@ class DispatchTargetAnalyzer {
  * Rule-vs-Code Analyzer
  *
  * Design-canon "use rules, not code" + portability: value/visibility logic that CAN be authored
- * (`fd:rules`/`fd:events`) must not be locked in web-only component JS.
+ * (`fd:rules`/`fd:events`) should not be locked in web-only component JS.
  *
  * Tightly-scoped detectors (each fires only on the UNAMBIGUOUS shape → safe as `error`):
- *  (a) pure-mutation fn: body contains a `setProperty(target, { value|visible|enabled })` and does
- *      NOT contain any request/fetch/DOM/await/dispatchEvent/markFieldAsInvalid — i.e. it only
- *      derives/sets a model prop. That is a value/visibility RULE, not JS.
+ *  (a) pure-mutation fn: body contains a `setProperty(target, { <editableProp>: <computed> })` and
+ *      does NOT contain any request/fetch/DOM/await/dispatchEvent/event-payload read — i.e. it only
+ *      derives/sets a model prop. Prefer a value/visibility RULE (or, in code, `field.bind`).
  *  (b) `markFieldAsInvalid` inside a custom function — validity belongs in the field's
- *      `validationExpression` (returns boolean / {valid,errorMessage} / Promise), not an imperative
- *      handler that fights the validity slot.
+ *      `validationExpression`, not an imperative handler that fights the validity slot.
  *
- * NOT flagged (kept out of scope so `error` is safe): any fn that also does async/request/DOM/
- * dispatch — those legitimately need JS.
+ * The detection lives in the shared `imperative-set-matcher` (see it for the escape-hatch + writable-
+ * property logic): custom-fn-correctness inspects the SAME shape from a correctness angle (recommend
+ * `field.bind`). This rule owns the authoring-canon angle (recommend `fd:rules`). Disabling this rule
+ * still leaves the custom-fn-correctness `bind` nudge active.
  *
  * Severity: error.
  */
@@ -201520,92 +202238,19 @@ class RuleVsCodeAnalyzer {
     this.config = config;
   }
 
-  static calleeName(callee) {
-    if (!callee) return '';
-    if (callee.type === 'Identifier') return callee.name;
-    if (callee.type === 'MemberExpression') return callee.property?.name || '';
-    return '';
-  }
-
-  // A literal constant (true / false / 'x' / 42 / null) or a unary on one (-1, !0) — an imperative
-  // default/setup value, NOT a derived expression. `{ visible: true }` is setup; `{ visible: x > 0 }`
-  // is a rule.
-  static isConstant(node) {
-    if (!node) return true; // shorthand { value } → treat as non-computed (rare, not a rule)
-    if (node.type === 'Literal') return true;
-    if (node.type === 'UnaryExpression') return RuleVsCodeAnalyzer.isConstant(node.argument);
-    if (node.type === 'Identifier' && (node.name === 'undefined' || node.name === 'null')) return true;
-    return false;
-  }
-
   // Inspect one function node; return the violations found in it.
   static inspectFn(fnNode, fnName, file) {
     const out = [];
-    let hasSetValueOrVisibility = false;
-    let setLine = null;
-    let hasEscapeHatch = false; // request/fetch/DOM/await/dispatch → legitimately JS
-    let markInvalidLine = null;
+    const { setLine, markInvalidLine } = inspectImperativeSet(fnNode);
 
-    simple(fnNode, {
-      AwaitExpression: () => { hasEscapeHatch = true; },
-      // Destructured `const { event } = globals` (or `const { payload } = globals.event`) — an
-      // event-driven fill even though `globals.event` is never accessed as a member chain.
-      VariableDeclarator: (v) => {
-        if (v.id?.type === 'ObjectPattern'
-          && v.id.properties?.some((p) => ['event', 'payload'].includes(p.key?.name))) {
-          hasEscapeHatch = true;
-        }
-      },
-      CallExpression: (c) => {
-        const name = RuleVsCodeAnalyzer.calleeName(c.callee);
-        if (name === 'request' || name === 'fetch' || name === 'dispatchEvent' || name === 'importData') {
-          hasEscapeHatch = true;
-        }
-        if (name === 'markFieldAsInvalid') {
-          markInvalidLine = c.loc?.start.line;
-        }
-        if (name === 'setProperty') {
-          const props = c.arguments?.[1];
-          if (props?.type === 'ObjectExpression'
-            && props.properties?.some((p) => ['value', 'visible', 'enabled', 'readOnly', 'enum', 'label', 'required'].includes(p.key?.name)
-              && !RuleVsCodeAnalyzer.isConstant(p.value))) {
-            // Only a COMPUTED (non-literal) value/visibility is a rule candidate. A literal-constant
-            // set (`{ visible: true }`, `{ value: '' }`) is imperative init/setup or a default — that
-            // belongs in authoring as the field's default, not a derived rule, so it's not flagged.
-            hasSetValueOrVisibility = true;
-            setLine = setLine ?? c.loc?.start.line;
-          }
-        }
-      },
-      MemberExpression: (m) => {
-        if (m.object?.name === 'document' || m.object?.name === 'window'
-          || ['querySelector', 'querySelectorAll', 'getElementById', 'addEventListener', 'createElement'].includes(m.property?.name)) {
-          hasEscapeHatch = true;
-        }
-        // Reading `globals.event(.payload)` = an event-driven fill (a listener rule filling its own
-        // field from an event payload) — NOT a derivable value expression. Legitimately a fn.
-        if (m.object?.type === 'MemberExpression' && m.object.object?.name === 'globals' && m.object.property?.name === 'event') {
-          hasEscapeHatch = true;
-        }
-        if (m.object?.name === 'globals' && m.property?.name === 'event') {
-          hasEscapeHatch = true;
-        }
-        // Any `<expr>.payload` read — the field is filling itself from an event payload (works for
-        // destructured `event.payload` where the object isn't the globals.event member chain).
-        if (m.property?.name === 'payload') {
-          hasEscapeHatch = true;
-        }
-      },
-    });
-
-    if (hasSetValueOrVisibility && !hasEscapeHatch) {
+    if (setLine != null) {
       out.push({
         severity: 'error',
         type: 'value-visibility-logic-in-js',
-        message: `Function '${fnName}' only sets value/visible/enabled with no async/DOM/request — `
-          + 'likely a derived value; author it as a value/visibility rule so it re-evaluates '
-          + 'automatically. Exception: a one-time prefill of user-editable data (e.g. from a saved '
-          + 'snapshot) is fine left as JS.',
+        message: `Function '${fnName}' only sets an editable property (no async/DOM/request) — likely `
+          + 'a derived value; author it as an fd:rules rule (or in code `field.bind(prop, fn)`) so it '
+          + 're-evaluates automatically. Exception: a one-time prefill of user-editable data is fine '
+          + 'left as JS.',
         file,
         line: setLine,
       });
@@ -201615,8 +202260,8 @@ class RuleVsCodeAnalyzer {
         severity: 'error',
         type: 'markfieldasinvalid-instead-of-validationexpression',
         message: `Function '${fnName}' calls markFieldAsInvalid imperatively — model this instead as `
-          + "the field's validationExpression, so validate()/submit pick up the invalid state "
-          + 'automatically.',
+          + "the field's validationExpression (author it, or in code `field.bind('validationExpression', "
+          + 'fn)`), so validate()/submit pick up the invalid state automatically.',
         file,
         line: markInvalidLine,
       });
@@ -201634,22 +202279,10 @@ class RuleVsCodeAnalyzer {
         lib_core.warning(`[RuleVsCode] parse failed for ${jsFile.filename}: ${e.message}`);
         continue;
       }
-      // Inspect BOTH classic `function foo(){}` and modern `const foo = (globals) => {}` /
-      // `const foo = function(){}` custom-fn styles — an arrow/fn-expression export suffers the exact
-      // same rule-vs-code smell, so a FunctionDeclaration-only walk would silently miss it.
-      const inspected = new WeakSet();
-      const inspect = (fnNode, name) => {
-        if (!fnNode || inspected.has(fnNode)) return;
-        inspected.add(fnNode);
+      // Inspect every custom-fn-shaped node (classic + arrow/fn-expression) via the shared traversal
+      // so it can't diverge from custom-fn-correctness's.
+      forEachCustomFn(ast, (fnNode, name) => {
         issues.push(...RuleVsCodeAnalyzer.inspectFn(fnNode, name, jsFile.filename));
-      };
-      simple(ast, {
-        FunctionDeclaration: (fn) => inspect(fn, fn.id?.name || 'anonymous'),
-        VariableDeclarator: (vd) => {
-          if (vd.init?.type === 'ArrowFunctionExpression' || vd.init?.type === 'FunctionExpression') {
-            inspect(vd.init, vd.id?.name || 'anonymous');
-          }
-        },
       });
     }
     return { violations: issues.length, issues };
@@ -202122,50 +202755,39 @@ class StorageClassAnalyzer {
 
 
 
+
 /**
  * Custom-Function Correctness Analyzer
  *
- * Three AST-detectable authoring bugs (each a silent failure or crash → `error`):
- *
- *  #7 field.parent — a rule fn reaching a sibling via `field.parent` / `globals.field.parent`.
- *     The rule-node proxy exposes parent/siblings only via the `$`-prefixed `$parent`. `field.parent`
- *     is `undefined` and THROWS on destructure (`Cannot destructure property … of 'parent'`).
- *     (KB best-practices: "use $parent, not parent".)
- *
- *  #8 async custom function — an EXPORTED `async function` used as a custom function. The rule parser
- *     SILENTLY IGNORES `async function`/`function*` — the fn never registers. Use a plain `function`
- *     declaration and kick off async with `.then`. (KB 12-custom-functions-authoring.)
+ * AST-detectable custom-function correctness bugs (each a silent failure → `error`):
  *
  *  #9 _jsonModel direct read — reading `_jsonModel.value` (or any `_jsonModel.*`) bypasses the
  *     dependency-tracking getter, so a rule that reads it does NOT re-fire when the value changes.
  *     Read `field.$value` / the tracked getter instead. (KB best-practices dependency-tracking.)
  *
- * Severity: error (all three are silent failures / crashes).
+ *  non-reactive-set — an imperative `setProperty(target, { <editableProp>: <computed> })` in a custom
+ *     fn is a ONE-SHOT write: it applies once and never recomputes when its inputs change. Use
+ *     `field.bind('<prop>', (globals) => …)` so the property is bound to a reactive expression
+ *     (dependency-tracked, re-fires) — the code-path equivalent of an authored fd:rules rule.
+ *
+ *  markfieldasinvalid-in-fn — `markFieldAsInvalid` imperatively fights the validity slot; bind the
+ *     field's `validationExpression` instead (`field.bind('validationExpression', fn)`).
+ *
+ * The imperative-set / markFieldAsInvalid detection is shared with rule-vs-code (see
+ * `imperative-set-matcher`). rule-vs-code recommends authoring an fd:rules rule (an authoring-canon
+ * preference a code-first team may disable); this analyzer recommends `field.bind` (a code
+ * correctness fix that stays on regardless). The same line can therefore surface BOTH findings when
+ * both rules are enabled — by design, two distinct remedies.
+ *
+ * NOTE: `field.parent` (use `$parent`) and "async custom functions are silently ignored" were removed
+ * — the af2-web-runtime rule node now resolves `parent`, and async functions register and run
+ * (Promise return values are awaited). Both were false positives against the current runtime.
+ *
+ * Severity: error.
  */
 class CustomFnCorrectnessAnalyzer {
   constructor(config = null) {
     this.config = config;
-  }
-
-  // Collect the set of exported names in a module (for the async-export check).
-  static exportedNames(ast) {
-    const names = new Set();
-    simple(ast, {
-      ExportNamedDeclaration: (node) => {
-        if (node.declaration?.type === 'FunctionDeclaration' && node.declaration.id) {
-          names.add(node.declaration.id.name);
-        }
-        // `export const foo = …, bar = …` — capture each declarator name (covers arrow/fn-expression
-        // custom fns like `export const onUpload = async () => {}`).
-        if (node.declaration?.type === 'VariableDeclaration') {
-          for (const d of node.declaration.declarations || []) {
-            if (d.id?.type === 'Identifier') names.add(d.id.name);
-          }
-        }
-        (node.specifiers || []).forEach((s) => names.add(s.local?.name));
-      },
-    });
-    return names;
   }
 
   analyze(formJson, jsFiles = []) {
@@ -202178,51 +202800,38 @@ class CustomFnCorrectnessAnalyzer {
         lib_core.warning(`[CustomFnCorrectness] parse failed for ${jsFile.filename}: ${e.message}`);
         continue;
       }
-      const exported = CustomFnCorrectnessAnalyzer.exportedNames(ast);
 
-      // #8 — exported async function used as a custom function. Covers BOTH `export async function
-      // foo(){}` and `export const foo = async () => {}` / `= async function(){}` — the rule parser
-      // ignores async regardless of declaration style, so both fail identically at runtime.
-      const flagAsync = (name, node) => {
-        if (node?.async && name && exported.has(name)) {
+      // Imperative-set / markFieldAsInvalid — inspect every custom-fn-shaped node (classic + arrow/
+      // fn-expression) via the shared traversal so it can't diverge from rule-vs-code's.
+      forEachCustomFn(ast, (fnNode, name) => {
+        const { setLine, setProp, markInvalidLine } = inspectImperativeSet(fnNode);
+        if (setLine != null) {
           issues.push({
             severity: 'error',
-            type: 'async-custom-function-ignored',
-            message: `Exported '${name}' is an async function — the rule parser SILENTLY `
-              + 'IGNORES async function/function*, so it never registers as a custom function. Use a '
-              + 'plain `function` declaration and kick off async work with `.then`.',
+            type: 'non-reactive-set-use-bind',
+            message: `Function '${name}' imperatively sets a computed ${setProp ? `'${setProp}'` : 'property'} `
+              + 'via setProperty — a one-shot write that will NOT recompute when its inputs change. Use '
+              + `\`field.bind('${setProp || 'prop'}', (globals) => …)\` so the property is bound to a `
+              + 'reactive expression (dependency-tracked, re-fires on change).',
             file: jsFile.filename,
-            line: node.loc?.start.line,
+            line: setLine,
           });
         }
-      };
-      simple(ast, {
-        FunctionDeclaration: (fn) => flagAsync(fn.id?.name, fn),
-        VariableDeclarator: (vd) => {
-          if (vd.init?.type === 'ArrowFunctionExpression' || vd.init?.type === 'FunctionExpression') {
-            flagAsync(vd.id?.name, vd.init);
-          }
-        },
+        if (markInvalidLine != null) {
+          issues.push({
+            severity: 'error',
+            type: 'markfieldasinvalid-in-fn-use-bind',
+            message: `Function '${name}' calls markFieldAsInvalid imperatively — bind the field's `
+              + "validationExpression instead (`field.bind('validationExpression', fn)`), a reactive "
+              + 'expression that validate()/submit pick up automatically.',
+            file: jsFile.filename,
+            line: markInvalidLine,
+          });
+        }
       });
 
       simple(ast, {
         MemberExpression: (m) => {
-          // #7 — `<x>.parent` where x is `field` / `globals.field` (rule-node → must be $parent)
-          if (m.property?.name === 'parent') {
-            const obj = m.object;
-            const isField = (obj?.type === 'Identifier' && obj.name === 'field')
-              || (obj?.type === 'MemberExpression' && obj.object?.name === 'globals' && obj.property?.name === 'field');
-            if (isField) {
-              issues.push({
-                severity: 'error',
-                type: 'field-parent-not-dollar-parent',
-                message: 'field.parent on a rule-node is undefined (throws on destructure). Use '
-                  + 'field.$parent / field.$parent.<childName> to reach siblings in a rule function.',
-                file: jsFile.filename,
-                line: m.loc?.start.line,
-              });
-            }
-          }
           // #9 — `<x>._jsonModel.<...>` read bypasses dependency tracking
           if (m.object?.type === 'MemberExpression' && m.object.property?.name === '_jsonModel') {
             issues.push({
@@ -204107,7 +204716,7 @@ const NUMERIC_HELPER_RE = /(^format)|(?:number|amount|price|total|count|roi|emi|
 const CSS_VALUE_RE = /\b(?:calc|var|url|translate[XY]?|rgba?|hsla?)\s*\(|\d\s*(?:px|rem|em|vh|vw|vmin|vmax|pt|pc|ex|ch|fr|deg|rad|turn|ms)\b/i;
 const FORMAT_HELPER_RE = /^format[A-Z0-9_]/;
 
-function calleeName(callee) {
+function format_detection_calleeName(callee) {
   if (!callee) return '';
   if (callee.type === 'Identifier') return callee.name;
   if (callee.type === 'MemberExpression') return callee.property?.name || '';
@@ -204133,7 +204742,7 @@ function isNumericExpr(node) {
     if (callee?.type === 'MemberExpression' && ['toFixed', 'toLocaleString'].includes(callee.property?.name)) return true;
     if (callee?.type === 'MemberExpression' && callee.object?.name === 'Math') return true;
     if (callee?.type === 'Identifier' && ['Number', 'parseFloat', 'parseInt'].includes(callee.name)) return true;
-    const name = calleeName(callee);
+    const name = format_detection_calleeName(callee);
     if (name && NUMERIC_HELPER_RE.test(name)) return true;
   }
   return false;
@@ -204181,7 +204790,7 @@ function isPureFormattingCall(node) {
   if (node.type !== 'CallExpression') return false;
   const callee = node.callee;
   if (callee?.type === 'MemberExpression' && callee.property?.name === 'toLocaleString') return true;
-  const name = calleeName(callee);
+  const name = format_detection_calleeName(callee);
   return !!name && FORMAT_HELPER_RE.test(name);
 }
 
@@ -204304,7 +204913,7 @@ class DisplayFormatInCodeAnalyzer {
         },
         // setProperty(<field>, { value: <formatted> })
         CallExpression: (c) => {
-          if (calleeName(c.callee) !== 'setProperty') return;
+          if (format_detection_calleeName(c.callee) !== 'setProperty') return;
           // Plain-text target (resolved through local aliases) — no dataRef, no data path to
           // contaminate, so this specific sink is exempt regardless of H1/H2.
           const targetSegs = resolveChain(c.arguments?.[0], aliases);
@@ -210559,7 +211168,7 @@ const RULE_TYPES = {
   'component-value-sync': ['component-ignores-value-change'],
   'content-layer': ['content-text-in-css', 'content-text-in-view-js'],
   'component-model': ['component-model-prop-missing'],
-  'custom-fn-correctness': ['async-custom-function-ignored', 'field-parent-not-dollar-parent', 'jsonmodel-direct-read'],
+  'custom-fn-correctness': ['jsonmodel-direct-read', 'non-reactive-set-use-bind', 'markfieldasinvalid-in-fn-use-bind'],
   'custom-function': ['bulk-set-property-use-import-data', 'custom-event-in-custom-function', 'custom-functions-not-analyzed', 'direct-properties-mutation', 'dom-access-in-custom-function', 'http-request-in-custom-function', 'set-property-form-properties', 'window', 'window-access-in-custom-function'],
   'dispatch-target': ['dispatch-on-field-not-form', 'dispatch-plain-object-not-customevent'],
   'foreign-fragment-root': ['foreign-fragment-root-access'],
@@ -210756,6 +211365,13 @@ function formJsonRootFrom(configArray) {
  * entry on a rule id (`component-owns-model-concern`) governs ALL of that analyzer's finding types
  * (component-formats-display-value / -reinvents-constraint / …), not just a type that happens to
  * equal the id. Findings the config doesn't mention keep their analyzer-assigned severity.
+ *
+ * `options.ignoreTypes` (an array of finding-type strings) drops a SUBSET of a multi-type rule's
+ * findings while leaving the rest at whatever severity the rule specifies — e.g.
+ * `'aem-forms/custom-fn-correctness': ['error', { ignoreTypes: ['jsonmodel-direct-read'] }]` silences
+ * only that one finding type; `non-reactive-set-use-bind` / `markfieldasinvalid-in-fn-use-bind` (the
+ * rule's other two types) stay at `error`. Without this, the only granularity was the whole rule id —
+ * `off`/`warn` on the id silenced/downgraded ALL of its finding types together.
  * @param {Array} findings
  * @param {Array|null} configArray
  * @returns {Array}
@@ -210775,6 +211391,7 @@ function applyConfig(findings, configArray) {
     const rule = ruleFor(r, ruleIdForType(f.type)) || ruleFor(r, f.type);
     if (!rule) { out.push(f); continue; }       // not mentioned → keep as-is
     if (rule.severity === 'off') continue;       // disabled for this file → drop
+    if (rule.options?.ignoreTypes?.includes(f.type)) continue; // this ONE type opted out → drop
     // `warn` explicitly downgrades; `error` never WEAKENS an analyzer-assigned `critical` (a functional
     // break — fragment reaching the parent form / broken hierarchy). Both gate identically, so keeping
     // the stronger `critical` label loses nothing and matches the bot's built-in reporting.
