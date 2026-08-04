@@ -202968,7 +202968,116 @@ class CustomFnCorrectnessAnalyzer {
   }
 }
 
+;// CONCATENATED MODULE: ./src/utils/fragment-json-link.js
+/**
+ * Fragment/Form JSON ↔ JS link — the shared JS→JSON reverse resolver.
+ *
+ * A JS file declares the content JSON it drives via ONE file-level JSDoc tag:
+ *   - `@fragmentPath /content/forms/af/…/loanoffer-a2a`  (a standalone fragment) → globals.fragment
+ *   - `@formPath /content/forms/af/…/journey`            (a top-level form)      → globals.form
+ * The JSON lives on disk (loaded into scope via `formJsonRoot`), NOT in the diff. This module lets a
+ * JSON-anchored analyzer (rules-in-content, fragment-rule-form-ref) walk that link BACKWARDS: from a
+ * changed JS file to the content JSON it references — so a finding about the JSON can be re-anchored on
+ * the JS file's tag line. In `--diff` mode that is the difference between a `whole-file`/`pre-existing`
+ * finding (shown, never gated) and an `introduced` one (gated) — the JSON is never in the diff, but the
+ * JS file that points at it is.
+ *
+ * `readPathTag` is the single canonical parser (FragmentPathValidatorAnalyzer.readPathTag delegates to
+ * it, so foreign-fragment-root / orphan-fragment-handler share the same logic). No duplication.
+ */
+
+// Tag → the globals accessor root it implies. Order = precedence (first recognized tag wins).
+const PATH_TAGS = [
+  { tag: 'fragmentPath', root: 'fragment' },
+  { tag: 'formPath', root: 'form' },
+];
+
+/**
+ * Read the FIRST recognized path tag from a JS file's source. Returns `{ jcrPath, root, tag }` or null.
+ * The jcrPath is a LOGICAL JCR identity (e.g. /content/forms/af/…/loanoffer), not a filesystem path —
+ * so reject anything that could escape the form-JSON root when resolved to disk: `..` segments, a URL
+ * scheme, or a Windows drive/backslash. A malformed tag is treated as absent (null) rather than trusted.
+ * @param {string} content
+ * @returns {{ jcrPath: string, root: string, tag: string } | null}
+ */
+function readPathTag(content) {
+  for (const { tag, root } of PATH_TAGS) {
+    const m = new RegExp(`@${tag}\\s+(\\S+)`).exec(content || '');
+    if (!m) continue;
+    const jcrPath = m[1].replace(/\/+$/, '');
+    if (/(^|\/)\.\.(\/|$)/.test(jcrPath) || /^[a-z]+:/i.test(jcrPath) || /[\\]/.test(jcrPath)) return null;
+    return { jcrPath, root, tag };
+  }
+  return null;
+}
+
+/**
+ * 1-based line of the `@fragmentPath`/`@formPath` tag in the source (the anchor for a JS-attributed
+ * finding). Returns 1 when the content is empty or the tag can't be located — a safe, real location
+ * (line 1 is always in scope) rather than null (which would fall back to whole-file attribution).
+ * @param {string} content
+ * @param {string} tag - 'fragmentPath' | 'formPath'
+ * @returns {number}
+ */
+function tagLineIn(content, tag) {
+  const src = content || '';
+  const idx = src.search(new RegExp(`@${tag}\\s`));
+  if (idx < 0) return 1;
+  return src.slice(0, idx).split('\n').length;
+}
+
+const fragment_json_link_norm = (p) => (p || '').replace(/\\/g, '/');
+
+/**
+ * Resolve each JS file's declared content JSON against the in-scope `jsonFiles`. For every JS file that
+ * carries a path tag AND whose JSON is present in scope, returns one link:
+ *   { jsFilename, tag, root, jcrPath, tagLine, jsonFilename, json }
+ * `jsonFilename` is normalized (forward slashes); `json` is the parsed content (skipped on parse error).
+ * Suffix-match on `<jcrPath>.json` mirrors fragment-path-validator's resolver (the CRISPR mirror lives
+ * at `local-form-json/<jcrPath>.json`).
+ * @param {Array<{filename:string,content:any}>} jsFiles
+ * @param {Array<{filename:string,content:any}>} jsonFiles
+ * @param {(msg:string)=>void} [warn] - optional sink for JSON parse warnings
+ * @returns {Array<object>}
+ */
+function resolveReferencedJson(jsFiles, jsonFiles, warn) {
+  const links = [];
+  if (!Array.isArray(jsFiles) || !Array.isArray(jsonFiles)) return links;
+  const jsonByPath = jsonFiles
+    .filter((jf) => jf && jf.filename && jf.content != null)
+    .map((jf) => ({ filename: fragment_json_link_norm(jf.filename), content: jf.content }));
+  if (jsonByPath.length === 0) return links;
+
+  for (const jsFile of jsFiles) {
+    if (!jsFile || jsFile.content == null) continue;
+    const tag = readPathTag(jsFile.content);
+    if (!tag) continue;
+    const want = `${tag.jcrPath.replace(/^\/+/, '')}.json`;
+    const hit = jsonByPath.find((j) => j.filename.endsWith(want) || j.filename.endsWith(`/${want}`));
+    if (!hit) continue; // JSON not in scope — a separate concern (fragment-json-not-in-scope), not ours
+    let json;
+    try {
+      json = typeof hit.content === 'string' ? JSON.parse(hit.content) : hit.content;
+    } catch (e) {
+      if (warn) warn(`JSON parse failed for ${hit.filename}: ${e.message}`);
+      continue;
+    }
+    if (!json || typeof json !== 'object') continue;
+    links.push({
+      jsFilename: jsFile.filename,
+      tag: tag.tag,
+      root: tag.root,
+      jcrPath: tag.jcrPath,
+      tagLine: tagLineIn(jsFile.content, tag.tag),
+      jsonFilename: hit.filename,
+      json,
+    });
+  }
+  return links;
+}
+
 ;// CONCATENATED MODULE: ./src/analyzers/fragment-path-validator-analyzer.js
+
 
 
 
@@ -203013,25 +203122,11 @@ class FragmentPathValidatorAnalyzer {
   }
 
   // Tag → the globals accessor root it validates. `@fragmentPath` ⇒ globals.fragment, `@formPath` ⇒ globals.form.
-  static TAGS = [
-    { tag: 'fragmentPath', root: 'fragment' },
-    { tag: 'formPath', root: 'form' },
-  ];
+  static TAGS = PATH_TAGS;
 
-  // Read the FIRST recognized path tag. Returns { jcrPath, root } or null. The jcrPath is a LOGICAL
-  // JCR identity (e.g. /content/forms/af/…/loanoffer), not a filesystem path — so reject anything that
-  // could escape the form-JSON root when resolved to disk: `..` segments, a URL scheme, or a Windows
-  // drive/backslash. A malformed tag is treated as absent (null) rather than trusted.
-  static readPathTag(content) {
-    for (const { tag, root } of FragmentPathValidatorAnalyzer.TAGS) {
-      const m = new RegExp(`@${tag}\\s+(\\S+)`).exec(content || '');
-      if (!m) continue;
-      const jcrPath = m[1].replace(/\/+$/, '');
-      if (/(^|\/)\.\.(\/|$)/.test(jcrPath) || /^[a-z]+:/i.test(jcrPath) || /[\\]/.test(jcrPath)) return null;
-      return { jcrPath, root, tag };
-    }
-    return null;
-  }
+  // Read the FIRST recognized path tag — delegates to the shared JS→JSON link util so the parse logic
+  // lives in exactly one place (foreign-fragment-root / orphan-fragment-handler resolve through here).
+  static readPathTag = readPathTag;
 
   // Runtime accessors / non-node tail segments that are NOT JSON hierarchy nodes.
   static NON_NODE_SEG = new Set(['$value', '$properties', 'properties', '$name', '$qualifiedName', 'value', '$items', '$data']);
@@ -204147,6 +204242,7 @@ class ComponentValueSyncAnalyzer {
 ;// CONCATENATED MODULE: ./src/analyzers/fragment-rule-form-ref-analyzer.js
 
 
+
 /**
  * Fragment-Rule-Form-Ref Analyzer  (fragment independence)
  *
@@ -204189,17 +204285,51 @@ class FragmentRuleFormRefAnalyzer {
   // Rule/event containers whose values are arrays of expression strings.
   static RULE_KEYS = new Set(['fd:events', 'fd:rules', 'events', 'rules']);
 
-  analyze(formJson, jsonFiles = []) {
+  analyze(formJson, jsFiles = [], jsonFiles = []) {
     const issues = [];
     // Fail-safe: no JSON inputs (or a non-array) → nothing to scan, return empty cleanly.
     if (!Array.isArray(jsonFiles) || jsonFiles.length === 0) {
       return { violations: 0, issues: [] };
     }
+
+    // ── JS→JSON reverse link ─────────────────────────────────────────────────────────────────────
+    // A changed fragment JS declares its JSON via `@fragmentPath` (the JSON is loaded off
+    // `formJsonRoot`, never in the diff). Re-anchor that fragment JSON's `$form` violations on the JS
+    // tag LINE so `--diff` marks them introduced (gated) rather than whole-file/pre-existing. Only
+    // `@fragmentPath` links matter here — a top-level form legitimately uses `$form`. Linked fragment
+    // JSONs are excluded from the direct scan below to avoid double-reporting.
+    const linkedJson = new Set();
+    const links = resolveReferencedJson(jsFiles, jsonFiles, (m) => lib_core.warning(`[FragmentRuleFormRef] ${m}`));
+    for (const link of links) {
+      if (link.root !== 'fragment' || !FragmentRuleFormRefAnalyzer.isFragmentJson(link.jsonFilename)) continue;
+      linkedJson.add(link.jsonFilename);
+      const found = [];
+      try {
+        FragmentRuleFormRefAnalyzer.scan(link.json, link.jsonFilename, found);
+      } catch (e) {
+        lib_core.warning(`[FragmentRuleFormRef] scan failed for ${link.jsonFilename} — skipping: ${e.message}`);
+        continue;
+      }
+      for (const f of found) {
+        issues.push({
+          ...f,
+          file: link.jsFilename,
+          line: link.tagLine,
+          jsonFile: link.jsonFilename,
+          gateOnFilePresence: true, // gate when the JS file is in the diff at all — see rules-in-content
+          message: `${f.message} (referenced via \`@${link.tag} ${link.jcrPath}\` — fragment JSON `
+            + `\`${link.jsonFilename}\`).`,
+        });
+      }
+    }
+
+    // ── Direct JSON scan ─────────────────────────────────────────────────────────────────────────
     for (const file of jsonFiles) {
       // Skip anything that isn't a readable fragment JSON: missing file entry, missing/empty content,
       // or a path that isn't a /fragments/*.json. Never throw — this analyzer is advisory-safe.
       if (!file || !file.filename || file.content == null || file.content === '') continue;
       if (!FragmentRuleFormRefAnalyzer.isFragmentJson(file.filename)) continue;
+      if (linkedJson.has((file.filename || '').replace(/\\/g, '/'))) continue;
       let json;
       try {
         json = typeof file.content === 'string' ? JSON.parse(file.content) : file.content;
@@ -204263,6 +204393,7 @@ class FragmentRuleFormRefAnalyzer {
 }
 
 ;// CONCATENATED MODULE: ./src/analyzers/rules-in-content-analyzer.js
+
 
 
 /**
@@ -204341,15 +204472,55 @@ class RulesInContentAnalyzer {
     return eventName === 'custom:setProperty' && list.length === 1 && list[0] === '$event.payload';
   }
 
-  analyze(formJson, jsonFiles = []) {
+  analyze(formJson, jsFiles = [], jsonFiles = []) {
     const issues = [];
-    // Fail-safe: no JSON inputs (or a non-array) → nothing to scan, return empty cleanly.
     if (!Array.isArray(jsonFiles) || jsonFiles.length === 0) {
       return { violations: 0, issues: [] };
     }
+
+    // ── JS→JSON reverse link ─────────────────────────────────────────────────────────────────────
+    // A changed JS file declares its content JSON via `@fragmentPath`/`@formPath` (the JSON itself is
+    // loaded off `formJsonRoot`, never in the diff). Re-anchor that JSON's violations on the JS tag
+    // LINE so `--diff` attributes them to the change (introduced → gated) instead of whole-file/
+    // pre-existing (shown, never gated). JSONs reached this way are handled here and EXCLUDED from the
+    // plain JSON scan below, so a violation is reported exactly once at its best anchor.
+    const linkedJson = new Set();
+    const links = resolveReferencedJson(jsFiles, jsonFiles, (m) => lib_core.warning(`[RulesInContent] ${m}`));
+    for (const link of links) {
+      if (RulesInContentAnalyzer.isExcludedPath(link.jsonFilename)) continue;
+      if (!RulesInContentAnalyzer.isContentJson(link.jsonFilename, link.json)) continue;
+      linkedJson.add(link.jsonFilename);
+      const found = [];
+      try {
+        RulesInContentAnalyzer.scan(link.json, link.jsonFilename, found);
+      } catch (e) {
+        lib_core.warning(`[RulesInContent] scan failed for ${link.jsonFilename} — skipping: ${e.message}`);
+        continue;
+      }
+      // Re-anchor each JSON finding on the referencing JS file + its tag line. `gateOnFilePresence`
+      // tells --diff attribution to gate whenever the JS file is in the diff AT ALL (not only when the
+      // tag line sits in a changed hunk): a developer editing a fragment JS owns its linked content, so
+      // pre-existing rule grammar in that content must block regardless of which JS line they touched.
+      for (const f of found) {
+        issues.push({
+          ...f,
+          file: link.jsFilename,
+          line: link.tagLine,
+          jsonFile: link.jsonFilename,
+          gateOnFilePresence: true,
+          message: `${f.message} (referenced via \`@${link.tag} ${link.jcrPath}\` — content JSON `
+            + `\`${link.jsonFilename}\`).`,
+        });
+      }
+    }
+
+    // ── Direct JSON scan ─────────────────────────────────────────────────────────────────────────
+    // Whole-form runs (and JSONs no changed JS references): scan the content JSON in place. Skip any
+    // JSON already re-anchored above to avoid double-reporting the same violation.
     for (const file of jsonFiles) {
       if (!file || !file.filename || file.content == null || file.content === '') continue;
       if (RulesInContentAnalyzer.isExcludedPath(file.filename)) continue;
+      if (linkedJson.has((file.filename || '').replace(/\\/g, '/'))) continue;
       let json;
       try {
         json = typeof file.content === 'string' ? JSON.parse(file.content) : file.content;
@@ -207316,9 +207487,11 @@ async function runAnalysis(beforeData, afterData, jsFiles = [], cssFiles = [], c
   const componentRuleFormScopeResult = new ComponentRuleFormScopeAnalyzer(config).analyze(formJson, jsFiles);
   const shouldBeComponentResult    = new ShouldBeComponentAnalyzer(config).analyze(formJson, jsFiles);
   const componentValueSyncResult   = new ComponentValueSyncAnalyzer(config).analyze(formJson, jsFiles);
-  // Fail-safe: scans fragment JSON files (path contains /fragments/); empty/absent → no-op.
-  const fragmentRuleFormRefResult  = new FragmentRuleFormRefAnalyzer(config).analyze(formJson, jsonFiles);
-  const rulesInContentResult       = new RulesInContentAnalyzer(config).analyze(formJson, jsonFiles);
+  // Fail-safe: scans fragment JSON files (path contains /fragments/); empty/absent → no-op. jsFiles let
+  // it reverse-resolve a changed fragment JS's @fragmentPath to its JSON and anchor the finding on the
+  // JS line (so --diff gates it) — see src/utils/fragment-json-link.js.
+  const fragmentRuleFormRefResult  = new FragmentRuleFormRefAnalyzer(config).analyze(formJson, jsFiles, jsonFiles);
+  const rulesInContentResult       = new RulesInContentAnalyzer(config).analyze(formJson, jsFiles, jsonFiles);
   // Needs BOTH fragment JS and its paired JSON; skips a JS file whose JSON isn't in the set.
   const orphanFragmentHandlerResult = new OrphanFragmentHandlerAnalyzer(config).analyze(formJson, jsFiles, jsonFiles);
   const contentInCodeResult        = new ContentInCodeAnalyzer(config).analyze(formJson, jsFiles);
