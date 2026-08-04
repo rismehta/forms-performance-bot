@@ -202439,12 +202439,18 @@ class HardcodedConfigAnalyzer {
  *      `custom:*Init` event payload from state and the fragment consumes `globals.event.payload`.
  *      Fires even for a namespaced/`_` read (on init nothing should be pulled from form state). When
  *      a read is both bare AND in an init, only (e) is emitted (init is the root ownership issue).
+ *  (f) derived-value-persisted: a form-scoped `setVariable('<name>', <RHS>)` whose RHS is a
+ *      COMPUTATION (arithmetic / ternary / template-concat) over a direct form-state read
+ *      (`getVariable(...)`, a `.value`/`.$value` read, or `$properties.<key>`) — a Class-2 projection
+ *      stored instead of re-derived. A persisted derivation drifts when its inputs change; re-derive it
+ *      at the point of use (a shared calc / reactive rule). Emitted INSTEAD of (a)/(b)/(c) (persisting a
+ *      derivation is the root issue). Exempt: a value CACHED from an async/fetched result — the write is
+ *      inside a `.then`/`.catch`/`.finally` callback, OR the RHS itself holds an `await`/`request`(the
+ *      irreducible cross-screen cache). Requiring a DIRECT form-state leaf keeps it error-safe: it never
+ *      fires on `resp.body.*` arithmetic or a purely-local intermediate (a data-flow extension deferred).
  *
  * NOT auto-checked here (reviewer guidance — needs cross-file restore analysis / naming intent, which
  * would false-positive on an `error` gate; enforce in review against journey-state-model.md):
- *  - Class-2 projection persist-AND-restore: a derived projection (e.g. `LoanAmount`) must be
- *    RE-DERIVED from its Class-1/Class-3 sources on every write, never persisted-and-restored (that
- *    reintroduces drift). Guarantee its sources are restored, not the projection.
  *  - `_`-prefix boundary: a transient scratch form-var must be named `_x` (never persisted); a
  *    non-`_` name that is clearly ephemeral, or reading a `_x` expecting it to survive resume, is
  *    wrong. Field-scoped vars never persist (need no `_`).
@@ -202452,8 +202458,9 @@ class HardcodedConfigAnalyzer {
  *    etc. set via setProperty are recomputed — never rely on a setProperty-set prop across resume.
  *
  * Severity: (a) form-data-in-variable, (b) variable-not-namespaced, (d) getvariable-not-namespaced,
- * (e) getvariable-in-init are `error` (unambiguous, cross-file-independent); (c) write-only-variable
- * is a `warning` (cross-file/authored-rule readers can't be seen statically).
+ * (e) getvariable-in-init, (f) derived-value-persisted are `error` (unambiguous, cross-file-
+ * independent); (c) write-only-variable is a `warning` (cross-file/authored-rule readers can't be seen
+ * statically).
  */
 class StorageClassAnalyzer {
   constructor(config = null) {
@@ -202545,6 +202552,81 @@ class StorageClassAnalyzer {
     return '';
   }
 
+  // True when the node sits inside a `.then(...)` / `.catch(...)` / `.finally(...)` callback — i.e. it
+  // runs after an async result has resolved, so a value it derives is caching that fetched result (the
+  // irreducible cross-screen cache), NOT a re-derivable projection. Used to EXEMPT (f).
+  static isInsideAsyncContinuation(ancestors) {
+    for (let i = ancestors.length - 1; i >= 0; i -= 1) {
+      const n = ancestors[i];
+      if (n.type === 'FunctionExpression' || n.type === 'ArrowFunctionExpression') {
+        const parent = ancestors[i - 1];
+        if (parent?.type === 'CallExpression'
+          && parent.callee?.type === 'MemberExpression'
+          && ['then', 'catch', 'finally'].includes(parent.callee.property?.name)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  // Deep-walk a value-node subtree, invoking `visit` on every child AST node (skips loc/range noise).
+  static walkValue(node, visit) {
+    if (!node || typeof node !== 'object') return;
+    visit(node);
+    for (const k of Object.keys(node)) {
+      if (k === 'type' || k === 'loc' || k === 'start' || k === 'end' || k === 'range') continue;
+      const v = node[k];
+      if (Array.isArray(v)) v.forEach((c) => StorageClassAnalyzer.walkValue(c, visit));
+      else if (v && typeof v === 'object') StorageClassAnalyzer.walkValue(v, visit);
+    }
+  }
+
+  // A setVariable RHS is a DERIVATION when it both (1) COMPUTES — arithmetic BinaryExpression, a
+  // ternary, or a template/`+`-concat with interpolation — and (2) reads FORM STATE: `getVariable(...)`
+  // (unambiguous), or a `.value`/`.$value`/`$properties.<key>` member read whose base chain resolves to
+  // a form/fragment/field node (`globals.form`/`globals.fragment.<root>`/`globals.field`, a descended
+  // child, or a local alias to one — `resolve`+`classifyChain`). Requiring the member base to be
+  // form-rooted keeps it error-safe: it fires on a value projected from other form state, but NOT on
+  // arithmetic over a fetched `resp.body.value` (base `resp` classifies 'unknown' → not a form read) or
+  // over purely-local intermediates (a data-flow extension left to a later pass).
+  // `resolve` is the file's alias resolver (resolveChain over the local alias map).
+  static isDerivation(node, resolve = (x) => x) {
+    if (!node || typeof node !== 'object') return false;
+    // A member base is a form-state node when its resolved chain classifies as anything BUT 'unknown'.
+    const isFormRooted = (base) => StorageClassAnalyzer.classifyChain(resolve(base)) !== 'unknown';
+    let computes = false;
+    let readsFormState = false;
+    StorageClassAnalyzer.walkValue(node, (n) => {
+      if (n.type === 'BinaryExpression' && ['+', '-', '*', '/', '%'].includes(n.operator)) computes = true;
+      else if (n.type === 'ConditionalExpression') computes = true;
+      else if (n.type === 'TemplateLiteral' && Array.isArray(n.expressions) && n.expressions.length) computes = true;
+      else if (n.type === 'CallExpression' && StorageClassAnalyzer.calleeName(n.callee) === 'getVariable') readsFormState = true;
+      else if (n.type === 'MemberExpression') {
+        // `<base>.value` / `<base>.$value` — count only when <base> is a form node.
+        if (!n.computed && (n.property?.name === 'value' || n.property?.name === '$value') && isFormRooted(n.object)) readsFormState = true;
+        // `<base>.$properties.<key>` — n is the `.<key>` read; its base is n.object.object.
+        if (n.object?.type === 'MemberExpression' && n.object.property?.name === '$properties' && isFormRooted(n.object.object)) readsFormState = true;
+      }
+    });
+    return computes && readsFormState;
+  }
+
+  // True when the value expression pulls from an async/fetched source directly — an `await`, or a
+  // `request`/`fetch`/`requestWithRetry`/`requestWithLoader` call. Such a value is the irreducible
+  // fetched cache, EXEMPT from (f) even when it also computes.
+  static hasAsyncValue(node) {
+    let found = false;
+    StorageClassAnalyzer.walkValue(node, (n) => {
+      if (n.type === 'AwaitExpression') found = true;
+      else if (n.type === 'CallExpression'
+        && ['request', 'fetch', 'requestWithRetry', 'requestWithLoader'].includes(StorageClassAnalyzer.calleeName(n.callee))) {
+        found = true;
+      }
+    });
+    return found;
+  }
+
   // Collect field names that are bound by a dataRef in the form JSON.
   static dataRefFieldNames(formJson) {
     const names = new Set();
@@ -202626,7 +202708,16 @@ class StorageClassAnalyzer {
             // In scope only when the scope arg is a form-level anchor (globals.form / fragment.<root>).
             // A specific-node bag (field, or a descended child) is out of scope — not journey state.
             if (!outOfScopeScopeArg(c.arguments?.[2], resolve)) {
-              setSites.push({ name: key, file: jsFile.filename, line: c.loc?.start.line });
+              // Compute the (f) derived-value-persisted verdict HERE, where the file's alias `resolve`
+              // is in scope (isDerivation needs it to check the member base is form-rooted). A write is
+              // a persisted derivation when its value COMPUTES over a form-state read AND is not an
+              // async/fetched cache (inside a .then/.catch/.finally, or an await/request in the value).
+              const valueNode = c.arguments?.[1];
+              const derivedPersisted = !!valueNode
+                && !StorageClassAnalyzer.isInsideAsyncContinuation(ancestors)
+                && StorageClassAnalyzer.isDerivation(valueNode, resolve)
+                && !StorageClassAnalyzer.hasAsyncValue(valueNode);
+              setSites.push({ name: key, file: jsFile.filename, line: c.loc?.start.line, derivedPersisted });
             }
           }
         },
@@ -202665,6 +202756,26 @@ class StorageClassAnalyzer {
 
     const isNamespaced = (name) => /^(data\.|uistate\.)/.test(name);
     for (const site of setSites) {
+      // (f) derived-value-persisted — a form-scoped setVariable whose RHS is a COMPUTATION over other
+      // form-state reads (getVariable / a form-rooted .value / $properties) is a Class-2 projection: it
+      // must be RE-DERIVED at the point of use, never persisted (a stored derivation drifts when its
+      // inputs change). Verdict computed at collection time (needs the file's alias resolver). Emitted
+      // INSTEAD of (a)/(b)/(c) — persisting a derivation is the root issue, more specific than the
+      // namespacing/dead-write findings. Field-scoped writes are already excluded upstream (setSites
+      // holds only form-scoped writes); async/fetched caches are exempted in the verdict.
+      if (site.derivedPersisted) {
+        issues.push({
+          severity: 'error',
+          type: 'derived-value-persisted',
+          message: `setVariable('${site.name}', …) persists a value COMPUTED from other form state `
+            + '(a Class-2 projection). Re-derive it at the point of use — a shared calc or reactive '
+            + 'rule — instead of storing it; a persisted derivation drifts when its inputs change. '
+            + 'Exempt only when caching an async/fetched result.',
+          file: site.file,
+          line: site.line,
+        });
+        continue;
+      }
       // (a) form data copied into a variable
       if (dataRefNames.has(site.name)) {
         issues.push({
@@ -204140,6 +204251,166 @@ class FragmentRuleFormRefAnalyzer {
         }
       } else if (val && typeof val === 'object') {
         FragmentRuleFormRefAnalyzer.scan(val, filename, issues, here);
+      }
+    }
+  }
+
+  compare(before, after) {
+    const b = before?.violations || 0;
+    const a = after?.violations || 0;
+    return { before: b, after: a, delta: a - b, regressed: a > b };
+  }
+}
+
+;// CONCATENATED MODULE: ./src/analyzers/rules-in-content-analyzer.js
+
+
+/**
+ * Rules-In-Content Analyzer  (code/content separation)
+ *
+ * Governance stance for this codebase: a form/fragment CONTENT JSON is pure structure + authored copy —
+ * it must carry NO rule/expression grammar. Business logic (event handlers, reactive value/visibility
+ * calculations, display expressions) belongs in the code / rule-store layer (a custom-function
+ * reference or an external rule), not baked inline into the content model. `rules` / `fd:rules`
+ * (and the `events` handler bindings) are valid af-core constructs in general — this rule enforces the
+ * stricter local policy that they do not live inline in content.
+ *
+ * Flags the presence of any RULE-GRAMMAR key on a content node:
+ *   - CONTAINER keys — `events` / `fd:events` / `rules` / `fd:rules` (event→handler bindings and
+ *     reactive-rule containers; the reactive value/visible/enabled expressions live INSIDE `rules` /
+ *     `fd:rules`, e.g. `{"rules":{"value":"emiCalc()"}}`, so the container check covers them). The
+ *     framework plumbing entry `custom:setProperty: ["$event.payload"]` (auto-emitted on nearly every
+ *     node) is NOT authored logic and is skipped; a container is flagged only when a non-plumbing
+ *     handler remains.
+ *   - EXPRESSION keys — the top-level inline json-formula expression properties `displayValueExpression`
+ *     and `validationExpression` (the only expression-holding property keys af-core carries outside the
+ *     `rules` container).
+ *
+ * Key set is an explicit allow-list — never an `fd:*` prefix match: structural `fd:*` config
+ * (`fd:path`, `fd:buttonType`, `fd:dataUrl`, `fd:repoPath`, `fd:schemaType`, …) is NOT rule grammar.
+ *
+ * Input: form AND fragment content JSON, detected by SHAPE (an af-core model root carries `fieldType`
+ * / `:items` / `:itemsOrder` / `adaptiveform`) OR a `/fragments/` path — so it works for both the
+ * nested `content/forms/af/…` layout and a flat `local-form-json/<name>.json` layout. Code/test/style
+ * dirs (`node_modules`, `blocks/`, `test/`, `styles/`, `dist/`) are excluded. Advisory-safe: never
+ * throws.
+ *
+ * Anchor: the JSON file + the node path + the offending rule key (no JS line — Group C/D, bot-only).
+ * Severity: error.
+ */
+class RulesInContentAnalyzer {
+  constructor(config = null) {
+    this.config = config;
+  }
+
+  // Code/test/style dirs that never hold authored form content — excluded before any shape/path check.
+  static isExcludedPath(filename) {
+    const f = (filename || '').replace(/\\/g, '/');
+    return /(^|\/)(node_modules|blocks|test|styles|dist)\//.test(f);
+  }
+
+  // A standalone fragment lives under a `/fragments/` folder in any layout (authoring repo or CRISPR).
+  static hasFragmentsPath(filename) {
+    return /(^|\/)fragments\//.test((filename || '').replace(/\\/g, '/'));
+  }
+
+  // af-core model signal: a form/fragment root carries at least one of these structural keys. Robust
+  // across the flat `local-form-json/<name>.json` layout (forms-assets) and the nested `content/forms/`
+  // layout — path is not required. Non-form JSON (component-definition/-models, config) lacks them.
+  static isFormModel(json) {
+    return !!json && typeof json === 'object' && !Array.isArray(json)
+      && ('fieldType' in json || ':items' in json || ':itemsOrder' in json || 'adaptiveform' in json);
+  }
+
+  // Content JSON = not a code/test/style path AND (a fragment path OR an af-core model by shape).
+  static isContentJson(filename, json) {
+    if (RulesInContentAnalyzer.isExcludedPath(filename)) return false;
+    return RulesInContentAnalyzer.hasFragmentsPath(filename) || RulesInContentAnalyzer.isFormModel(json);
+  }
+
+  // Event/reactive-rule containers (objects of handler arrays).
+  static CONTAINER_KEYS = new Set(['events', 'fd:events', 'rules', 'fd:rules']);
+
+  // Top-level inline json-formula expression properties (string expressions). Reactive value/visible/
+  // enabled expressions are NOT here — they live inside the `rules` / `fd:rules` container above.
+  static EXPRESSION_KEYS = new Set(['displayValueExpression', 'validationExpression']);
+
+  // The framework plumbing handler auto-emitted on nearly every node — not authored logic, skipped.
+  static isPlumbingHandler(eventName, exprs) {
+    const list = Array.isArray(exprs) ? exprs : [exprs];
+    return eventName === 'custom:setProperty' && list.length === 1 && list[0] === '$event.payload';
+  }
+
+  analyze(formJson, jsonFiles = []) {
+    const issues = [];
+    // Fail-safe: no JSON inputs (or a non-array) → nothing to scan, return empty cleanly.
+    if (!Array.isArray(jsonFiles) || jsonFiles.length === 0) {
+      return { violations: 0, issues: [] };
+    }
+    for (const file of jsonFiles) {
+      if (!file || !file.filename || file.content == null || file.content === '') continue;
+      if (RulesInContentAnalyzer.isExcludedPath(file.filename)) continue;
+      let json;
+      try {
+        json = typeof file.content === 'string' ? JSON.parse(file.content) : file.content;
+      } catch (e) {
+        lib_core.warning(`[RulesInContent] parse failed for ${file.filename} — skipping: ${e.message}`);
+        continue;
+      }
+      if (!json || typeof json !== 'object') continue;
+      // Detect content by SHAPE (af-core model) or a /fragments/ path — path layout is not required.
+      if (!RulesInContentAnalyzer.isContentJson(file.filename, json)) continue;
+      try {
+        RulesInContentAnalyzer.scan(json, file.filename, issues);
+      } catch (e) {
+        lib_core.warning(`[RulesInContent] scan failed for ${file.filename} — skipping: ${e.message}`);
+      }
+    }
+    return { violations: issues.length, issues };
+  }
+
+  // Walk the content JSON; flag any rule-grammar key on a node. Do NOT recurse into a flagged
+  // container/expression value (its inner objects are rule internals, not content nodes).
+  static scan(node, filename, issues, componentPath = '') {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) {
+      node.forEach((child) => RulesInContentAnalyzer.scan(child, filename, issues, componentPath));
+      return;
+    }
+    const here = node.name ? (componentPath ? `${componentPath}.${node.name}` : node.name) : componentPath;
+    for (const [key, val] of Object.entries(node)) {
+      if (RulesInContentAnalyzer.CONTAINER_KEYS.has(key) && val && typeof val === 'object') {
+        const handlers = Object.entries(val)
+          .filter(([evName, exprs]) => !RulesInContentAnalyzer.isPlumbingHandler(evName, exprs))
+          .map(([evName]) => evName);
+        if (handlers.length) {
+          issues.push({
+            severity: 'error',
+            type: 'rule-grammar-in-content',
+            message: `\`${key}\` rule grammar is authored inline in content on \`${here || '(root)'}\` `
+              + `(${handlers.slice(0, 4).join(', ')}${handlers.length > 4 ? ', …' : ''}). This content `
+              + 'layer must carry no rules — move the logic to the code / rule-store layer (a '
+              + 'custom-function reference or an external rule) so the form/fragment JSON stays rule-free.',
+            file: filename,
+            ruleKey: key,
+            component: here || '(root)',
+          });
+        }
+        // Do not recurse into the container — its entries are handler arrays, not content nodes.
+      } else if (RulesInContentAnalyzer.EXPRESSION_KEYS.has(key) && typeof val === 'string' && val.trim() !== '') {
+        issues.push({
+          severity: 'error',
+          type: 'rule-grammar-in-content',
+          message: `\`${key}\` json-formula expression is authored inline in content on `
+            + `\`${here || '(root)'}\`. This content layer must carry no rules — move the calculation to `
+            + 'the code / rule-store layer so the form/fragment JSON stays rule-free.',
+          file: filename,
+          expression: val.slice(0, 120),
+          ruleKey: key,
+          component: here || '(root)',
+        });
+      } else if (val && typeof val === 'object') {
+        RulesInContentAnalyzer.scan(val, filename, issues, here);
       }
     }
   }
@@ -206958,6 +207229,7 @@ class ComponentRuleFormScopeAnalyzer {
 
 
 
+
 const DEFAULT_LOGGER = {
   info:    msg => console.log(msg),
   warning: msg => console.warn(msg),
@@ -207046,6 +207318,7 @@ async function runAnalysis(beforeData, afterData, jsFiles = [], cssFiles = [], c
   const componentValueSyncResult   = new ComponentValueSyncAnalyzer(config).analyze(formJson, jsFiles);
   // Fail-safe: scans fragment JSON files (path contains /fragments/); empty/absent → no-op.
   const fragmentRuleFormRefResult  = new FragmentRuleFormRefAnalyzer(config).analyze(formJson, jsonFiles);
+  const rulesInContentResult       = new RulesInContentAnalyzer(config).analyze(formJson, jsonFiles);
   // Needs BOTH fragment JS and its paired JSON; skips a JS file whose JSON isn't in the set.
   const orphanFragmentHandlerResult = new OrphanFragmentHandlerAnalyzer(config).analyze(formJson, jsFiles, jsonFiles);
   const contentInCodeResult        = new ContentInCodeAnalyzer(config).analyze(formJson, jsFiles);
@@ -207186,6 +207459,7 @@ async function runAnalysis(beforeData, afterData, jsFiles = [], cssFiles = [], c
     shouldBeComponent: { after: shouldBeComponentResult, newIssues: shouldBeComponentResult.issues ?? [], resolvedIssues: [] },
     componentValueSync: { after: componentValueSyncResult, newIssues: componentValueSyncResult.issues ?? [], resolvedIssues: [] },
     fragmentRuleFormRef: { after: fragmentRuleFormRefResult, newIssues: fragmentRuleFormRefResult.issues ?? [], resolvedIssues: [] },
+    rulesInContent: { after: rulesInContentResult, newIssues: rulesInContentResult.issues ?? [], resolvedIssues: [] },
     orphanFragmentHandler: { after: orphanFragmentHandlerResult, newIssues: orphanFragmentHandlerResult.issues ?? [], resolvedIssues: [] },
     contentInCode: { after: contentInCodeResult, newIssues: contentInCodeResult.issues ?? [], resolvedIssues: [] },
     contentLayer: { after: contentLayerResult, newIssues: contentLayerResult.issues ?? [], resolvedIssues: [] },
@@ -211176,6 +211450,7 @@ const RULE_TYPES = {
   'fragment-path-validator': ['fragment-path-missing-annotation', 'fragment-path-not-in-json', 'nested-fragment-boundary-reach'],
   'fragment-qualified-name': ['fragment-qualified-name-in-custom-function'],
   'fragment-rule-form-ref': ['fragment-rule-references-form-root'],
+  'rules-in-content': ['rule-grammar-in-content'],
   'hardcoded-config': ['hardcoded-endpoint-url', 'hardcoded-error-message'],
   'hidden-fields': ['static-false-visibility', 'unnecessary-hidden-field'],
   'navigation-in-custom-fn': ['navigation-dom-in-custom-function', 'window-location-navigation-in-custom-function'],
@@ -211188,7 +211463,7 @@ const RULE_TYPES = {
   'rule-vs-code': ['markfieldasinvalid-instead-of-validationexpression', 'value-visibility-logic-in-js'],
   'runtime-cls': ['direct-style-manipulation', 'dynamic-class-manipulation', 'dynamic-css-loading', 'dynamic-style-injection'],
   'should-be-component': ['fragment-dom-create-element', 'fragment-dom-event-listener', 'fragment-dom-mutation', 'fragment-dom-query'],
-  'storage-class': ['form-data-in-variable', 'getvariable-in-init', 'getvariable-not-namespaced', 'variable-not-namespaced', 'write-only-variable'],
+  'storage-class': ['form-data-in-variable', 'getvariable-in-init', 'getvariable-not-namespaced', 'variable-not-namespaced', 'write-only-variable', 'derived-value-persisted'],
   'form-analyzer': ['component-count', 'event-handlers', 'nested-panels', 'nesting-depth'],
   'form-events': ['api-call-in-initialize', 'axios', 'fetch', 'jquery-ajax', 'request', 'requestWithRetry', 'xhr'],
 };
