@@ -190199,7 +190199,7 @@ base.MethodDefinition = base.PropertyDefinition = base.Property = function (node
  * Tiers:
  *  - Component VIEW (`…/components/<name>/<name>.js`, NOT `<name>{-,.}rules.js`) — DOM legitimate.
  *  - Form RUNTIME (basename `form*.js` / `decorateForm.js` / `util.js` / `aem.js`) — DOM legitimate.
- *  - Custom-fn SURFACE (fragment(s)/ folder, `*{-,.}rules.js`, `functions[.source].js`, or scripts/) —
+ *  - Custom-fn SURFACE (fragment(s)/ folder, `*{-,.}rules.js`, or `functions[.source].js`) —
  *    orchestration code where DOM / navigation / direct field reach is FORBIDDEN.
  *  - Everything else (site header, router, tests, third-party) — not form code; no opinion.
  */
@@ -190217,19 +190217,20 @@ function isComponentView(filename) {
 }
 
 /**
- * Component RULE script: a `*{-,.}rules.js` that belongs to a reusable component — either co-located
- * (`…/components/<name>/<name>{-,.}rules.js`) or in a shared component-rules folder
- * (`…/scripts/components/<name>{-,.}rules.js`). These provide the THEN-logic a component's `change`/event
- * rule calls, and are reused across MANY forms — so unlike a fragment (which owns one form JSON) a
- * component rule must NOT reach into form/fragment scope at all: no `globals.form.<field>` traversal,
- * no `globals.form.$properties.<key>` read. It gets values from its own field (`globals.field`) or an
- * event payload, and communicates outward by broadcasting (`dispatchEvent(globals.form, …)`).
+ * Component RULE script: a `*{-,.}rules.js` living anywhere under a `components/` folder — whether
+ * co-located with the view (`…/components/<name>/<name>{-,.}rules.js`) or in a shared component-rules
+ * folder (`…/components/<name>{-,.}rules.js`, e.g. `blocks/form/scripts/components/pincode-rules.js`).
+ * The `components/` segment is the signal; the folder it sits under (scripts/ or otherwise) is not.
+ * These provide the THEN-logic a component's `change`/event rule calls, and are reused across MANY
+ * forms — so unlike a fragment (which owns one form JSON) a component rule must NOT reach into
+ * form/fragment scope at all: no `globals.form.<field>` traversal, no `globals.form.$properties.<key>`
+ * read. It gets values from its own field (`globals.field`) or an event payload, and communicates
+ * outward by broadcasting (`dispatchEvent(globals.form, …)`).
  */
 function isComponentRule(filename) {
   const f = norm(filename);
-  return /[-.]rules\.js$/.test(f)
-    && (/(^|\/)components\/[^/]+\/[^/]+[-.]rules\.js$/.test(f)   // components/<name>/<name>{-,.}rules.js
-      || /(^|\/)scripts\/components\/[^/]+[-.]rules\.js$/.test(f)); // scripts/components/<name>{-,.}rules.js
+  // A `*{-,.}rules.js` with a `components/` segment anywhere in its path.
+  return /(^|\/)components\/(.*\/)?[^/]+[-.]rules\.js$/.test(f);
 }
 
 /**
@@ -190242,19 +190243,20 @@ function isFormRuntime(filename) {
 /**
  * A fragment / custom-function SURFACE: orchestration code where view DOM, navigation DOM, and
  * cross-fragment field reach are forbidden. Component views and form runtime are excluded (their DOM
- * is legitimate). Signals — any of:
+ * is legitimate). Detected by CONTENT signals — never a blanket `scripts/` folder match, which would
+ * wrongly sweep in generic helpers (`scripts/utils/telemetry.js`, `journey/utils/journey-utils.js`).
+ * Every genuine surface carries one of these signals in BOTH the `blocks/form/scripts/…` and the ACS
+ * `journey/…` layouts. Signals — any of:
  *  - under a fragment folder:      `.../fragment/...` or `.../fragments/...`
  *  - a rules file:                 `<name>{-,.}rules.js`
  *  - the custom-functions entry:   `functions.js` / `functions.source.js`
- *  - under a scripts folder:       `.../scripts/...`
  */
 function isCustomFnSurface(filename) {
   if (isComponentView(filename) || isFormRuntime(filename)) return false;
   const f = norm(filename);
   return /(^|\/)fragments?\//.test(f)
     || /[-.]rules\.js$/.test(f)
-    || /^functions(\.source)?\.js$/.test(basename(filename))
-    || /(^|\/)scripts\//.test(f);
+    || /^functions(\.source)?\.js$/.test(basename(filename));
 }
 
 /**
@@ -203612,8 +203614,8 @@ class ForeignFragmentRootAnalyzer {
  * submit+redirect is simpler: `globals.functions.submitForm(...)` — af-core owns the redirect.)
  *
  * Scope guard — the CUSTOM-FUNCTION surface (DOM forbidden), classified generically by
- * form-file-tiers.isCustomFnSurface: fragment(s)/ folders, `*-rules.js`, `functions[.source].js`,
- * scripts/ — in ANY layout (blocks/form, blocks/fragment, journeys/<j>/{fragments,form}). (Both
+ * form-file-tiers.isCustomFnSurface: fragment(s)/ folders, `*-rules.js`, `functions[.source].js`
+ * — in ANY layout (blocks/form, blocks/fragment, journeys/<j>/{fragments,form}). (Both
  * `submitMandatePostForm` in emandate-a2a.js AND `sendAadharRequest` in functions.js are this same
  * violation.) NOT flagged — the tiers where DOM is legitimate: the form runtime (`form*.js`,
  * `util.js`, `aem.js`, `decorateForm.js`) and component/hook views (`components/<name>/<name>.js`).
@@ -203754,7 +203756,7 @@ class NavigationInCustomFnAnalyzer {
  *    a DELIBERATE one-off submit-time normalization is legitimate and unprovable statically.
  *
  * Scope guards (via form-file-tiers.isCustomFnSurface — layout-agnostic, NOT a fixed path):
- *  - Runs on custom-fn surfaces: fragment(s)/ folders, scripts/, functions[.source].js, *-rules.js —
+ *  - Runs on custom-fn surfaces: fragment(s)/ folders, functions[.source].js, *-rules.js —
  *    in ANY layout (blocks/form, blocks/fragment, journeys/<j>/{fragments,form}).
  *  - EXEMPT: component views (`components/<x>/<x>.js`) and the form runtime (`form*.js`, `util.js`,
  *    `aem.js`, `decorateForm.js`) where DOM is the job; and non-form JS (no surface signal).
@@ -204466,6 +204468,13 @@ class RulesInContentAnalyzer {
   // enabled expressions are NOT here — they live inside the `rules` / `fd:rules` container above.
   static EXPRESSION_KEYS = new Set(['displayValueExpression', 'validationExpression']);
 
+  // Authored user-message bags. Their entries are keyed by CONSTRAINT NAME (`required`, `pattern`,
+  // `minLength`, … and `validationExpression`) but each VALUE is the failure MESSAGE for that
+  // constraint — authored copy, never rule grammar. In particular `constraintMessages.validationExpression`
+  // is the message shown when the top-level `validationExpression` fails, NOT an expression. Do not
+  // descend into these bags, else a message keyed `validationExpression` is misread as inline grammar.
+  static MESSAGE_BAG_KEYS = new Set(['constraintMessages', 'fd:constraintMessages']);
+
   // The framework plumbing handler auto-emitted on nearly every node — not authored logic, skipped.
   static isPlumbingHandler(eventName, exprs) {
     const list = Array.isArray(exprs) ? exprs : [exprs];
@@ -204550,6 +204559,10 @@ class RulesInContentAnalyzer {
     }
     const here = node.name ? (componentPath ? `${componentPath}.${node.name}` : node.name) : componentPath;
     for (const [key, val] of Object.entries(node)) {
+      if (RulesInContentAnalyzer.MESSAGE_BAG_KEYS.has(key)) {
+        // Authored message bag — its `validationExpression`/etc. entries are failure copy, not grammar.
+        continue;
+      }
       if (RulesInContentAnalyzer.CONTAINER_KEYS.has(key) && val && typeof val === 'object') {
         const handlers = Object.entries(val)
           .filter(([evName, exprs]) => !RulesInContentAnalyzer.isPlumbingHandler(evName, exprs))
@@ -204816,10 +204829,16 @@ function isProse(text) {
  *   (2) VALIDATION / ERROR message — the same prose returned as a validation error.
  *       → author as the field's constraintMessages/validateExpMessage; return {valid:false} w/o a msg.
  *
- * Division of labour with hardcoded-config: that analyzer owns the `errorMessage: '<literal>'` object
- * property AND `markFieldAsInvalid(…, '<msg>')` shapes — this analyzer SKIPS those (no double-flag)
- * and adds the missing cases: bare `return '<prose>'` from a validator/rule fn, and
- * `setProperty(field, {value:<prose>})` display copy.
+ * Prose reaches the sink DIRECTLY (a literal) or INDIRECTLY through a same-file `const`/`let`
+ * identifier — the common "hoist the copy to a module const" shape
+ * (`const MSG = 'Please enter…'; return { valid:false, errorMessage: MSG }`, including a
+ * `props.x || DEFAULT_MSG` fallback). Identifier resolution walks the file's declarators.
+ *
+ * Division of labour with hardcoded-config: that analyzer owns the DIRECT `errorMessage: '<literal>'`
+ * object property AND `markFieldAsInvalid(…, '<msg>')` shapes — this analyzer SKIPS the direct-literal
+ * errorMessage (no double-flag) and adds the missing cases: bare `return '<prose>'` from a
+ * validator/rule fn, `setProperty(field, {value:<prose>})` display copy, and an INDIRECT
+ * (identifier/fallback) prose message reaching `return`/`errorMessage:`/`setProperty value`.
  *
  * Exemptions (error-safe): `throw new Error(…)` / `console.*` args (developer messages), non-prose
  * (single token / formatting like `'₹ ' + num`), and the two shapes hardcoded-config owns.
@@ -204869,6 +204888,46 @@ class ContentInCodeAnalyzer {
     return ContentInCodeAnalyzer.isProse(ContentInCodeAnalyzer.staticText(node));
   }
 
+  // Build a name→init-node map for every top-level `const`/`let`/`var` declarator in the file, so a
+  // sink fed a prose message through an identifier (the common "hoist the copy to a const" shape,
+  // e.g. `const MSG = 'Please enter…'; return { valid:false, errorMessage: MSG }`) is still caught.
+  static collectConstMap(ast) {
+    const map = new Map();
+    simple(ast, {
+      VariableDeclarator: (d) => {
+        if (d.id?.type === 'Identifier' && d.init) map.set(d.id.name, d.init);
+      },
+    });
+    return map;
+  }
+
+  // A node that IS or RESOLVES TO prose — isProseLiteral, plus identifier lookup through the const map
+  // and `a || b` / `a ?? b` fallbacks (`props.msg || DEFAULT_MSG`). `seen` guards identifier cycles.
+  static resolvesToProse(node, constMap, seen = new Set()) {
+    if (!node) return false;
+    if (ContentInCodeAnalyzer.isProseLiteral(node)) return true;
+    if (node.type === 'Identifier') {
+      if (seen.has(node.name)) return false;
+      seen.add(node.name);
+      const init = constMap.get(node.name);
+      return init ? ContentInCodeAnalyzer.resolvesToProse(init, constMap, seen) : false;
+    }
+    if (node.type === 'LogicalExpression') {
+      return ContentInCodeAnalyzer.resolvesToProse(node.left, constMap, seen)
+        || ContentInCodeAnalyzer.resolvesToProse(node.right, constMap, seen);
+    }
+    return false;
+  }
+
+  // A prose value reaching a sink through an IDENTIFIER (or logical fallback) — NOT a direct string
+  // literal. The direct-literal shapes (`errorMessage: '<literal>'`, `markFieldAsInvalid(…, '<msg>')`)
+  // are owned by hardcoded-config; this guards the boundary so a const-hoisted message is flagged here
+  // without double-flagging the inline-literal case.
+  static isIndirectProse(node, constMap) {
+    if (!node || node.type === 'Literal' || node.type === 'TemplateLiteral') return false;
+    return ContentInCodeAnalyzer.resolvesToProse(node, constMap);
+  }
+
   analyze(formJson, jsFiles = []) {
     const issues = [];
     for (const jsFile of jsFiles) {
@@ -204881,32 +204940,50 @@ class ContentInCodeAnalyzer {
         continue;
       }
       const seen = new Set(); // dedupe by line
+      const constMap = ContentInCodeAnalyzer.collectConstMap(ast);
+
+      // Prose returned directly OR reaching `errorMessage:` through an identifier (the const-hoisted
+      // message shape) is user-facing copy in code. The `return` argument may be the prose itself
+      // (display / validation string) OR an object `{ valid:false, errorMessage: <msg> }`.
+      const messageMsg = 'User-facing copy is a string literal returned from a rule/fragment function. '
+        + 'Content belongs in authored content, not code: for DISPLAY text use a `dynamic-text` '
+        + 'template (`${key}` placeholders substituted from properties) and set only the data '
+        + 'properties; for a VALIDATION/ERROR message author the field\'s `constraintMessages` / '
+        + '`validateExpMessage` and return `{valid:false}` without a hardcoded message.';
 
       ancestor(ast, {
-        // (1)+(2) prose RETURNED from a fn → display content or a validation-error message.
+        // (1)+(2) prose RETURNED from a fn → display content or a validation-error message. Direct
+        // prose literal, prose via an identifier (`return MSG`), or a validation-result object whose
+        // `errorMessage` resolves to prose (`return { valid:false, errorMessage: invalidPinMsg }`).
         ReturnStatement: (r) => {
-          if (!ContentInCodeAnalyzer.isProseLiteral(r.argument)) return;
+          let hit = ContentInCodeAnalyzer.isProseLiteral(r.argument)
+            || ContentInCodeAnalyzer.isIndirectProse(r.argument, constMap);
+          if (!hit && r.argument?.type === 'ObjectExpression') {
+            const em = r.argument.properties.find((p) => (p.key?.name === 'errorMessage' || p.key?.value === 'errorMessage'));
+            // Direct `errorMessage: '<literal>'` is owned by hardcoded-config — only the INDIRECT
+            // (identifier / fallback) shape is flagged here to avoid double-reporting.
+            hit = !!em && ContentInCodeAnalyzer.isIndirectProse(em.value, constMap);
+          }
+          if (!hit) return;
           const line = r.loc?.start.line;
           if (seen.has(line)) return; seen.add(line);
           issues.push({
             severity: 'error',
             type: 'content-in-code',
-            message: 'User-facing copy is a string literal returned from a rule/fragment function. '
-              + 'Content belongs in authored content, not code: for DISPLAY text use a `dynamic-text` '
-              + 'template (`${key}` placeholders substituted from properties) and set only the data '
-              + 'properties; for a VALIDATION/ERROR message author the field\'s `constraintMessages` / '
-              + '`validateExpMessage` and return `{valid:false}` without a hardcoded message.',
+            message: messageMsg,
             file: jsFile.filename,
             line,
           });
         },
-        // (1) prose set as a field value: setProperty(<field>, { value: <prose> })
+        // (1) prose set as a field value: setProperty(<field>, { value: <prose> }) — direct or via a const.
         CallExpression: (c, ancestors) => {
           if (ContentInCodeAnalyzer.calleeName(c.callee) !== 'setProperty') return;
           const obj = c.arguments?.[1];
           if (obj?.type !== 'ObjectExpression') return;
           const valueProp = obj.properties.find((p) => (p.key?.name === 'value' || p.key?.value === 'value'));
-          if (!valueProp || !ContentInCodeAnalyzer.isProseLiteral(valueProp.value)) return;
+          if (!valueProp) return;
+          if (!ContentInCodeAnalyzer.isProseLiteral(valueProp.value)
+            && !ContentInCodeAnalyzer.isIndirectProse(valueProp.value, constMap)) return;
           const line = c.loc?.start.line;
           if (seen.has(line)) return; seen.add(line);
           issues.push({
@@ -206873,8 +206950,8 @@ class ComponentModelAnalyzer {
  * custom-fn-surface file that is NOT inside a guard whose test references `isInteractiveChange` or
  * `eventSource`. If the side effect is genuinely wanted on restore too, suppress it inline.
  *
- * Scope: custom-fn surface only (fragment/scripts/*-rules.js) — the same tier gate the other
- * design-canon analyzers use. Component-view/runtime DOM is legitimate and NOT flagged.
+ * Scope: custom-fn surface only (fragment folders, `*-rules.js`, `functions[.source].js`) — the same
+ * tier gate the other design-canon analyzers use. Component-view/runtime DOM is legitimate and NOT flagged.
  *
  * Severity: error.
  */
