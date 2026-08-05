@@ -202305,15 +202305,16 @@ class RuleVsCodeAnalyzer {
 /**
  * Hardcoded-Config Analyzer
  *
- * Design-canon "no hardcoded config": a user-facing message or an endpoint/URL that authoring
- * already provides must be READ (field.$properties.<x> / validateExpMessage / the api-client's own
- * default URL), not baked into a custom function.
+ * Design-canon "no hardcoded config": an endpoint/URL that authoring already provides must be READ
+ * (the api-client's own default URL / an authored property), not baked into a custom function.
  *
- * Tightly-scoped detectors (unambiguous → `error`):
- *  (a) an object property `errorMessage: '<non-empty string literal>'` → a hardcoded user message.
- *      (Return `{valid:false}` with no message to fall back to the authored validateExpMessage.)
- *  (b) a `url: '<string literal>'` property inside a `request({...})` call → a hardcoded endpoint in
- *      the fn; the api-client should own the default URL.
+ * Tightly-scoped detector (unambiguous → `error`):
+ *  a `url: '<string literal>'` property inside a `request({...})` call → a hardcoded endpoint in
+ *  the fn; the api-client should own the default URL.
+ *
+ * A hardcoded `errorMessage: '<literal>'` used to live here too (type: hardcoded-error-message) — it
+ * moved to content-in-code (which owns every other user-facing-copy shape) so the whole "message
+ * hardcoded in code" concern has one home. See content-in-code-analyzer.js.
  *
  * Severity: error.
  */
@@ -202344,25 +202345,7 @@ class HardcodedConfigAnalyzer {
         continue;
       }
 
-      // (a) errorMessage: '<literal>'
-      simple(ast, {
-        Property: (p) => {
-          const key = p.key?.name || p.key?.value;
-          if (key === 'errorMessage' && HardcodedConfigAnalyzer.isNonEmptyStringLiteral(p.value)) {
-            issues.push({
-              severity: 'error',
-              type: 'hardcoded-error-message',
-              message: `Hardcoded errorMessage '${p.value.value}'. Read the authored message `
-                + '(field.$properties.<msgProp> / validateExpMessage), or return {valid:false} with no '
-                + 'message to fall back to the authored constraintMessages.validationExpression.',
-              file: jsFile.filename,
-              line: p.loc?.start.line,
-            });
-          }
-        },
-      });
-
-      // (b) url: '<literal>' inside a request({...}) call
+      // url: '<literal>' inside a request({...}) call
       simple(ast, {
         CallExpression: (c) => {
           if (HardcodedConfigAnalyzer.calleeName(c.callee) !== 'request') return;
@@ -204834,14 +204817,19 @@ function isProse(text) {
  * (`const MSG = 'Please enter…'; return { valid:false, errorMessage: MSG }`, including a
  * `props.x || DEFAULT_MSG` fallback). Identifier resolution walks the file's declarators.
  *
- * Division of labour with hardcoded-config: that analyzer owns the DIRECT `errorMessage: '<literal>'`
- * object property AND `markFieldAsInvalid(…, '<msg>')` shapes — this analyzer SKIPS the direct-literal
- * errorMessage (no double-flag) and adds the missing cases: bare `return '<prose>'` from a
- * validator/rule fn, `setProperty(field, {value:<prose>})` display copy, and an INDIRECT
- * (identifier/fallback) prose message reaching `return`/`errorMessage:`/`setProperty value`.
+ * `errorMessage: <prose>` in ANY object literal — DIRECT literal or INDIRECT (identifier/fallback) —
+ * is flagged as a plain `content-in-code` finding, same as (2) above (moved here from
+ * hardcoded-config, which used to flag it separately as `hardcoded-error-message` and as ANY
+ * non-empty string; here it's prose-gated like every other check in this file, so a short code like
+ * `errorMessage: 'ERR_001'` is no longer flagged — a code isn't authorable "content"). This check is
+ * NOT scoped to a `return` statement's direct argument — the object is routinely the IMPLICIT return
+ * of an inner arrow (`.catch(() => ({ valid:false, errorMessage:'…' }))` has no `ReturnStatement`
+ * node between the outer `return` and this object at all), so it walks every `Property` named
+ * `errorMessage` regardless of where it sits. `hardcoded-config` still owns the unrelated
+ * `url: '<literal>'` request shape.
  *
  * Exemptions (error-safe): `throw new Error(…)` / `console.*` args (developer messages), non-prose
- * (single token / formatting like `'₹ ' + num`), and the two shapes hardcoded-config owns.
+ * (single token / formatting like `'₹ ' + num`).
  *
  * Fragment / custom-fn surface files only. Severity: error.
  */
@@ -204942,9 +204930,7 @@ class ContentInCodeAnalyzer {
       const seen = new Set(); // dedupe by line
       const constMap = ContentInCodeAnalyzer.collectConstMap(ast);
 
-      // Prose returned directly OR reaching `errorMessage:` through an identifier (the const-hoisted
-      // message shape) is user-facing copy in code. The `return` argument may be the prose itself
-      // (display / validation string) OR an object `{ valid:false, errorMessage: <msg> }`.
+      // Prose returned directly is user-facing copy in code — display content or a validation string.
       const messageMsg = 'User-facing copy is a string literal returned from a rule/fragment function. '
         + 'Content belongs in authored content, not code: for DISPLAY text use a `dynamic-text` '
         + 'template (`${key}` placeholders substituted from properties) and set only the data '
@@ -204952,20 +204938,31 @@ class ContentInCodeAnalyzer {
         + '`validateExpMessage` and return `{valid:false}` without a hardcoded message.';
 
       ancestor(ast, {
-        // (1)+(2) prose RETURNED from a fn → display content or a validation-error message. Direct
-        // prose literal, prose via an identifier (`return MSG`), or a validation-result object whose
-        // `errorMessage` resolves to prose (`return { valid:false, errorMessage: invalidPinMsg }`).
+        // (1)+(2) prose RETURNED directly from a fn, or via an identifier (`return MSG`).
         ReturnStatement: (r) => {
-          let hit = ContentInCodeAnalyzer.isProseLiteral(r.argument)
+          const hit = ContentInCodeAnalyzer.isProseLiteral(r.argument)
             || ContentInCodeAnalyzer.isIndirectProse(r.argument, constMap);
-          if (!hit && r.argument?.type === 'ObjectExpression') {
-            const em = r.argument.properties.find((p) => (p.key?.name === 'errorMessage' || p.key?.value === 'errorMessage'));
-            // Direct `errorMessage: '<literal>'` is owned by hardcoded-config — only the INDIRECT
-            // (identifier / fallback) shape is flagged here to avoid double-reporting.
-            hit = !!em && ContentInCodeAnalyzer.isIndirectProse(em.value, constMap);
-          }
           if (!hit) return;
           const line = r.loc?.start.line;
+          if (seen.has(line)) return; seen.add(line);
+          issues.push({
+            severity: 'error',
+            type: 'content-in-code',
+            message: messageMsg,
+            file: jsFile.filename,
+            line,
+          });
+        },
+        // errorMessage: <prose> in ANY object literal — NOT scoped to a `return` statement, since the
+        // object is routinely the IMPLICIT return of an inner arrow (`.catch(() => ({ valid:false,
+        // errorMessage:'…' }))` has no ReturnStatement node between the outer `return` and this
+        // object at all). Direct literal or resolving through an identifier/fallback (the
+        // const-hoisted message shape). Moved here from hardcoded-config (see class docs).
+        Property: (p) => {
+          const key = p.key?.name || p.key?.value;
+          if (key !== 'errorMessage') return;
+          if (!ContentInCodeAnalyzer.isProseLiteral(p.value) && !ContentInCodeAnalyzer.isIndirectProse(p.value, constMap)) return;
+          const line = p.loc?.start.line;
           if (seen.has(line)) return; seen.add(line);
           issues.push({
             severity: 'error',
@@ -211701,7 +211698,7 @@ const RULE_TYPES = {
   'fragment-qualified-name': ['fragment-qualified-name-in-custom-function'],
   'fragment-rule-form-ref': ['fragment-rule-references-form-root'],
   'rules-in-content': ['rule-grammar-in-content'],
-  'hardcoded-config': ['hardcoded-endpoint-url', 'hardcoded-error-message'],
+  'hardcoded-config': ['hardcoded-endpoint-url'],
   'hidden-fields': ['static-false-visibility', 'unnecessary-hidden-field'],
   'navigation-in-custom-fn': ['navigation-dom-in-custom-function', 'window-location-navigation-in-custom-function'],
   'ootb-property-shadow': ['ootb-event-misuse', 'ootb-property-shadow'],
