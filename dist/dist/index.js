@@ -190798,8 +190798,11 @@ class CustomFunctionAnalyzer {
       },
       CallExpression: (callNode) => {
         const calleeName = this.getCallExpressionName(callNode.callee);
+        // NOTE: a bare `request(...)` is NOT flagged — it's the sanctioned af-core API tool this
+        // check's own recommendation tells callers to use instead of a raw browser primitive
+        // (globals.functions.request, or a local `const { request } = globals.functions;`
+        // destructure of it — either way, the call itself is `request(...)`, not a violation).
         if (calleeName === 'fetch' ||
-            calleeName === 'request' ||  // AEM Forms standard HTTP function
             calleeName === 'XMLHttpRequest' ||
             calleeName.includes('ajax') ||
             calleeName.includes('axios') ||
@@ -191081,13 +191084,17 @@ class CustomFunctionAnalyzer {
 
       // HTTP request violation
       if (analysis.hasHTTPRequests) {
+        // Name the SPECIFIC API(s) actually detected (fetch / XMLHttpRequest / axios.get / $.ajax /
+        // ...), not a generic "makes HTTP requests" — the fix is "use request()", so the reader
+        // should see exactly what needs replacing.
+        const detectedApis = [...new Set(analysis.httpRequests.map((r) => r.type))];
         violations.push({
           severity: 'error',
           type: 'http-request-in-custom-function',
           functionName: analysis.functionName,
           file: analysis.file,
           line: analysis.httpRequests[0]?.line || analysis.line, // Use specific line where HTTP request is made
-          message: `Custom function "${analysis.functionName}" makes HTTP requests. Use the API tool (request()) instead.`,
+          message: `Custom function "${analysis.functionName}" calls ${detectedApis.map((a) => `\`${a}\``).join(', ')} directly. Use the API tool (request()) instead.`,
           details: analysis.httpRequests,
           recommendation: 'Replace direct HTTP calls with the form\'s API tool (request() function). This ensures proper error handling, loading states, and integration with the forms runtime.',
           cwvImpact: 'LCP, TBT',
@@ -212112,7 +212119,22 @@ const RULE_TYPES = {
   'content-layer': ['content-text-in-css', 'content-text-in-view-js'],
   'component-model': ['component-model-prop-missing'],
   'custom-fn-correctness': ['jsonmodel-direct-read', 'non-reactive-set-use-bind', 'markfieldasinvalid-in-fn-use-bind'],
-  'custom-function': ['bulk-set-property-use-import-data', 'custom-event-in-custom-function', 'custom-functions-not-analyzed', 'direct-properties-mutation', 'dom-access-in-custom-function', 'http-request-in-custom-function', 'set-property-form-properties', 'window', 'window-access-in-custom-function'],
+  // 'window' is NOT listed here — it's an internal per-occurrence accumulator tag
+  // (custom-function-analyzer.js's collectRuntimeSignals pushes { type: 'window', property, line }
+  // into analysis.windowAccesses), never an issues[].type an actual violation is pushed with. The
+  // real, reportable type for window access is window-access-in-custom-function (now under
+  // headless-incompatible-usage, below).
+  'custom-function': ['bulk-set-property-use-import-data', 'custom-event-in-custom-function', 'custom-functions-not-analyzed', 'direct-properties-mutation', 'set-property-form-properties'],
+  // headless-incompatible-usage governs every finding type where custom-fn-surface JS assumes a live
+  // browser runtime it shouldn't — DOM access, window access, a raw fetch/XHR/axios/ajax call,
+  // navigation (window.location / a hand-built <form> submit), or view/keystroke DOM in an
+  // orchestration file — one config key regardless of WHICH primitive or WHY it's wrong. Each finding
+  // keeps its OWN type-appropriate message; this map only unifies severity config, never the reported
+  // text. Real on both surfaces: the ESLint-plugin registers it via multiAnalyzerRule (runs
+  // CustomFunctionAnalyzer / NavigationInCustomFnAnalyzer / ShouldBeComponentAnalyzer, keeps only these
+  // types), and custom-function / navigation-in-custom-fn / should-be-component permanently exclude
+  // them from their OWN output (excludeTypes, in eslint-plugin/index.js) so nothing double-reports.
+  'headless-incompatible-usage': ['dom-access-in-custom-function', 'window-access-in-custom-function', 'http-request-in-custom-function', 'navigation-dom-in-custom-function', 'window-location-navigation-in-custom-function', 'fragment-dom-create-element', 'fragment-dom-event-listener', 'fragment-dom-mutation', 'fragment-dom-query'],
   'dispatch-target': ['dispatch-on-field-not-form', 'dispatch-plain-object-not-customevent'],
   'foreign-fragment-root': ['foreign-fragment-root-access'],
   'fragment-globals-scope': ['fragment-form-property-scope', 'fragment-globals-form-traversal'],
@@ -212122,7 +212144,6 @@ const RULE_TYPES = {
   'rules-in-content': ['rule-grammar-in-content'],
   'hardcoded-config': ['hardcoded-endpoint-url'],
   'hidden-fields': ['static-false-visibility', 'unnecessary-hidden-field'],
-  'navigation-in-custom-fn': ['navigation-dom-in-custom-function', 'window-location-navigation-in-custom-function'],
   'ootb-property-shadow': ['ootb-event-misuse', 'ootb-property-shadow'],
   'request-error-handling': ['request-catch-only-no-ok-check', 'request-missing-error-handling'],
   // rule-ordering-race is emitted by the event-impact analyzer; identity resolution already covers it,
@@ -212131,7 +212152,6 @@ const RULE_TYPES = {
   'rule-performance': ['rule-cycle', 'runtime-error-in-custom-function'],
   'rule-vs-code': ['markfieldasinvalid-instead-of-validationexpression', 'value-visibility-logic-in-js'],
   'runtime-cls': ['direct-style-manipulation', 'dynamic-class-manipulation', 'dynamic-css-loading', 'dynamic-style-injection'],
-  'should-be-component': ['fragment-dom-create-element', 'fragment-dom-event-listener', 'fragment-dom-mutation', 'fragment-dom-query'],
   'storage-class': ['form-data-in-variable', 'getvariable-in-init', 'getvariable-not-namespaced', 'variable-not-namespaced', 'write-only-variable', 'derived-value-persisted'],
   'form-analyzer': ['component-count', 'event-handlers', 'nested-panels', 'nesting-depth'],
   'form-events': ['api-call-in-initialize', 'axios', 'fetch', 'jquery-ajax', 'request', 'requestWithRetry', 'xhr'],
