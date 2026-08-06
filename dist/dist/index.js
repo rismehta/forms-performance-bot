@@ -201792,17 +201792,109 @@ class FieldWritesSiblingAnalyzer {
 
 
 
+const MAX_WRAPPER_DEPTH = 15;
+
 /**
  * Request-Error-Handling Analyzer
  *
  * The af-core request pipeline (`globals.functions.request`, and the api-client wrappers built on it)
- * NEVER rejects on a network/HTTP failure — it RESOLVES `{ ok:false, status, body }`. So a chain that
- * handles failure only in `.catch(...)` is dead code: a real failure flows through `.then(...)` as a
- * success. The correct pattern branches on `if (!res.ok)` inside `.then`.
+ * has TWO distinct failure shapes, traced against the actual implementation (afb-runtime.js: the
+ * low-level `request` function → `requestWithRetry` → `retryHandler` → `runRequestPipeline`), not
+ * assumed — and NOT the shapes an earlier version of this comment claimed:
+ *   - Both an HTTP-level failure (server responded, non-2xx status) AND a genuine network/transport
+ *     failure (connection refused, DNS failure, CORS block, offline) RESOLVE `{ ok:false, status,
+ *     body }` — NEITHER rejects. The low-level `request` function's OWN try/catch around its
+ *     `fetch()`-equivalent call (`catch (networkError) { ...; }`, no `return`, no `throw`) swallows a
+ *     network failure and falls through to an implicit `return undefined`, which flows up through
+ *     `retryHandler`'s bare passthrough into `runRequestPipeline`'s `isSuccess = response?.status >=
+ *     200 && ... <= 299` check — `undefined >= 200` is `false`, so it resolves `{ok:false}` exactly
+ *     like an HTTP failure. A chain that handles failure only in `.catch(...)` never sees THIS shape;
+ *     it flows through `.then(...)` looking like success unless `.then` branches on `if (!res.ok)`.
+ *   - What genuinely REJECTS is narrower: a Promise-valued request BODY that itself rejects (caught
+ *     and explicitly re-thrown by the low-level `request` function's OWN payload-resolution
+ *     try/catch — `catch (error) { ...; throw error; }`), or a SYNCHRONOUS exception while encoding
+ *     the payload (`multipartFormData`/`urlEncoded`/`JSON.stringify` on a bad body — e.g. a circular
+ *     reference) — this code runs OUTSIDE any try/catch in that function, so it becomes a rejection
+ *     automatically (the function is `async`). Either way, `requestWithRetry`'s catch (`throw error`
+ *     if `error.status >= 400`, else `throw new Error('Request failed')`) re-throws unconditionally,
+ *     `retryHandler` is a bare passthrough with no try/catch of its own, and `runRequestPipeline`
+ *     `await`s it with no try/catch either — nothing between there and the caller ever normalizes it
+ *     into a resolved value.
+ * So an `.ok` check alone is NOT sufficient — it covers only the first (much more common) shape. A
+ * REAL `.catch()` (not a trivial fail-open one) is still needed for the second, rarer, payload-
+ * encoding-triggered one. The fully correct pattern is BOTH: `if (!res.ok) {...}` inside `.then`, AND
+ * a `.catch()` that does something for the genuine rejection case.
  *
- * Detection: a Promise chain whose head call is `request(...)` or a `*.then(...)` on a request-like
- * call, that has a `.catch(...)` handler but whose `.then(...)` callback body never reads `.ok`
- * (nor `.status`). Heuristic but high-confidence for `request(...)`/api-client chains.
+ * Root-first design — detection starts from every literal `request(...)` / `globals.functions.
+ * request(...)` call (the ROOT; no heuristic needed, it's an unambiguous syntactic match), not from
+ * every `.then()` in the codebase. From each root, `evaluateUsage` climbs the REAL call graph,
+ * re-running BOTH detectors below at every level it reaches, not only at the root itself:
+ *   - Classify how this specific usage is consumed right here: chained with `.then()`/`.catch()`,
+ *     `await`ed, or fully discarded (`classifyConsumption`).
+ *   - A `.then/.catch` chain with `.catch` present reports (a) below (if it lacks an `.ok` read) and
+ *     stops climbing — a catch means this usage IS handled, however imperfectly. An `await`ed usage
+ *     inside a non-rethrowing `try/catch` is protected outright (a bare `try/finally` does NOT
+ *     count — that shape, used by this repo's requestWithLoader-style wrappers, still propagates a
+ *     genuine rejection to the caller).
+ *   - Otherwise (no handling at all here): is this usage `return`-propagated to a named enclosing
+ *     function? If not (a true fire-and-forget statement), it's terminal — report (b) below. If it
+ *     IS propagated, look up every actual call site of that function (across the whole file set
+ *     handed to `analyze()`) and recurse the SAME evaluation on each — climbing through as many
+ *     wrapper levels as needed, depth-capped at MAX_WRAPPER_DEPTH to guarantee termination on
+ *     recursive/mutually-recursive helpers.
+ * This single mechanism naturally covers what would otherwise need two separate checks: a wrapper
+ * that already catches internally (e.g. a retry closure with its own `.catch`) resolves at the very
+ * first climb step, exactly the same way a wrapper whose real callers catch it two levels up resolves
+ * after a second step — no separate "is this callee self-safe" pass is needed, and (a) can fire at
+ * ANY level a caller's own chain happens to add a catch-without-ok, not only at the root's own point.
+ * It also covers a bare `await request(...)` with no `try/catch` anywhere, which a chain-only
+ * (`.then`/`.catch`-shaped) check structurally cannot see.
+ *
+ * Fallback root (`hasGlobalsArg` + `buildFuncDefIndex`) — literal-root tracing alone goes blind
+ * whenever a wrapper's own definition isn't in the current file set, which is the ROUTINE case on
+ * the ESLint-plugin surface (`eslint-plugin/analyzer-rule.js` hands `analyze()` exactly one file at
+ * a time — a wrapper's real definition, almost always a different file such as `api-clients/*.js`,
+ * is essentially never there). So a bare-identifier call shaped like an api-client invocation
+ * (`client(params, globals)`) is ALSO treated as a root when — and only when — `funcDefIndex` has no
+ * definition for it anywhere in the file set; with the real definition present, its true literal-
+ * request root (if any) is already found directly, and climbing naturally reaches this call site's
+ * own chain when relevant, so the fallback correctly stays silent there. This reintroduces the old
+ * design's shape-based imprecision, but ONLY for the "we have zero other information" case — a
+ * plain internal handler that happens to take a single `globals`-named argument can still misfire if
+ * ITS OWN definition also isn't in the file set (a known, accepted heuristic limit, not new).
+ *
+ * Two detectors, both driven by `evaluateUsage` at every level of the climb:
+ *
+ *  (a) `request-catch-only-no-ok-check` — a usage's chain HAS a `.catch(...)` but no `.then(...)`
+ *      callback anywhere in the chain reads `.ok`/`.status`. The `.catch` only ever covers the
+ *      (rarer) rejection shape above; a resolved failure — HTTP-level OR a swallowed network
+ *      failure, both `{ok:false}` — still flows through `.then` looking like success.
+ *  (b) `request-missing-error-handling` — a usage has NEITHER a `.catch(...)` NOR an `.ok`/`.status`
+ *      read (or is `await`ed with no protecting `try/catch`), AND climbing the call graph never finds
+ *      one either. NOT flagged by (b) (a documented gap, not a bug): a chain with an `.ok` check but
+ *      STILL no `.catch()` — per the above, that chain is ALSO incomplete (the rejection shape is
+ *      still unhandled), but flagging "has some handling, still missing a piece" needs to reason
+ *      about what already exists rather than "nothing exists at all," and risks a much higher
+ *      false-positive rate across chains whose rejection is legitimately handled further up an
+ *      outer chain. Left to human review for now.
+ *
+ * Heuristic limits, consistent with this analyzer's existing tolerance for approximate, documented
+ * heuristics (e.g. `isTrivialFailOpen`): the caller-graph climb is name-keyed (import aliases ARE
+ * resolved back to their real definition — see `buildFuncDefIndex` — but two UNRELATED functions
+ * sharing a name would still be conflated), and only sees callers within the files handed to THIS
+ * `analyze()` call (e.g. a journey's static-import closure) — a caller elsewhere is invisible, and
+ * "no known caller" resolves the same as "found a caller, but it doesn't catch": both are treated as
+ * unhandled. There is NO general local-variable / data-flow tracking — `var p = client(...); ...;
+ * somethingElse(p)` is not followed — with ONE narrow, targeted exception (`promiseAllChainFor`):
+ * `Promise.all([...])` genuinely propagates any element's rejection to its own returned promise, so
+ * a variable assigned from a request-rooted call and later passed into a `Promise.all([...])` array
+ * (directly, or via that exact local variable, anywhere later in the same enclosing function) IS
+ * recognized — this is the real shape forms-engine's `insurance10sec.js` uses for parallel fetches
+ * (`stampDutyPromise`/`amortizationPromise`). `Promise.allSettled` is deliberately NOT covered — it
+ * never rejects at all (each element's outcome becomes `{status, value/reason}`), so the actual
+ * question there is "does the code read `.status`/`.reason` on each settled result," a different
+ * check this analyzer doesn't attempt. A variable reassigned or re-wrapped before reaching
+ * `Promise.all` is also not followed — the match is structural, not a real data-flow analysis.
  *
  * Real anti-pattern (pre-fix ifsc-rules.js): only a `.catch` surfaced the retry message → never ran.
  *
@@ -201820,29 +201912,6 @@ class RequestErrorHandlingAnalyzer {
     return '';
   }
 
-  // Is this call a request / api-client invocation? request(...), globals.functions.request(...),
-  // or a bare lower-camel client call whose result is a Promise chained with .then/.catch.
-  static isRequestLike(node) {
-    const name = RequestErrorHandlingAnalyzer.calleeName(node.callee);
-    if (name === 'request') return true;
-    // api-clients are imported fns called as `clientName(params, globals)` — can't statically know
-    // all names, so we rely on the chain shape (.then + .catch) discovered by the caller.
-    return false;
-  }
-
-  // Is this call an af api-client invocation `client(params, globals)`? — its last argument is a
-  // `globals` identifier or a `globals`-rooted member (globals / g / globals.something).
-  static hasGlobalsArg(callNode) {
-    const args = callNode.arguments || [];
-    if (args.length === 0) return false;
-    const last = args[args.length - 1];
-    if (last.type === 'Identifier') return last.name === 'globals' || last.name === 'g';
-    // member chain rooted at globals (rare, e.g. globals.form passed through)
-    let cur = last;
-    while (cur && cur.type === 'MemberExpression') cur = cur.object;
-    return cur?.type === 'Identifier' && (cur.name === 'globals' || cur.name === 'g');
-  }
-
   // Does an AST subtree read a `.ok` (or `.status`) member anywhere?
   static readsOk(node) {
     let found = false;
@@ -201852,6 +201921,23 @@ class RequestErrorHandlingAnalyzer {
       },
     });
     return found;
+  }
+
+  // Is this call an af api-client invocation `client(params, globals)`? — its last argument is a
+  // `globals` identifier or a `globals`-rooted member (globals / g / globals.something). Used ONLY
+  // as a fallback root signal (see `analyze()`) when the callee's own definition isn't available in
+  // the current file set — the ESLint-plugin surface hands `analyze()` a single file at a time (see
+  // `eslint-plugin/analyzer-rule.js`), so a wrapper's real definition (almost always a different
+  // file, e.g. `api-clients/*.js`) is routinely absent there, and literal-root tracing alone would go
+  // completely blind to every wrapper-mediated case on that surface.
+  static hasGlobalsArg(callNode) {
+    const args = callNode.arguments || [];
+    if (args.length === 0) return false;
+    const last = args[args.length - 1];
+    if (last.type === 'Identifier') return last.name === 'globals' || last.name === 'g';
+    let cur = last;
+    while (cur && cur.type === 'MemberExpression') cur = cur.object;
+    return cur?.type === 'Identifier' && (cur.name === 'globals' || cur.name === 'g');
   }
 
   // A trivial fail-open catch handler: `() => null` / `() => []` / `() => ({})` / `() => <literal>`.
@@ -201874,64 +201960,355 @@ class RequestErrorHandlingAnalyzer {
     return false;
   }
 
+  // Cross-file index: function name -> every bare-identifier call site (`name(...)`), each carrying
+  // its ancestor path (for chain/return-propagation resolution) and originating filename. Used to
+  // climb from a wrapper function to its actual callers.
+  static buildCallSiteIndex(parsedFiles) {
+    const index = new Map();
+    for (const { filename, ast } of parsedFiles) {
+      ancestor(ast, {
+        CallExpression(node, ancestors) {
+          if (node.callee?.type !== 'Identifier') return;
+          const name = node.callee.name;
+          if (!index.has(name)) index.set(name, []);
+          index.get(name).push({ node, ancestors: ancestors.slice(), filename });
+        },
+      });
+    }
+    return index;
+  }
+
+  // Cross-file index: function name -> its definition node (FunctionDeclaration, or a Function/Arrow
+  // expression assigned to a const/let/var). Used ONLY to check whether a candidate fallback root's
+  // definition is available in the current file set at all — see `hasGlobalsArg`'s comment.
+  static buildFuncDefIndex(parsedFiles) {
+    const defs = new Map();
+    for (const { ast } of parsedFiles) {
+      simple(ast, {
+        FunctionDeclaration(node) {
+          if (node.id) defs.set(node.id.name, node);
+        },
+        VariableDeclarator(node) {
+          if (node.id?.type === 'Identifier' && node.init
+            && (node.init.type === 'FunctionExpression' || node.init.type === 'ArrowFunctionExpression')) {
+            defs.set(node.id.name, node.init);
+          }
+        },
+      });
+    }
+    // Resolve import aliases (`import { foo as fooBase } from './x.js'`) to the SAME definition
+    // already indexed under the REAL name above — common in this codebase's override pattern
+    // (`handleXBase`/`populateXBase`). Without this, a caller using the LOCAL alias name would look
+    // unresolvable even though the real function is right there in the file set, misfiring the
+    // fallback-root heuristic on what is really just an ordinary internal handler call.
+    for (const { ast } of parsedFiles) {
+      simple(ast, {
+        ImportDeclaration(node) {
+          for (const spec of node.specifiers || []) {
+            if (spec.type === 'ImportSpecifier' && spec.imported?.name && spec.local?.name
+              && spec.imported.name !== spec.local.name && defs.has(spec.imported.name)) {
+              defs.set(spec.local.name, defs.get(spec.imported.name));
+            }
+          }
+        },
+      });
+    }
+    return defs;
+  }
+
+  // Ascend from `node` through `.then()`/`.catch()` MemberExpression+CallExpression pairs to the
+  // OUTERMOST link of the same chain expression. Returns `node` itself when it isn't chained at all.
+  // Finds `node`'s own position in `ancestors` rather than assuming it's the last entry, so it can
+  // also be called starting from a node discovered mid-array (see `promiseAllChainFor`).
+  static outermostChainNode(node, ancestors) {
+    let result = node;
+    let i = ancestors.lastIndexOf(node) - 1;
+    while (i >= 1) {
+      const member = ancestors[i];
+      const call = ancestors[i - 1];
+      if (member.type === 'MemberExpression' && member.object === result
+        && ['then', 'catch'].includes(member.property?.name)
+        && call.type === 'CallExpression' && call.callee === member) {
+        result = call;
+        i -= 2;
+      } else break;
+    }
+    return result;
+  }
+
+  static isPromiseAllCall(node) {
+    return node?.type === 'CallExpression' && node.callee?.type === 'MemberExpression'
+      && node.callee.object?.type === 'Identifier' && node.callee.object.name === 'Promise'
+      && node.callee.property?.name === 'all';
+  }
+
+  // Is `node`'s value consumed by a `Promise.all([...])` — either as a DIRECT array element
+  // (`Promise.all([node, other])`), or INDIRECTLY via a local variable it's first assigned to
+  // (`var p = node; ...; Promise.all([p, other])`, found anywhere later in the same enclosing
+  // function)? Returns the outermost `.then`/`.catch` chain built on that `Promise.all(...)` call,
+  // or null if no such usage is found. `Promise.all` genuinely propagates ANY element's rejection to
+  // its own returned promise, so a `.catch()` there really does cover `node` too — narrow,
+  // targeted pattern match, not general data-flow tracking (a documented limit — see class docblock
+  // for what this does NOT cover, e.g. `Promise.allSettled`, or a variable reassigned/rewrapped
+  // before reaching `Promise.all`).
+  static promiseAllChainFor(node, ancestors) {
+    const idx = ancestors.lastIndexOf(node);
+    const parent = idx > 0 ? ancestors[idx - 1] : null;
+
+    // Direct: `Promise.all([node, ...])`.
+    if (parent?.type === 'ArrayExpression') {
+      const grandparent = idx > 1 ? ancestors[idx - 2] : null;
+      if (RequestErrorHandlingAnalyzer.isPromiseAllCall(grandparent) && grandparent.arguments[0] === parent) {
+        return RequestErrorHandlingAnalyzer.outermostChainNode(grandparent, ancestors);
+      }
+    }
+
+    // Indirect: `var p = node;` then `Promise.all([p, ...])` later in the same function.
+    if (parent?.type === 'VariableDeclarator' && parent.init === node && parent.id?.type === 'Identifier') {
+      const varName = parent.id.name;
+      let fnNode = null;
+      for (let i = idx - 1; i >= 0; i -= 1) {
+        if (['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression'].includes(ancestors[i].type)) {
+          fnNode = ancestors[i];
+          break;
+        }
+      }
+      if (!fnNode) return null;
+      let found = null;
+      ancestor(fnNode.body, {
+        CallExpression: (candidate, innerAncestors) => {
+          if (found || !RequestErrorHandlingAnalyzer.isPromiseAllCall(candidate)) return;
+          const arr = candidate.arguments?.[0];
+          if (arr?.type !== 'ArrayExpression') return;
+          if (arr.elements.some((el) => el?.type === 'Identifier' && el.name === varName)) {
+            found = RequestErrorHandlingAnalyzer.outermostChainNode(candidate, innerAncestors);
+          }
+        },
+      });
+      return found;
+    }
+    return null;
+  }
+
+  // Classify how `node` (a confirmed request root, or a caller's invocation of a named wrapper) is
+  // consumed right where it is: chained with .then()/.catch() ('chain'), passed to `await`
+  // ('await'), consumed via `Promise.all([...])` ('chain', see `promiseAllChainFor`), or its result
+  // fully discarded — a bare fire-and-forget statement ('bare').
+  static classifyConsumption(node, ancestors) {
+    const outer = RequestErrorHandlingAnalyzer.outermostChainNode(node, ancestors);
+    if (outer !== node) return { kind: 'chain', node: outer };
+    const idx = ancestors.lastIndexOf(node);
+    const parent = idx > 0 ? ancestors[idx - 1] : null;
+    if (parent && parent.type === 'AwaitExpression' && parent.argument === node) {
+      return { kind: 'await', node: parent };
+    }
+    const promiseAllChain = RequestErrorHandlingAnalyzer.promiseAllChainFor(node, ancestors);
+    if (promiseAllChain) return { kind: 'chain', node: promiseAllChain };
+    return { kind: 'bare', node };
+  }
+
+  // Walk DOWN a .then/.catch chain (via callee.object) from `topNode` — collecting whether `.catch`
+  // appears anywhere, and every `.then` callback found. Pure chain-shape inspection; the caller
+  // already knows this chain is request-rooted (it descends from a confirmed root).
+  static inspectChain(topNode) {
+    let hasCatch = false;
+    const thenCallbacks = [];
+    let cur = topNode;
+    while (cur && cur.type === 'CallExpression') {
+      const nm = RequestErrorHandlingAnalyzer.calleeName(cur.callee);
+      if (nm === 'then') {
+        const cb = cur.arguments?.[0];
+        if (cb) thenCallbacks.push(cb);
+      }
+      if (nm === 'catch') hasCatch = true;
+      cur = cur.callee?.object;
+    }
+    return { hasCatch, thenCallbacks };
+  }
+
+  // The outermost `.catch(...)` CallExpression found while descending `topNode`'s chain, or null.
+  static findOutermostCatchNode(topNode) {
+    let cur = topNode;
+    while (cur && cur.type === 'CallExpression') {
+      if (RequestErrorHandlingAnalyzer.calleeName(cur.callee) === 'catch') return cur;
+      cur = cur.callee?.object;
+    }
+    return null;
+  }
+
+  // Is an `{ kind: 'await', node }` consumption's nearest enclosing try/catch — searching only
+  // within the SAME function, stopping at the first function boundary — present and non-rethrowing?
+  // A bare try/finally (no catch clause) does NOT count.
+  static isAwaitProtected(awaitNode, ancestors) {
+    const idx = ancestors.lastIndexOf(awaitNode);
+    for (let i = idx - 1; i >= 0; i -= 1) {
+      const anc = ancestors[i];
+      if (['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression'].includes(anc.type)) break;
+      if (anc.type === 'TryStatement') {
+        const { handler } = anc;
+        if (!handler) return false;
+        let rethrows = false;
+        simple(handler.body, { ThrowStatement: () => { rethrows = true; } });
+        return !rethrows;
+      }
+    }
+    return false;
+  }
+
+  // The nearest enclosing NAMED async function around an unprotected `await` — regardless of
+  // whether the awaited value is directly returned. Async-function semantics mean ANY unhandled
+  // rejection anywhere in the body (not only in a `return await ...`) rejects the function's OWN
+  // returned promise, so its real callers need checking too. Returns null for an anonymous async
+  // function/arrow (no name to climb via) or if a non-async function boundary is hit first (should
+  // not normally happen — a plain function can't contain `await` directly — but guarded anyway).
+  static enclosingAsyncFunctionName(awaitNode, ancestors) {
+    const idx = ancestors.lastIndexOf(awaitNode);
+    for (let i = idx - 1; i >= 0; i -= 1) {
+      const anc = ancestors[i];
+      if (!['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression'].includes(anc.type)) continue;
+      if (!anc.async) return null;
+      if (anc.type === 'FunctionDeclaration') return anc.id ? anc.id.name : null;
+      const owner = ancestors[i - 1];
+      return owner?.type === 'VariableDeclarator' && owner.id?.type === 'Identifier' ? owner.id.name : null;
+    }
+    return null;
+  }
+
+  // Is `outerNode` the argument of a `return`, and if so, what's the enclosing NAMED function (a
+  // FunctionDeclaration, or a function/arrow assigned to a const/let/var)? Returns null for an
+  // anonymous callback / IIFE / a chain that's a bare statement — i.e. truly fire-and-forget, with
+  // no further wrapper level to search.
+  static enclosingFunctionNameIfReturned(outerNode, ancestors) {
+    const idx = ancestors.lastIndexOf(outerNode);
+    if (idx === -1) return null;
+    const parent = ancestors[idx - 1];
+    if (!parent || parent.type !== 'ReturnStatement' || parent.argument !== outerNode) return null;
+    for (let i = idx - 2; i >= 0; i -= 1) {
+      const anc = ancestors[i];
+      if (anc.type === 'FunctionDeclaration' && anc.id) return anc.id.name;
+      if (anc.type === 'FunctionExpression' || anc.type === 'ArrowFunctionExpression') {
+        const owner = ancestors[i - 1];
+        if (owner?.type === 'VariableDeclarator' && owner.id?.type === 'Identifier') return owner.id.name;
+      }
+    }
+    return null;
+  }
+
+  // Evaluates ONE usage of a request-rooted call — the literal root itself, or (recursively) a
+  // caller's invocation of a named wrapper reached by climbing the call graph. Runs BOTH detectors'
+  // conditions at THIS level (not just at the original root): a chain with `.catch` but no `.ok`
+  // read reports (a) right here and stops (a catch means this usage IS handled, however
+  // imperfectly — no further climbing needed). A chain/await/bare usage with no handling at all
+  // climbs to every real caller of its enclosing function (via `callSiteIndex`) and recurses the
+  // SAME evaluation there — so (a) can fire at ANY level of the wrapper hierarchy where a caller's
+  // own chain happens to add a catch-without-ok, not only at the literal root's immediate point.
+  // `emit` is the shared, dedup-aware issue reporter from `analyze()`. `depth` bounds the climb so a
+  // pathological recursive/mutually-recursive helper can't hang the analyzer. Returns whether this
+  // usage is considered handled (so its caller, if any, knows not to keep climbing past it).
+  static evaluateUsage(node, ancestors, filename, callSiteIndex, emit, depth = 0) {
+    if (depth > MAX_WRAPPER_DEPTH) return false;
+    const consumption = RequestErrorHandlingAnalyzer.classifyConsumption(node, ancestors);
+
+    if (consumption.kind === 'chain') {
+      const { hasCatch, thenCallbacks } = RequestErrorHandlingAnalyzer.inspectChain(consumption.node);
+      const okReadInThen = thenCallbacks.some((cb) => RequestErrorHandlingAnalyzer.readsOk(cb));
+      if (hasCatch) {
+        if (!okReadInThen) {
+          const catchNode = RequestErrorHandlingAnalyzer.findOutermostCatchNode(consumption.node);
+          if (catchNode && !RequestErrorHandlingAnalyzer.isTrivialFailOpen(catchNode.arguments?.[0])) {
+            emit('request-catch-only-no-ok-check', filename, catchNode.loc?.start.line);
+          }
+        }
+        return true; // any catch (trivial or not) — handled here, matches old semantics, no climb
+      }
+      if (okReadInThen) return true; // .ok check present, no catch — documented (b) gap, don't climb
+    } else if (consumption.kind === 'await') {
+      if (RequestErrorHandlingAnalyzer.isAwaitProtected(consumption.node, ancestors)) return true;
+    } // 'bare' — a fully discarded promise falls straight through to the climb below
+
+    // 'await' propagates to its enclosing async function's OWN returned promise regardless of
+    // whether its value is directly returned (any unhandled rejection anywhere in an async
+    // function's body rejects that function's promise) — 'chain'/'bare' only propagate via an
+    // explicit `return`.
+    const enclosing = consumption.kind === 'await'
+      ? RequestErrorHandlingAnalyzer.enclosingAsyncFunctionName(consumption.node, ancestors)
+      : RequestErrorHandlingAnalyzer.enclosingFunctionNameIfReturned(consumption.node, ancestors);
+    if (!enclosing) {
+      emit('request-missing-error-handling', filename, consumption.node.loc?.start.line);
+      return false;
+    }
+    const sites = callSiteIndex.get(enclosing) || [];
+    if (sites.length === 0) {
+      emit('request-missing-error-handling', filename, consumption.node.loc?.start.line);
+      return false;
+    }
+    let allCaught = true;
+    for (const site of sites) {
+      const caught = RequestErrorHandlingAnalyzer.evaluateUsage(site.node, site.ancestors, site.filename, callSiteIndex, emit, depth + 1);
+      if (!caught) allCaught = false;
+    }
+    return allCaught;
+  }
+
   analyze(formJson, jsFiles = []) {
     const issues = [];
+    const parsedFiles = [];
     for (const jsFile of jsFiles) {
-      let ast;
       try {
-        ast = parseCached(jsFile.content);
+        parsedFiles.push({ filename: jsFile.filename, ast: parseCached(jsFile.content) });
       } catch (e) {
         lib_core.warning(`[RequestErrorHandling] parse failed for ${jsFile.filename}: ${e.message}`);
-        continue;
       }
-      // Walk `.catch(...)` calls; for each, walk UP the chain to find (a) a request head and
-      // (b) a `.then(...)` whose callback reads `.ok`. Flag when there's a request head + catch but
-      // no `.ok` read anywhere in the chain's `.then` callbacks.
-      simple(ast, {
-        CallExpression: (node) => {
-          if (RequestErrorHandlingAnalyzer.calleeName(node.callee) !== 'catch') return;
-          // A trivial fail-open catch (() => null / [] / {}) isn't the "catch is the only failure
-          // path" anti-pattern — the real check happens downstream on .ok. Skip it.
-          if (RequestErrorHandlingAnalyzer.isTrivialFailOpen(node.arguments?.[0])) return;
-          // node.callee.object is the chain up to `.catch`
-          let chain = node.callee.object;
-          let hasRequestHead = false;
-          let okReadInThen = false;
-          // descend the .then/.catch member-call chain to its head
-          let cur = chain;
-          const thenCallbacks = [];
-          while (cur && cur.type === 'CallExpression') {
-            const nm = RequestErrorHandlingAnalyzer.calleeName(cur.callee);
-            if (nm === 'then') {
-              const cb = cur.arguments?.[0];
-              if (cb) thenCallbacks.push(cb);
-            }
-            // head of the chain: a request(...) / api-client call
-            if (nm === 'request') hasRequestHead = true;
-            cur = cur.callee?.object;
-            // Treat a bare identifier call as an api-client head ONLY when it matches the af
-            // api-client signature `client(params, globals)` — i.e. its LAST arg is a `globals`
-            // reference. This avoids flagging arbitrary `foo().then().catch()` chains unrelated to
-            // af-core requests (Copilot #2).
-            if (cur && cur.type === 'CallExpression' && cur.callee?.type === 'Identifier'
-              && RequestErrorHandlingAnalyzer.hasGlobalsArg(cur)) {
-              hasRequestHead = true;
-            }
+    }
+    // Cross-file caller-graph index — built once per analyze() call over the whole file set
+    // (typically a journey's full static-import closure), not per file, since a wrapper's definition
+    // and its callers routinely live in different files.
+    const callSiteIndex = RequestErrorHandlingAnalyzer.buildCallSiteIndex(parsedFiles);
+    const funcDefIndex = RequestErrorHandlingAnalyzer.buildFuncDefIndex(parsedFiles);
+    const reported = new Set(); // dedupe `${type}:${file}:${line}` — a diamond-shaped caller graph
+    // can reach the same usage via more than one climb path.
+
+    const MESSAGES = {
+      'request-catch-only-no-ok-check': 'A request/api-client chain relies on .catch for failure but '
+        + 'never checks `res.ok` in .then. The af-core request pipeline RESOLVES `{ok:false}` for BOTH '
+        + 'an HTTP-level failure and a network/connectivity failure (it catches and swallows the '
+        + 'latter internally) — it does not reject for either, so the .catch is dead code for the '
+        + 'common case — branch on `if (!res.ok)` inside .then.',
+      'request-missing-error-handling': 'A request/api-client chain has no `.catch` and never checks '
+        + '`res.ok` in `.then` — no error handling at all, for either failure shape af-core produces: '
+        + 'an HTTP-level OR network/connectivity failure RESOLVES `{ok:false}` (af-core catches and '
+        + 'swallows a network failure internally; an unchecked `.then` treats either as a success — '
+        + 'branch on `if (!res.ok)`), while a rejecting/malformed request payload (a Promise-valued '
+        + 'body that itself rejects, or a synchronous exception while encoding it) genuinely REJECTS '
+        + '(requestWithRetry re-throws; nothing catches it here — add a real `.catch()`, not a '
+        + 'trivial fail-open one). Both are needed; an `.ok` check alone does not cover the reject case.',
+    };
+    const emit = (type, filename, line) => {
+      const key = `${type}:${filename}:${line}`;
+      if (reported.has(key)) return;
+      reported.add(key);
+      issues.push({ severity: 'error', type, message: MESSAGES[type], file: filename, line });
+    };
+
+    for (const { filename, ast } of parsedFiles) {
+      ancestor(ast, {
+        CallExpression: (node, ancestors) => {
+          // Primary root: every literal `request(...)` / `globals.functions.request(...)` call —
+          // unambiguous, no heuristic needed.
+          if (RequestErrorHandlingAnalyzer.calleeName(node.callee) === 'request') {
+            RequestErrorHandlingAnalyzer.evaluateUsage(node, ancestors, filename, callSiteIndex, emit);
+            return;
           }
-          for (const cb of thenCallbacks) {
-            if (RequestErrorHandlingAnalyzer.readsOk(cb)) okReadInThen = true;
-          }
-          if (hasRequestHead && !okReadInThen) {
-            issues.push({
-              severity: 'error',
-              type: 'request-catch-only-no-ok-check',
-              message: 'A request/api-client chain relies on .catch for failure but never checks '
-                + '`res.ok` in .then. The af-core request pipeline RESOLVES `{ok:false}` on a network '
-                + 'failure (it never rejects), so the .catch is dead code — branch on `if (!res.ok)` '
-                + 'inside .then.',
-              file: jsFile.filename,
-              line: node.loc?.start.line,
-            });
+          // Fallback root: a bare-identifier call shaped like an api-client invocation
+          // (`client(params, globals)`) whose OWN definition is not available anywhere in the
+          // current file set. With the definition present, its real literal-request root (if any)
+          // is already found directly by the check above, and climbing naturally reaches this call
+          // site's own chain when relevant — no fallback needed there. Without it (routinely true on
+          // the single-file ESLint-plugin surface), this is the only signal available at all, so it
+          // falls back to the same shape heuristic the old design used everywhere.
+          if (node.callee?.type === 'Identifier' && RequestErrorHandlingAnalyzer.hasGlobalsArg(node)
+            && !funcDefIndex.has(node.callee.name)) {
+            RequestErrorHandlingAnalyzer.evaluateUsage(node, ancestors, filename, callSiteIndex, emit);
           }
         },
       });
@@ -211702,7 +212079,7 @@ const RULE_TYPES = {
   'hidden-fields': ['static-false-visibility', 'unnecessary-hidden-field'],
   'navigation-in-custom-fn': ['navigation-dom-in-custom-function', 'window-location-navigation-in-custom-function'],
   'ootb-property-shadow': ['ootb-event-misuse', 'ootb-property-shadow'],
-  'request-error-handling': ['request-catch-only-no-ok-check'],
+  'request-error-handling': ['request-catch-only-no-ok-check', 'request-missing-error-handling'],
   // rule-ordering-race is emitted by the event-impact analyzer; identity resolution already covers it,
   // as it does the analyzer's other, distinct event-impact types (dom-in-event / http-in-event /
   // high-impact) which are their own self-governing ids — NOT silenced by `rule-ordering-race: off`.
