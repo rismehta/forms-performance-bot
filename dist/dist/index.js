@@ -201829,8 +201829,12 @@ const MAX_WRAPPER_DEPTH = 15;
  * request(...)` call (the ROOT; no heuristic needed, it's an unambiguous syntactic match), not from
  * every `.then()` in the codebase. From each root, `evaluateUsage` climbs the REAL call graph,
  * re-running BOTH detectors below at every level it reaches, not only at the root itself:
- *   - Classify how this specific usage is consumed right here: chained with `.then()`/`.catch()`,
- *     `await`ed, or fully discarded (`classifyConsumption`).
+ *   - Classify how this specific usage is consumed right here: chained with `.then()`/`.catch()`
+ *     (directly, or via `Promise.all([...])`, which genuinely propagates any element's rejection to
+ *     its own returned promise — see `promiseAllChainFor`), `await`ed, passed as a plain function-call
+ *     ARGUMENT to a callee that safely consumes it internally (see `isParamSafelyConsumed` — the real
+ *     shape of this repo's `validateEmbeddedField(field, apiFn, ...)`-style validator helpers, which
+ *     `await apiFn` in their OWN try/catch), or fully discarded (`classifyConsumption`).
  *   - A `.then/.catch` chain with `.catch` present reports (a) below (if it lacks an `.ok` read) and
  *     stops climbing — a catch means this usage IS handled, however imperfectly. An `await`ed usage
  *     inside a non-rethrowing `try/catch` is protected outright (a bare `try/finally` does NOT
@@ -202090,11 +202094,41 @@ class RequestErrorHandlingAnalyzer {
     return null;
   }
 
+  // Is `paramName` (a parameter of `calleeDef`) safely consumed somewhere in the callee's OWN body —
+  // via `await paramName` inside a non-rethrowing try/catch, or `paramName.then(...).catch(...)` / an
+  // `.ok`/`.status` read in one of its `.then` callbacks? Used when a request-rooted promise is
+  // passed as a plain function-call ARGUMENT rather than chained/awaited/Promise.all'd at the call
+  // site itself — the real shape of this repo's `validateEmbeddedField(field, apiFn, ...)`-style
+  // validator helpers, which `await apiFn` internally in their own try/catch.
+  static isParamSafelyConsumed(paramName, calleeDef) {
+    let safe = false;
+    ancestor(calleeDef.body, {
+      AwaitExpression: (node, ancestors) => {
+        if (safe || node.argument?.type !== 'Identifier' || node.argument.name !== paramName) return;
+        if (RequestErrorHandlingAnalyzer.isAwaitProtected(node, ancestors)) safe = true;
+      },
+      CallExpression: (node) => {
+        if (safe) return;
+        const nm = RequestErrorHandlingAnalyzer.calleeName(node.callee);
+        if (nm !== 'then' && nm !== 'catch') return;
+        const { hasCatch, thenCallbacks } = RequestErrorHandlingAnalyzer.inspectChain(node);
+        if (!hasCatch && !thenCallbacks.some((cb) => RequestErrorHandlingAnalyzer.readsOk(cb))) return;
+        let cur = node;
+        while (cur && cur.type === 'CallExpression') cur = cur.callee?.object;
+        if (cur?.type === 'Identifier' && cur.name === paramName) safe = true;
+      },
+    });
+    return safe;
+  }
+
   // Classify how `node` (a confirmed request root, or a caller's invocation of a named wrapper) is
   // consumed right where it is: chained with .then()/.catch() ('chain'), passed to `await`
-  // ('await'), consumed via `Promise.all([...])` ('chain', see `promiseAllChainFor`), or its result
-  // fully discarded — a bare fire-and-forget statement ('bare').
-  static classifyConsumption(node, ancestors) {
+  // ('await'), consumed via `Promise.all([...])` ('chain', see `promiseAllChainFor`), passed as a
+  // plain call argument to a function that safely consumes it internally ('protected', see
+  // `isParamSafelyConsumed` — needs `funcDefIndex` to resolve the callee's definition and its
+  // parameter name at that position), or its result fully discarded — a bare fire-and-forget
+  // statement ('bare').
+  static classifyConsumption(node, ancestors, funcDefIndex = null) {
     const outer = RequestErrorHandlingAnalyzer.outermostChainNode(node, ancestors);
     if (outer !== node) return { kind: 'chain', node: outer };
     const idx = ancestors.lastIndexOf(node);
@@ -202104,6 +202138,15 @@ class RequestErrorHandlingAnalyzer {
     }
     const promiseAllChain = RequestErrorHandlingAnalyzer.promiseAllChainFor(node, ancestors);
     if (promiseAllChain) return { kind: 'chain', node: promiseAllChain };
+    if (funcDefIndex && parent?.type === 'CallExpression' && parent.callee?.type === 'Identifier') {
+      const argIndex = parent.arguments.indexOf(node);
+      const calleeDef = argIndex !== -1 ? funcDefIndex.get(parent.callee.name) : null;
+      const paramName = calleeDef?.params?.[argIndex];
+      if (calleeDef && paramName?.type === 'Identifier'
+        && RequestErrorHandlingAnalyzer.isParamSafelyConsumed(paramName.name, calleeDef)) {
+        return { kind: 'protected', node };
+      }
+    }
     return { kind: 'bare', node };
   }
 
@@ -202205,9 +202248,11 @@ class RequestErrorHandlingAnalyzer {
   // `emit` is the shared, dedup-aware issue reporter from `analyze()`. `depth` bounds the climb so a
   // pathological recursive/mutually-recursive helper can't hang the analyzer. Returns whether this
   // usage is considered handled (so its caller, if any, knows not to keep climbing past it).
-  static evaluateUsage(node, ancestors, filename, callSiteIndex, emit, depth = 0) {
+  static evaluateUsage(node, ancestors, filename, callSiteIndex, emit, funcDefIndex = null, depth = 0) {
     if (depth > MAX_WRAPPER_DEPTH) return false;
-    const consumption = RequestErrorHandlingAnalyzer.classifyConsumption(node, ancestors);
+    const consumption = RequestErrorHandlingAnalyzer.classifyConsumption(node, ancestors, funcDefIndex);
+
+    if (consumption.kind === 'protected') return true; // passed as an argument the callee safely consumes
 
     if (consumption.kind === 'chain') {
       const { hasCatch, thenCallbacks } = RequestErrorHandlingAnalyzer.inspectChain(consumption.node);
@@ -202244,7 +202289,7 @@ class RequestErrorHandlingAnalyzer {
     }
     let allCaught = true;
     for (const site of sites) {
-      const caught = RequestErrorHandlingAnalyzer.evaluateUsage(site.node, site.ancestors, site.filename, callSiteIndex, emit, depth + 1);
+      const caught = RequestErrorHandlingAnalyzer.evaluateUsage(site.node, site.ancestors, site.filename, callSiteIndex, emit, funcDefIndex, depth + 1);
       if (!caught) allCaught = false;
     }
     return allCaught;
@@ -202296,7 +202341,7 @@ class RequestErrorHandlingAnalyzer {
           // Primary root: every literal `request(...)` / `globals.functions.request(...)` call —
           // unambiguous, no heuristic needed.
           if (RequestErrorHandlingAnalyzer.calleeName(node.callee) === 'request') {
-            RequestErrorHandlingAnalyzer.evaluateUsage(node, ancestors, filename, callSiteIndex, emit);
+            RequestErrorHandlingAnalyzer.evaluateUsage(node, ancestors, filename, callSiteIndex, emit, funcDefIndex);
             return;
           }
           // Fallback root: a bare-identifier call shaped like an api-client invocation
@@ -202308,7 +202353,7 @@ class RequestErrorHandlingAnalyzer {
           // falls back to the same shape heuristic the old design used everywhere.
           if (node.callee?.type === 'Identifier' && RequestErrorHandlingAnalyzer.hasGlobalsArg(node)
             && !funcDefIndex.has(node.callee.name)) {
-            RequestErrorHandlingAnalyzer.evaluateUsage(node, ancestors, filename, callSiteIndex, emit);
+            RequestErrorHandlingAnalyzer.evaluateUsage(node, ancestors, filename, callSiteIndex, emit, funcDefIndex);
           }
         },
       });
