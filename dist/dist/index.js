@@ -3444,7 +3444,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.BaseNode = exports.exclude = exports.include = exports.dependencyTracked = exports.qualifiedName = exports.target = exports.ActionImplWithTarget = exports.staticFields = exports.dynamicProps = exports.expressionProperties = exports.editableProperties = void 0;
+exports.modelAccessorProps = exports.BaseNode = exports.exclude = exports.include = exports.dependencyTracked = exports.qualifiedName = exports.target = exports.ActionImplWithTarget = exports.staticFields = exports.dynamicProps = exports.expressionProperties = exports.editableProperties = void 0;
 const index_1 = __nccwpck_require__(40624);
 const Events_1 = __nccwpck_require__(30290);
 const PropertiesManager_js_1 = __nccwpck_require__(23322);
@@ -3612,8 +3612,15 @@ class BaseNode {
         if (this.fragment === '$form') {
             return this.form.getRuleNode();
         }
+        if (this._fragmentRuleNode !== undefined) {
+            return this._fragmentRuleNode;
+        }
         const fragmentContainer = this.form.resolveQualifiedName(this.fragment);
-        return (_a = fragmentContainer === null || fragmentContainer === void 0 ? void 0 : fragmentContainer.getRuleNode()) !== null && _a !== void 0 ? _a : this.form.getRuleNode();
+        const node = (_a = fragmentContainer === null || fragmentContainer === void 0 ? void 0 : fragmentContainer.getRuleNode()) !== null && _a !== void 0 ? _a : this.form.getRuleNode();
+        if (!this.repeatable && !this._isAncestorRepeatable()) {
+            this._fragmentRuleNode = node;
+        }
+        return node;
     }
     setupRuleNode() {
         const self = this;
@@ -3681,7 +3688,7 @@ class BaseNode {
                 if (method) {
                     return method;
                 }
-                if (exports.dynamicProps.indexOf(prop) > -1 || BaseNode.RULE_NODE_READONLY_BARE_PROPS.indexOf(prop) > -1) {
+                if (exports.dynamicProps.indexOf(prop) > -1 || BaseNode.RULE_NODE_READONLY_BARE_PROPS.indexOf(prop) > -1 || prop === 'data') {
                     const val = this[prop];
                     if (typeof val !== 'function') {
                         return this.mapRuleValue(val);
@@ -4190,9 +4197,11 @@ class BaseNode {
 }
 BaseNode.RULE_NODE_METHODS = [
     'subscribe', 'dispatch', 'validate', 'validateAsync', 'reset', 'focus',
-    'importData', 'exportData', 'getState', 'getChild', 'bind'
+    'importData', 'exportData', 'getState', 'getChild', 'bind',
+    'getErrorMessage', 'markAsInvalid',
+    'getElement', 'resolveQualifiedName', 'visit', 'request', 'isValid'
 ];
-BaseNode.RULE_NODE_READONLY_BARE_PROPS = ['name', 'id', 'parent'];
+BaseNode.RULE_NODE_READONLY_BARE_PROPS = ['name', 'id', 'parent', 'qualifiedName'];
 __decorate([
     dependencyTracked()
 ], BaseNode.prototype, "index", null);
@@ -4206,9 +4215,9 @@ __decorate([
     dependencyTracked()
 ], BaseNode.prototype, "label", null);
 exports.BaseNode = BaseNode;
-const modelDollarAliases = [...new Set([...exports.dynamicProps, 'name', 'id', 'type', 'fieldType', 'items', 'parent', 'data'])];
+exports.modelAccessorProps = [...new Set([...exports.dynamicProps, 'name', 'id', 'type', 'fieldType', 'items', 'parent', 'data', 'qualifiedName'])];
 const modelDollarWritable = new Set([...exports.editableProperties, 'data']);
-modelDollarAliases.forEach((prop) => {
+exports.modelAccessorProps.forEach((prop) => {
     const dollarProp = `$${prop}`;
     if (Object.prototype.hasOwnProperty.call(BaseNode.prototype, dollarProp)) {
         return;
@@ -4468,6 +4477,7 @@ const Scriptable_1 = __importDefault(__nccwpck_require__(52739));
 const Events_1 = __nccwpck_require__(30290);
 const DataGroup_1 = __importDefault(__nccwpck_require__(43244));
 const BaseNode_2 = __nccwpck_require__(91709);
+const decorateSubtree_1 = __nccwpck_require__(40369);
 const notifyChildrenAttributes = [
     'readOnly', 'enabled'
 ];
@@ -4631,7 +4641,8 @@ class Container extends Scriptable_1.default {
             index = this._children.length;
         }
         const form = this.form;
-        const itemTemplate = Object.assign({ index }, (0, JsonUtils_1.deepClone)(itemJson, cloneIds ? () => { return form.getUniqueId(); } : undefined));
+        const itemTemplate = (0, JsonUtils_1.deepClone)(itemJson, cloneIds ? () => { return form.getUniqueId(); } : undefined);
+        itemTemplate.index = index;
         const retVal = this._createChild(itemTemplate, { parent: this, form: this.form, mode });
         itemJson.id = retVal.id;
         this.form.fieldAdded(retVal);
@@ -4646,6 +4657,17 @@ class Container extends Scriptable_1.default {
     }
     indexOf(f) {
         return this._children.indexOf(f);
+    }
+    visit(callBack) {
+        this.traverseChild(this, callBack);
+    }
+    traverseChild(container, callBack) {
+        container.items.forEach((field) => {
+            if (field.isContainer) {
+                this.traverseChild(field, callBack);
+            }
+            callBack(field);
+        });
     }
     defaultDataModel(name) {
         const type = this._jsonModel.type || undefined;
@@ -4755,13 +4777,7 @@ class Container extends Scriptable_1.default {
                 this.notifyDependents((0, Events_1.propertyChange)('items', retVal.getState(), null, this._eventSource));
                 retVal.dispatch(new Events_1.Initialize());
                 retVal.dispatch(new Events_1.ExecuteRule());
-                const decorate = (n) => { if (typeof n.runModelDecorator === 'function') {
-                    n.runModelDecorator();
-                } };
-                decorate(retVal);
-                if (typeof retVal.visit === 'function') {
-                    retVal.visit(decorate);
-                }
+                (0, decorateSubtree_1.decorateSubtree)(retVal);
                 for (let i = instanceIndex + 1; i < this._children.length; i++) {
                     this._children[i].dispatch(new Events_1.ExecuteRule());
                 }
@@ -5393,10 +5409,10 @@ class Field extends Scriptable_1.default {
         if (['plain-text', 'image'].indexOf(this.fieldType) === -1) {
             this._jsonModel.value = undefined;
         }
-        else if (this.fieldType === 'image') {
-            this._jsonModel.value = (_c = (_b = (_a = this._jsonModel) === null || _a === void 0 ? void 0 : _a.properties) === null || _b === void 0 ? void 0 : _b['fd:repoPath']) !== null && _c !== void 0 ? _c : this._jsonModel.value;
-        }
         else {
+            if (this.fieldType === 'image') {
+                this._jsonModel.value = (_c = (_b = (_a = this._jsonModel) === null || _a === void 0 ? void 0 : _a.properties) === null || _b === void 0 ? void 0 : _b['fd:repoPath']) !== null && _c !== void 0 ? _c : this._jsonModel.value;
+            }
             this._jsonModel.default = this._jsonModel.default || this._jsonModel.value;
         }
         const value = this._jsonModel.value;
@@ -6532,13 +6548,23 @@ class Form extends Container_1.default {
         if (this.qualifiedName === qualifiedName) {
             return this;
         }
-        let foundFormElement = null;
-        this.visit(formElement => {
-            if (formElement.qualifiedName === qualifiedName) {
-                foundFormElement = formElement;
+        return this.findQualifiedName(this, qualifiedName);
+    }
+    findQualifiedName(container, qualifiedName) {
+        const items = container.items;
+        for (let i = items.length - 1; i >= 0; i--) {
+            const field = items[i];
+            if (field.qualifiedName === qualifiedName) {
+                return field;
             }
-        });
-        return foundFormElement;
+            if (field.isContainer) {
+                const found = this.findQualifiedName(field, qualifiedName);
+                if (found !== null) {
+                    return found;
+                }
+            }
+        }
+        return null;
     }
     exportSubmitMetaData() {
         return this.withDependencyTrackingControl(true, () => {
@@ -6693,17 +6719,6 @@ class Form extends Container_1.default {
                 this.notifyDependents(fieldChangedAction);
             }
         }, 'change', 'model');
-    }
-    visit(callBack) {
-        this.traverseChild(this, callBack);
-    }
-    traverseChild(container, callBack) {
-        container.items.forEach((field) => {
-            if (field.isContainer) {
-                this.traverseChild(field, callBack);
-            }
-            callBack(field);
-        });
     }
     validate() {
         const validationErrors = super.validate();
@@ -6885,16 +6900,8 @@ const FormCreationUtils_1 = __nccwpck_require__(30540);
 const FunctionRuntime_1 = __nccwpck_require__(72306);
 const FormUtils_1 = __nccwpck_require__(2288);
 const DataGroup_1 = __importDefault(__nccwpck_require__(43244));
-const decorateFormModels = (form) => {
-    const runOn = (n) => { if (typeof n.runModelDecorator === 'function') {
-        n.runModelDecorator();
-    } };
-    runOn(form);
-    if (typeof form.visit === 'function') {
-        form.visit(runOn);
-    }
-    form.getEventQueue().runPendingQueue();
-};
+const decorateSubtree_1 = __nccwpck_require__(40369);
+const decorateFormModels = (form) => (0, decorateSubtree_1.decorateSubtree)(form);
 const createFormInstanceHelper = (formModel, logLevel, fModel) => {
     let f = fModel;
     if (f == null) {
@@ -7092,20 +7099,54 @@ exports.InstanceManager = InstanceManager;
 
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.clearModelDecorators = exports.getModelDecorator = exports.registerModelDecorator = void 0;
-const modelDecorators = Object.create(null);
+exports.clearModelDecorators = exports.getFormDecorator = exports.registerFormDecorator = exports.getFragmentDecorator = exports.registerFragmentDecorator = exports.getModelDecorator = exports.registerModelDecorator = void 0;
+const createDecoratorRegistry = () => {
+    const map = Object.create(null);
+    return {
+        register(key, decorator) {
+            if (typeof key === 'string' && key.length > 0 && typeof decorator === 'function') {
+                map[key] = decorator;
+            }
+        },
+        get(key) {
+            return typeof key === 'string' ? map[key] : undefined;
+        },
+        clear() {
+            Object.keys(map).forEach((k) => delete map[k]);
+        }
+    };
+};
+const modelRegistry = createDecoratorRegistry();
+const fragmentRegistry = createDecoratorRegistry();
+const formRegistry = createDecoratorRegistry();
 function registerModelDecorator(viewType, decorator) {
-    if (typeof viewType === 'string' && viewType.length > 0 && typeof decorator === 'function') {
-        modelDecorators[viewType] = decorator;
-    }
+    modelRegistry.register(viewType, decorator);
 }
 exports.registerModelDecorator = registerModelDecorator;
 function getModelDecorator(viewType) {
-    return typeof viewType === 'string' ? modelDecorators[viewType] : undefined;
+    return modelRegistry.get(viewType);
 }
 exports.getModelDecorator = getModelDecorator;
+function registerFragmentDecorator(fragmentPath, decorator) {
+    fragmentRegistry.register(fragmentPath, decorator);
+}
+exports.registerFragmentDecorator = registerFragmentDecorator;
+function getFragmentDecorator(fragmentPath) {
+    return fragmentRegistry.get(fragmentPath);
+}
+exports.getFragmentDecorator = getFragmentDecorator;
+function registerFormDecorator(formPath, decorator) {
+    formRegistry.register(formPath, decorator);
+}
+exports.registerFormDecorator = registerFormDecorator;
+function getFormDecorator(formPath) {
+    return formRegistry.get(formPath);
+}
+exports.getFormDecorator = getFormDecorator;
 function clearModelDecorators() {
-    Object.keys(modelDecorators).forEach((k) => delete modelDecorators[k]);
+    modelRegistry.clear();
+    fragmentRegistry.clear();
+    formRegistry.clear();
 }
 exports.clearModelDecorators = clearModelDecorators;
 
@@ -7551,21 +7592,46 @@ class Scriptable extends BaseNode_1.BaseNode {
         }
     }
     runModelDecorator() {
+        var _a;
         if (this._modelDecorated) {
             return;
         }
         const viewType = this[':type'];
-        const decorator = (0, ModelDecorators_1.getModelDecorator)(viewType);
+        const jsonModel = this._jsonModel;
+        const isFormRoot = this.fieldType === 'form' || this.id === '$form';
+        const formPath = isFormRoot ? (_a = jsonModel === null || jsonModel === void 0 ? void 0 : jsonModel.properties) === null || _a === void 0 ? void 0 : _a['fd:path'] : undefined;
+        const fragmentPath = this.isFragment ? jsonModel === null || jsonModel === void 0 ? void 0 : jsonModel.fragmentPath : undefined;
+        let decorator;
+        let keyLabel = '';
+        if (formPath) {
+            decorator = (0, ModelDecorators_1.getFormDecorator)(formPath) || (0, ModelDecorators_1.getFragmentDecorator)(formPath);
+            if (decorator) {
+                keyLabel = `fd:path="${formPath}"`;
+            }
+        }
+        if (!decorator && fragmentPath) {
+            decorator = (0, ModelDecorators_1.getFragmentDecorator)(fragmentPath);
+            if (decorator) {
+                keyLabel = `fragmentPath="${fragmentPath}"`;
+            }
+        }
+        if (!decorator) {
+            decorator = (0, ModelDecorators_1.getModelDecorator)(viewType);
+            if (decorator) {
+                keyLabel = `':type'="${viewType}"`;
+            }
+        }
         if (decorator) {
+            const resolved = decorator;
             this._modelDecorated = true;
             this.ruleEngine.setModelDecorating(true);
             try {
                 this.withDependencyTrackingControl(true, () => {
-                    decorator((0, FunctionRuntime_1.buildRuleGlobals)({ globals: this.buildRuleContext() }));
+                    resolved((0, FunctionRuntime_1.buildRuleGlobals)({ globals: this.buildRuleContext() }));
                 });
             }
             catch (e) {
-                this.form.logger.error(`Model decorator for ':type'="${viewType}" on "${this.name}" failed: ${e}`);
+                this.form.logger.error(`Model decorator for ${keyLabel} on "${this.name}" failed: ${e}`);
             }
             finally {
                 this.ruleEngine.setModelDecorating(false);
@@ -7793,6 +7859,16 @@ class BaseAction {
     }
     get isUserChange() {
         return (0, exports.isUserChange)(this);
+    }
+    get changedProperties() {
+        var _a;
+        const changes = (_a = this.payload) === null || _a === void 0 ? void 0 : _a.changes;
+        return (Array.isArray(changes) ? changes : [])
+            .map((c) => c === null || c === void 0 ? void 0 : c.propertyName)
+            .filter((p) => typeof p === 'string' && p.length > 0);
+    }
+    hasPropertyChanged(propertyName) {
+        return this.changedProperties.indexOf(propertyName) !== -1;
     }
 }
 exports.BaseAction = BaseAction;
@@ -8183,6 +8259,7 @@ class DataValue {
         this.$_value = $_value;
         this.$_type = $_type;
         this.$_fields = [];
+        this._hasFileInput = false;
         this.parent = parent;
     }
     valueOf() {
@@ -8196,19 +8273,15 @@ class DataValue {
         return (!enabled && this.$_fields.length);
     }
     get $value() {
-        const formInFileInput = this.$_fields.find(x => {
-            if ((0, JsonUtils_1.isFile)(x)) {
-                return x;
-            }
-        });
-        if (formInFileInput && (this.$_fields.every(_ => ['string', 'string[]'].includes(_.type)))) {
-            const attachmentMap = formInFileInput.form._exportDataAttachmentMap;
-            if (attachmentMap && attachmentMap[formInFileInput.id]) {
-                const attachment = attachmentMap[formInFileInput.id];
-                if (Array.isArray(attachment)) {
-                    return attachment.map(item => item.data);
-                }
-                else {
+        if (this._hasFileInput) {
+            const formInFileInput = this.$_fields.find(x => (0, JsonUtils_1.isFile)(x));
+            if (formInFileInput && (this.$_fields.every(_ => ['string', 'string[]'].includes(_.type)))) {
+                const attachmentMap = formInFileInput.form._exportDataAttachmentMap;
+                if (attachmentMap && attachmentMap[formInFileInput.id]) {
+                    const attachment = attachmentMap[formInFileInput.id];
+                    if (Array.isArray(attachment)) {
+                        return attachment.map(item => item.data);
+                    }
                     return attachment.data;
                 }
             }
@@ -8229,6 +8302,9 @@ class DataValue {
     $bindToField(field) {
         if (this.$_fields.indexOf(field) === -1) {
             this.$_fields.push(field);
+            if (!this._hasFileInput && (0, JsonUtils_1.isFile)(field)) {
+                this._hasFileInput = true;
+            }
             this._checkForTypeConflicts(field);
         }
     }
@@ -8303,6 +8379,28 @@ exports["default"] = NullDataValue;
 
 /***/ }),
 
+/***/ 40369:
+/***/ ((__unused_webpack_module, exports) => {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.decorateSubtree = void 0;
+const decorateSubtree = (node) => {
+    var _a, _b;
+    const decorate = (n) => { if (typeof n.runModelDecorator === 'function') {
+        n.runModelDecorator();
+    } };
+    decorate(node);
+    if (typeof node.visit === 'function') {
+        node.visit(decorate);
+    }
+    (_b = (_a = node.form) === null || _a === void 0 ? void 0 : _a.getEventQueue) === null || _b === void 0 ? void 0 : _b.call(_a).runPendingQueue();
+};
+exports.decorateSubtree = decorateSubtree;
+
+
+/***/ }),
+
 /***/ 39866:
 /***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
 
@@ -8325,7 +8423,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.sanitizeName = exports.Captcha = exports.EmailInput = exports.SubmitMetaData = exports.isEmpty = exports.request = exports.FunctionRuntime = exports.readAttachments = exports.extractFileInfo = exports.getFileSizeInBytes = exports.Scriptable = exports.Node = exports.FormMetaData = exports.FileUpload = exports.FileObject = exports.Fieldset = exports.Field = exports.Container = exports.CheckboxGroup = exports.Checkbox = exports.BaseNode = exports.Form = exports.registerModelDecorator = void 0;
+exports.sanitizeName = exports.Captcha = exports.EmailInput = exports.SubmitMetaData = exports.isEmpty = exports.request = exports.FunctionRuntime = exports.readAttachments = exports.extractFileInfo = exports.getFileSizeInBytes = exports.Scriptable = exports.Node = exports.FormMetaData = exports.FileUpload = exports.FileObject = exports.Fieldset = exports.Field = exports.Container = exports.CheckboxGroup = exports.Checkbox = exports.BaseNode = exports.Form = exports.dynamicProps = exports.modelAccessorProps = exports.decorateSubtree = exports.registerFormDecorator = exports.registerFragmentDecorator = exports.registerModelDecorator = void 0;
 __exportStar(__nccwpck_require__(29561), exports);
 __exportStar(__nccwpck_require__(40624), exports);
 __exportStar(__nccwpck_require__(30290), exports);
@@ -8335,14 +8433,21 @@ __exportStar(__nccwpck_require__(86844), exports);
 __exportStar(__nccwpck_require__(85444), exports);
 var ModelDecorators_1 = __nccwpck_require__(93141);
 Object.defineProperty(exports, "registerModelDecorator", ({ enumerable: true, get: function () { return ModelDecorators_1.registerModelDecorator; } }));
+Object.defineProperty(exports, "registerFragmentDecorator", ({ enumerable: true, get: function () { return ModelDecorators_1.registerFragmentDecorator; } }));
+Object.defineProperty(exports, "registerFormDecorator", ({ enumerable: true, get: function () { return ModelDecorators_1.registerFormDecorator; } }));
+var decorateSubtree_1 = __nccwpck_require__(40369);
+Object.defineProperty(exports, "decorateSubtree", ({ enumerable: true, get: function () { return decorateSubtree_1.decorateSubtree; } }));
+var BaseNode_1 = __nccwpck_require__(91709);
+Object.defineProperty(exports, "modelAccessorProps", ({ enumerable: true, get: function () { return BaseNode_1.modelAccessorProps; } }));
+Object.defineProperty(exports, "dynamicProps", ({ enumerable: true, get: function () { return BaseNode_1.dynamicProps; } }));
 const FormUtils_1 = __nccwpck_require__(2288);
 Object.defineProperty(exports, "getFileSizeInBytes", ({ enumerable: true, get: function () { return FormUtils_1.getFileSizeInBytes; } }));
 Object.defineProperty(exports, "extractFileInfo", ({ enumerable: true, get: function () { return FormUtils_1.extractFileInfo; } }));
 Object.defineProperty(exports, "isEmpty", ({ enumerable: true, get: function () { return FormUtils_1.isEmpty; } }));
 Object.defineProperty(exports, "readAttachments", ({ enumerable: true, get: function () { return FormUtils_1.readAttachments; } }));
 Object.defineProperty(exports, "sanitizeName", ({ enumerable: true, get: function () { return FormUtils_1.sanitizeName; } }));
-const BaseNode_1 = __nccwpck_require__(91709);
-Object.defineProperty(exports, "BaseNode", ({ enumerable: true, get: function () { return BaseNode_1.BaseNode; } }));
+const BaseNode_2 = __nccwpck_require__(91709);
+Object.defineProperty(exports, "BaseNode", ({ enumerable: true, get: function () { return BaseNode_2.BaseNode; } }));
 const Checkbox_1 = __importDefault(__nccwpck_require__(51114));
 exports.Checkbox = Checkbox_1.default;
 const CheckboxGroup_1 = __importDefault(__nccwpck_require__(74622));
@@ -8667,6 +8772,7 @@ const createAction = (name, payload = {}, dispatch = false) => {
 class FunctionRuntimeImpl {
     constructor() {
         this.customFunctions = {};
+        this._defaultFunctions = undefined;
     }
     static getInstance() {
         if (!FunctionRuntimeImpl.instance) {
@@ -8802,6 +8908,9 @@ class FunctionRuntimeImpl {
         });
     }
     getFunctions() {
+        if (this._defaultFunctions !== undefined) {
+            return Object.assign(Object.assign({}, this._defaultFunctions), FunctionRuntimeImpl.getInstance().customFunctions);
+        }
         function isArray(obj) {
             if (obj !== null) {
                 return Object.prototype.toString.call(obj) === '[object Array]';
@@ -9399,7 +9508,8 @@ class FunctionRuntimeImpl {
                 _signature: []
             }
         };
-        return Object.assign(Object.assign({}, defaultFunctions), FunctionRuntimeImpl.getInstance().customFunctions);
+        this._defaultFunctions = defaultFunctions;
+        return Object.assign(Object.assign({}, this._defaultFunctions), FunctionRuntimeImpl.getInstance().customFunctions);
     }
 }
 FunctionRuntimeImpl.instance = null;
@@ -10570,15 +10680,18 @@ function deepClone(obj, idGenerator) {
     }
     let result;
     if (Array.isArray(obj)) {
-        result = new Array(obj.length);
-        for (let i = 0; i < obj.length; i++) {
+        const len = obj.length;
+        result = new Array(len);
+        for (let i = 0; i < len; i++) {
             result[i] = deepClone(obj[i], idGenerator);
         }
     }
     else {
         result = {};
-        for (const key of Object.keys(obj)) {
-            result[key] = deepClone(obj[key], idGenerator);
+        for (const key in obj) {
+            if (Object.prototype.hasOwnProperty.call(obj, key)) {
+                result[key] = deepClone(obj[key], idGenerator);
+            }
         }
     }
     if (idGenerator && result && result.id) {
@@ -201210,7 +201323,7 @@ class FragmentGlobalsScopeAnalyzer {
         if (aliases && node.object?.type === 'Identifier') {
           const objSegs = resolveChain(node.object, aliases);
           if (objSegs && objSegs.length >= 3 && objSegs[0] === 'globals' && objSegs[1] === 'form'
-            && objSegs[2] !== '$properties') {
+            && objSegs[2] !== '$properties' && objSegs[2] !== 'properties') {
             const localName = node.object.name;
             if (!reportedAliasTraversal.has(localName)) {
               reportedAliasTraversal.add(localName);
@@ -201240,7 +201353,9 @@ class FragmentGlobalsScopeAnalyzer {
         // (A) `globals.form.$properties.<key>` read — key-aware scope check. Handles dotted access
         // (`.queryParams`) AND computed STRING-literal access (`['uistate._x']`, common for namespaced
         // keys). A computed non-literal (`[key]`) can't be judged here — the readProp pass covers that.
-        if (objPath === 'globals.form.$properties') {
+        // Bare `globals.form.properties.<key>` resolves identically at runtime (af-core), so it takes the
+        // SAME key-aware path — not the (B) traversal path below.
+        if (objPath === 'globals.form.$properties' || objPath === 'globals.form.properties') {
           let key = null;
           if (!node.computed && node.property?.type === 'Identifier') key = node.property.name;
           else if (node.computed && node.property?.type === 'Literal' && typeof node.property.value === 'string') key = node.property.value;
@@ -201248,12 +201363,16 @@ class FragmentGlobalsScopeAnalyzer {
           return; // dynamic computed access — not statically resolvable
         }
 
-        // (B) traversal: direct child of globals.form other than $properties → portability violation.
+        // (B) traversal: direct child of globals.form that names a FIELD → portability violation.
         if (objPath !== 'globals.form') return;
         if (node.computed) return;
         const prop = node.property?.name;
         if (!prop) return;
-        if (prop === '$properties') return; // its keys are handled in (A)
+        // `$properties`/`properties` reads resolve identically at runtime (af-core) and their keys are
+        // scope-checked in (A) — not a traversal. Other accessors off `globals.form` (`$items`,
+        // `<fieldName>`) STAY flagged: reading the absolute form's child structure from a fragment is
+        // the exact portability coupling this rule guards.
+        if (prop === '$properties' || prop === 'properties') return;
 
         const fullPath = `globals.form.${prop}`;
         issues.push({
@@ -203490,7 +203609,33 @@ function resolveReferencedJson(jsFiles, jsonFiles, warn) {
   return links;
 }
 
+;// CONCATENATED MODULE: ./src/analyzers/rule-node-accessors.js
+
+
+/**
+ * Runtime accessor surface for a form node — the authoritative list af-core exports as
+ * `modelAccessorProps` (af2-web-runtime #777): every property reachable BOTH bare (`field.value`,
+ * `globals.form.properties`, `globals.fragment.data`) and `$`-prefixed (`field.$value`,
+ * `globals.form.$properties`). It is `dynamicProps ∪ {name,id,type,fieldType,items,parent,data,
+ * qualifiedName}`, driven straight from af-core so this never drifts from the runtime — do NOT
+ * re-hardcode a partial copy here.
+ *
+ * A chain segment is an ACCESSOR (a runtime read on the node) rather than a child-field / fragment-root
+ * name when either:
+ *   - it starts with `$` — the accessor sigil never names a field/root; OR
+ *   - its bare name is in `modelAccessorProps`.
+ * Analyzers use this to avoid mistaking `globals.fragment.data` / `globals.form.properties` for a
+ * foreign fragment root or a field traversal (both resolve identically to their `$`-forms at runtime —
+ * af-core BaseNode.getFromRule).
+ */
+const ACCESSOR_NAMES = new Set(BaseNode.modelAccessorProps);
+
+function isAccessorSegment(seg) {
+  return typeof seg === 'string' && (seg.startsWith('$') || ACCESSOR_NAMES.has(seg));
+}
+
 ;// CONCATENATED MODULE: ./src/analyzers/fragment-path-validator-analyzer.js
+
 
 
 
@@ -203541,9 +203686,6 @@ class FragmentPathValidatorAnalyzer {
   // Read the FIRST recognized path tag — delegates to the shared JS→JSON link util so the parse logic
   // lives in exactly one place (foreign-fragment-root / orphan-fragment-handler resolve through here).
   static readPathTag = readPathTag;
-
-  // Runtime accessors / non-node tail segments that are NOT JSON hierarchy nodes.
-  static NON_NODE_SEG = new Set(['$value', '$properties', 'properties', '$name', '$qualifiedName', 'value', '$items', '$data']);
 
   // Build the set of valid parent→child name-chains from a form/fragment JSON (dot-joined, root-relative).
   // Also records NESTED-FRAGMENT BOUNDARIES: a node carrying a `fragmentPath` property is a nested
@@ -203600,7 +203742,10 @@ class FragmentPathValidatorAnalyzer {
     const after = segs.slice(2);
     const nodes = [];
     for (const s of after) {
-      if (FragmentPathValidatorAnalyzer.NON_NODE_SEG.has(s)) break;
+      // Stop at the first runtime accessor tail (`$value`/`value`, `$properties`/`properties`,
+      // `$data`/`data`, `$items`/`items`, …) — af-core's authoritative accessor surface. Everything
+      // before it is a JSON hierarchy node-name to validate.
+      if (isAccessorSegment(s)) break;
       nodes.push(s);
     }
     return nodes;
@@ -203803,6 +203948,7 @@ class FragmentPathValidatorAnalyzer {
 
 
 
+
 /**
  * Foreign-Fragment-Root Analyzer  (ownership: "never reach into another concern's fields")
  *
@@ -203893,11 +204039,13 @@ class ForeignFragmentRootAnalyzer {
             && m.object.property?.name === 'fragment'
             && m.property?.name) {
             const name = m.property.name;
-            // `$`-prefixed segments are runtime ACCESSORS on the fragment scope ($properties, $value,
-            // $name, $qualifiedName, $items, …), not fragment roots. `globals.fragment.$properties` is
-            // in fact the pattern fragment-globals-scope PRESCRIBES over globals.form.$properties — so
-            // counting it as a second "root" would flag the recommended fix as a foreign reach.
-            if (name.startsWith('$')) return;
+            // Runtime ACCESSORS on the fragment scope — both `$`-prefixed ($properties, $value, $data, …)
+            // AND their bare equivalents (data, properties, items, parent, …; af-core modelAccessorProps)
+            // are reads on the node, NOT fragment roots. `globals.fragment.$properties` is in fact the
+            // pattern fragment-globals-scope PRESCRIBES over globals.form.$properties, and bare
+            // `globals.fragment.data` resolves identically — counting either as a second "root" would
+            // flag correct code as a foreign reach.
+            if (isAccessorSegment(name)) return;
             const cur = roots.get(name) || { count: 0, firstLine: m.loc?.start.line };
             cur.count += 1;
             roots.set(name, cur);
@@ -203977,6 +204125,7 @@ class ForeignFragmentRootAnalyzer {
       // root-relative (its first segment IS a root), check that; else the first segment is the root.
       const top = nodes[0];
       if (roots.has(top)) continue; // own root → path-validator owns any deeper breakage, not us
+      if (isAccessorSegment(top)) continue; // runtime accessor on the scope (data/properties/…), not a foreign root
       // Not a known root — foreign reach. (A single bare segment that isn't a root is still foreign.)
       const key = `${jsFile.filename}|${line}|${nodes.join('.')}`;
       if (seen.has(key)) continue; seen.add(key);
@@ -212308,16 +212457,31 @@ async function loadFlatConfigWithPath(cwd, explicitPath) {
 /**
  * Extract the `formJsonRoot` a config sets for the Group-B rules (fragment-path-validator /
  * orphan-fragment-handler), so the bot can load the form/fragment JSON from the SAME root the ESLint
- * rules use. Scans every block's rule options; returns the first non-empty value, or null.
+ * rules use.
+ *
+ * Two config shapes are accepted. Precedence MUST match the ESLint plugin's loader
+ * (`eslint-plugin/index.js` FORM_JSON_ROOT) so the bot and ESLint load JSON from the SAME root for a
+ * given config: a per-rule `{ formJsonRoot }` option (more specific) wins; the shared `settings` block
+ * (set ONCE instead of repeating the option on every Group-B rule) is the fallback:
+ *   1. `'aem-forms/fragment-path-validator': ['error', { formJsonRoot: 'local-form-json' }]`  ← per-rule (wins)
+ *   2. `{ settings: { 'aem-forms': { formJsonRoot: 'local-form-json' } } }`  ← shared fallback
+ * Returns the first non-empty per-rule option, else the shared settings value, else null.
  * @param {Array|null} configArray
  * @returns {string|null}
  */
 function formJsonRootFrom(configArray) {
-  for (const block of Array.isArray(configArray) ? configArray : []) {
+  const blocks = Array.isArray(configArray) ? configArray : [];
+  // (1) per-rule option — most specific, wins (mirrors the plugin, where a rule's own option overrides settings).
+  for (const block of blocks) {
     for (const val of Object.values(block?.rules || {})) {
       const opts = ruleOpts(val);
       if (opts && typeof opts.formJsonRoot === 'string' && opts.formJsonRoot) return opts.formJsonRoot;
     }
+  }
+  // (2) shared settings block — the single-source fallback.
+  for (const block of blocks) {
+    const shared = block?.settings?.['aem-forms']?.formJsonRoot;
+    if (typeof shared === 'string' && shared) return shared;
   }
   return null;
 }
