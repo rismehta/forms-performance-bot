@@ -127656,6 +127656,13 @@ module.exports = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:http2")
 
 /***/ }),
 
+/***/ 44708:
+/***/ ((module) => {
+
+module.exports = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:https");
+
+/***/ }),
+
 /***/ 77030:
 /***/ ((module) => {
 
@@ -135074,7 +135081,7 @@ function jsonFormula(
 
 /***/ }),
 
-/***/ 54030:
+/***/ 87057:
 /***/ ((__unused_webpack___webpack_module__, __webpack_exports__, __nccwpck_require__) => {
 
 
@@ -135178,8 +135185,8 @@ var ChromeReleaseChannel;
 var semver = __nccwpck_require__(62088);
 // EXTERNAL MODULE: external "node:http"
 var external_node_http_ = __nccwpck_require__(37067);
-;// CONCATENATED MODULE: external "node:https"
-const external_node_https_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:https");
+// EXTERNAL MODULE: external "node:https"
+var external_node_https_ = __nccwpck_require__(44708);
 // EXTERNAL MODULE: external "node:url"
 var external_node_url_ = __nccwpck_require__(73136);
 // EXTERNAL MODULE: ./node_modules/proxy-agent/dist/index.js
@@ -135233,7 +135240,7 @@ function httpRequest(url, method, response, keepAlive = true) {
         }
     };
     const request = options.protocol === 'https:'
-        ? external_node_https_namespaceObject.request(options, requestCallback)
+        ? external_node_https_.request(options, requestCallback)
         : external_node_http_.request(options, requestCallback);
     request.end();
     return request;
@@ -137841,7 +137848,7 @@ class CLI {
 /* harmony export */ __nccwpck_require__.d(__webpack_exports__, {
 /* harmony export */   convertPuppeteerChannelToBrowsersChannel: () => (/* binding */ convertPuppeteerChannelToBrowsersChannel)
 /* harmony export */ });
-/* harmony import */ var _puppeteer_browsers__WEBPACK_IMPORTED_MODULE_0__ = __nccwpck_require__(54030);
+/* harmony import */ var _puppeteer_browsers__WEBPACK_IMPORTED_MODULE_0__ = __nccwpck_require__(87057);
 /**
  * @license
  * Copyright 2020 Google Inc.
@@ -161704,7 +161711,7 @@ async function getConnectionTransport(options) {
         };
     }
     else if (options.channel && isNode) {
-        const { detectBrowserPlatform, resolveDefaultUserDataDir, Browser } = await Promise.resolve(/* import() */).then(__nccwpck_require__.bind(__nccwpck_require__, 54030));
+        const { detectBrowserPlatform, resolveDefaultUserDataDir, Browser } = await Promise.resolve(/* import() */).then(__nccwpck_require__.bind(__nccwpck_require__, 87057));
         const platform = detectBrowserPlatform();
         if (!platform) {
             throw new Error('Could not detect required browser platform');
@@ -161950,8 +161957,8 @@ var promises_ = __nccwpck_require__(51455);
 var external_node_os_ = __nccwpck_require__(48161);
 // EXTERNAL MODULE: external "node:path"
 var external_node_path_ = __nccwpck_require__(76760);
-// EXTERNAL MODULE: ./node_modules/@puppeteer/browsers/lib/esm/main.js + 18 modules
-var main = __nccwpck_require__(54030);
+// EXTERNAL MODULE: ./node_modules/@puppeteer/browsers/lib/esm/main.js + 17 modules
+var main = __nccwpck_require__(87057);
 // EXTERNAL MODULE: external "node:fs"
 var external_node_fs_ = __nccwpck_require__(73024);
 // EXTERNAL MODULE: ./node_modules/puppeteer-core/lib/esm/puppeteer/node/NodeWebSocketTransport.js + 1 modules

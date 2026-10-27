@@ -142,7 +142,7 @@ async function sendViaGmail(results, htmlReport, options, gmailUser, gmailPasswo
     
     // Use Gmail's REST API with OAuth-style authentication
     // This is simpler than implementing full SMTP protocol
-    const nodemailer = await __webpack_require__.e(/* import() */ 2).then(__webpack_require__.t.bind(__webpack_require__, 26002, 19)).catch(() => null);
+    const nodemailer = await __webpack_require__.e(/* import() */ 441).then(__webpack_require__.bind(__webpack_require__, 30441)).catch(() => null);
     
     if (!nodemailer) {
       _actions_core__WEBPACK_IMPORTED_MODULE_0__.warning('⚠️  Gmail SMTP requires nodemailer package');
@@ -218,7 +218,7 @@ async function sendViaSMTP(results, htmlReport, options, toEmail) {
   try {
     _actions_core__WEBPACK_IMPORTED_MODULE_0__.info(`📧 Sending email via SMTP (${host}:${port}) to ${toEmail}...`);
     
-    const nodemailer = await __webpack_require__.e(/* import() */ 2).then(__webpack_require__.t.bind(__webpack_require__, 26002, 19)).catch(() => null);
+    const nodemailer = await __webpack_require__.e(/* import() */ 441).then(__webpack_require__.bind(__webpack_require__, 30441)).catch(() => null);
     
     if (!nodemailer) {
       _actions_core__WEBPACK_IMPORTED_MODULE_0__.warning('⚠️  SMTP requires nodemailer package');
