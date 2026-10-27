@@ -181815,15 +181815,9 @@ async function fromURL(url, options = {}) {
     return promise;
 }
 //# sourceMappingURL=index.js.map
-;// CONCATENATED MODULE: ./src/extractors/json-extractor.js
-
-
+;// CONCATENATED MODULE: ./src/utils/form-model.js
 /**
- * Is `obj` an Adaptive Form model container? Keys on the AF SHAPE, never the filename — a form JSON on
- * disk (e.g. `local-form-json/foo.json`, a CRISPR-converted file, a `.model.json`) has the same shape
- * the URL path extracts: `fieldType === 'form'`, or a `:type` naming a `/formcontainer`.
- * @param {*} obj
- * @returns {boolean}
+ * Recognize an Adaptive Form container by its model shape, not its filename.
  */
 function isFormModel(obj) {
   return !!obj && typeof obj === 'object'
@@ -181832,11 +181826,7 @@ function isFormModel(obj) {
 }
 
 /**
- * Find the Adaptive Form container inside a parsed JSON — the node itself if it IS the form, else the
- * first `:items`/`items` descendant that is. Returns null when the JSON is not a form model at all
- * (so a package.json / config / fragment-piece JSON is correctly rejected).
- * @param {*} obj - parsed JSON
- * @returns {Object|null}
+ * Find the first form container in a parsed model's :items/items descendants.
  */
 function findFormModel(obj) {
   if (!obj || typeof obj !== 'object') return null;
@@ -181850,6 +181840,11 @@ function findFormModel(obj) {
   }
   return null;
 }
+
+;// CONCATENATED MODULE: ./src/extractors/json-extractor.js
+
+
+
 
 /**
  * Extracts JSON data from page HTML
@@ -182065,7 +182060,6 @@ class JSONExtractor {
     return null;
   }
 }
-
 
 ;// CONCATENATED MODULE: ./src/analyzers/url-analyzer.js
 
